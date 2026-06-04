@@ -1,0 +1,900 @@
+[
+  {
+    "id": "TC-C-001",
+    "req": "REQ-FUNC-CSTAGE-001",
+    "title": "process_turn_async returns immediately without blocking",
+    "preconditions": "CA engine initialized, Ollama LLM available",
+    "steps": [
+      "Start high-precision timer.",
+      "Call process_turn_async(user_msg='test user', assistant_msg='test assistant').",
+      "Record return time and returned turn_index.",
+      "Execute an immediate log statement after the call to verify main thread progress.",
+      "Assert that elapsed time from start to return is < 50ms.",
+      "Verify that a background thread was spawned by checking that a log entry containing 'C-stage async dispatched for turn' appears within 500ms."
+    ],
+    "expected": "Return time < 50ms. turn_index is an integer. Background thread starts (log present).",
+    "cleanup": "Call wait_for_pending(timeout=10) then reset engine.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-C-002",
+    "req": "REQ-FUNC-CSTAGE-002",
+    "title": "Incremental extraction with no new info yields 'no valid increment'",
+    "preconditions": "Previous L1 with specific content. Current L2 identical to previous L2.",
+    "steps": [
+      "Execute C-stage for turn N with text 'The sky is blue'.",
+      "Execute C-stage for turn N+1 with the same text.",
+      "Retrieve L1 JSON for turn N+1 from SQLite.",
+      "Check that core_change equals exactly '无有效增量'.",
+      "Check that all other fields (new_materials, objective_facts, consensus, todo) are either '无' or empty arrays."
+    ],
+    "expected": "core_change is '无有效增量'; other fields indicate no new content.",
+    "cleanup": "Delete session records for this test from DB.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-C-003",
+    "req": "REQ-FUNC-CSTAGE-003",
+    "title": "Complete OODA text parsed to valid JSON with five fields",
+    "preconditions": "Mock LLM to return a well-formed OODA text: '核心摘要：测试摘要\\n资源与观察：\\n- 资源1\\n事实与约束：\\n- 事实1\\n决策与结论：\\n- 决策1\\n后续行动：\\n- 行动1'",
+    "steps": [
+      "Feed the above OODA text to OODAParser.parse().",
+      "Verify the result is a dict with keys: core_change, new_materials, objective_facts, consensus, todo.",
+      "Verify core_change is '测试摘要'.",
+      "Verify each other key contains the corresponding list items."
+    ],
+    "expected": "All five keys present; non-empty sections contain lists of strings.",
+    "cleanup": "No external resources, no cleanup.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-C-004a",
+    "req": "REQ-FUNC-CSTAGE-004",
+    "title": "Semantic dedup removes item with cosine similarity > 0.88",
+    "preconditions": "Two vectorizable facts with cosine similarity 0.90 (precomputed). Threshold 0.88.",
+    "steps": [
+      "Insert fact A into previous L1.",
+      "Create current L1 with fact B (similarity 0.90).",
+      "Call _vector_dedup(current_l1, previous_l1).",
+      "Verify fact B is removed from current L1."
+    ],
+    "expected": "Duplicate fact removed.",
+    "cleanup": "No external resources, no cleanup.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-C-004b",
+    "req": "REQ-FUNC-CSTAGE-004",
+    "title": "Semantic dedup retains item at threshold 0.88",
+    "preconditions": "Two facts with cosine similarity exactly 0.88.",
+    "steps": [
+      "Prepare two facts with similarity 0.88.",
+      "Run dedup.",
+      "Verify both facts remain in current L1."
+    ],
+    "expected": "Both facts present.",
+    "cleanup": "No external resources, no cleanup.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-C-004c",
+    "req": "REQ-FUNC-CSTAGE-004",
+    "title": "Semantic dedup retains item with low similarity (0.50)",
+    "preconditions": "Two facts with similarity 0.50.",
+    "steps": [
+      "Run dedup with these facts.",
+      "Verify both items remain."
+    ],
+    "expected": "Both items retained.",
+    "cleanup": "No external resources, no cleanup.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-C-004d",
+    "req": "REQ-FUNC-CSTAGE-004",
+    "title": "Dedup threshold config change affects behavior",
+    "preconditions": "Set CA_OODA_DEDUP_THRESHOLD=0.85.",
+    "steps": [
+      "Create two facts with similarity 0.86.",
+      "Run dedup with new threshold.",
+      "Verify duplicate is removed.",
+      "Reset threshold to default."
+    ],
+    "expected": "Duplicate removed at 0.85.",
+    "cleanup": "Restore default CA_OODA_DEDUP_THRESHOLD=0.88.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-C-005",
+    "req": "REQ-FUNC-CSTAGE-005",
+    "title": "Robust JSON parsing success rate >= 95% on 100 malformed inputs",
+    "preconditions": "Prepare a JSON file with at least 100 malformed OODA JSON strings (missing braces, trailing commas, wrong keys, truncations).",
+    "steps": [
+      "For each input, call robust_json_parse and record success (returns dict) or failure.",
+      "Compute success rate = successful / total * 100.",
+      "Assert rate >= 95."
+    ],
+    "expected": "Success rate >= 95%.",
+    "cleanup": "No external resources, no cleanup.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-C-006",
+    "req": "REQ-FUNC-CSTAGE-006",
+    "title": "LLM connection refused leads to fallback summary",
+    "preconditions": "Stop Ollama LLM service.",
+    "steps": [
+      "Trigger C-stage for a turn.",
+      "Verify that an error log contains 'LLM call failed' or similar.",
+      "Query database for the turn: l0_text must be '无有效增量'.",
+      "Verify no exception propagates to the caller."
+    ],
+    "expected": "Fallback summary written, no crash.",
+    "cleanup": "Restart Ollama LLM, delete test session records.",
+    "priority": "High",
+    "type": "Exception"
+  },
+  {
+    "id": "TC-C-006a",
+    "req": "REQ-FUNC-CSTAGE-006",
+    "title": "LLM timeout triggers fallback after retries",
+    "preconditions": "Mock Ollama endpoint to delay response by 5 seconds. Set CA_LLM_TIMEOUT=2, CA_LLM_MAX_RETRIES=1.",
+    "steps": [
+      "Trigger C-stage.",
+      "Verify that the call times out after 2 seconds and retries once.",
+      "After retries, verify DB contains fallback summary.",
+      "Assert no unhandled exceptions."
+    ],
+    "expected": "Fallback summary present, no crash.",
+    "cleanup": "Restore original timeout/retry config, remove mock.",
+    "priority": "High",
+    "type": "Exception"
+  },
+  {
+    "id": "TC-C-007",
+    "req": "REQ-FUNC-CSTAGE-007",
+    "title": "Duplicate turn submission prevented",
+    "preconditions": "Engine running, no pending task for current turn.",
+    "steps": [
+      "Assign turn_index = engine._allocate_turn_index() for turn N.",
+      "Call process_turn_async for turn N twice in quick succession.",
+      "Compare returned turn_index values; they must be equal.",
+      "Check internal _pending_tasks dictionary: length must be 1 for this turn."
+    ],
+    "expected": "Only one task created, same turn_index returned.",
+    "cleanup": "Wait for pending tasks.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-C-008",
+    "req": "REQ-FUNC-CSTAGE-008",
+    "title": "Turn index recovery on restart",
+    "preconditions": "Database has max turn_index=5 for this session.",
+    "steps": [
+      "Instantiate a fresh ContextAssembler with the same session_id.",
+      "Check that the internal turn counter is 6 (max_turn_index + 1).",
+      "Process a turn; verify the DB record has turn_index=6."
+    ],
+    "expected": "Next assigned turn_index is 6.",
+    "cleanup": "Delete test session records.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-C-009",
+    "req": "Interface: on_session_end",
+    "title": "on_session_end waits for pending async tasks",
+    "preconditions": "Start a C-stage task that takes ~3 seconds.",
+    "steps": [
+      "Trigger process_turn_async.",
+      "Immediately call on_session_end().",
+      "Measure time until on_session_end returns.",
+      "Verify that wait time >= task duration (or timeout).",
+      "After return, confirm DB contains the turn record."
+    ],
+    "expected": "Task completes before or during on_session_end; DB record present.",
+    "cleanup": "None.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-A-001",
+    "req": "REQ-FUNC-ASTAGE-001",
+    "title": "A-stage p95 latency under 200ms for 50-turn history",
+    "preconditions": "Populate DB with 50 turns. Embedding backend warm (fallback acceptable).",
+    "steps": [
+      "Execute assemble() 100 times in a loop.",
+      "Record latency for each call (exclude first warm-up call).",
+      "Compute p95 latency.",
+      "Assert p95 < 200ms."
+    ],
+    "expected": "p95 < 200ms.",
+    "cleanup": "None.",
+    "priority": "High",
+    "type": "Performance"
+  },
+  {
+    "id": "TC-A-002",
+    "req": "REQ-FUNC-ASTAGE-002",
+    "title": "Layered assembly Head/Middle/Tail",
+    "preconditions": "History of 5 turns. HEAD_AUTO_L1_COUNT=3, PROTECT_TAIL_TOKENS configured such that last turn is tail.",
+    "steps": [
+      "Run assemble().",
+      "Inspect returned messages: turns 0,1,2 replaced by L1 summaries, turn 3 by L0, turn 4 preserved as original.",
+      "Verify that each replaced message starts with '[~/turn_index]'."
+    ],
+    "expected": "Layering matches configuration.",
+    "cleanup": "None.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-A-003",
+    "req": "REQ-FUNC-ASTAGE-003",
+    "title": "Dual retrieval returns BM25 and vector hits",
+    "preconditions": "Cache contains turns with keywords and semantic similarity to query.",
+    "steps": [
+      "Call Retriever.retrieve('test query').",
+      "Check the result list items have a 'source' field equal to 'bm25' or 'vector'.",
+      "Assert that both 'bm25' and 'vector' appear in the result sources."
+    ],
+    "expected": "Both BM25 and vector hits present.",
+    "cleanup": "None.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-A-004",
+    "req": "REQ-FUNC-ASTAGE-004",
+    "title": "RRF fusion stable and deduplicated",
+    "preconditions": "Some turns appear in both BM25 and vector results.",
+    "steps": [
+      "Perform retrieval 10 times with identical query.",
+      "For each call, record the list of turn_index values in order.",
+      "Verify all 10 lists are exactly equal.",
+      "Verify no duplicate turn_index in any list."
+    ],
+    "expected": "Identical order, no duplicates.",
+    "cleanup": "None.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-A-005",
+    "req": "REQ-FUNC-ASTAGE-005",
+    "title": "Budget gate respects token limit",
+    "preconditions": "Set available token budget to 50.",
+    "steps": [
+      "Call assemble with that budget.",
+      "Identify which turns were upgraded from L0 to L1.",
+      "Sum the token counts of the upgraded L1 texts.",
+      "Assert total tokens <= 50."
+    ],
+    "expected": "Upgraded tokens within budget.",
+    "cleanup": "Restore default budget.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-A-006",
+    "req": "REQ-FUNC-ASTAGE-006",
+    "title": "Replaced messages contain [~/N] marker",
+    "preconditions": "Multiple turns in history.",
+    "steps": [
+      "Run assemble.",
+      "For every message that is not an original user/assistant (i.e., a summary), extract the prefix.",
+      "Verify prefix matches pattern '[~/\\d+]' and the number equals the turn_index."
+    ],
+    "expected": "All summaries have correct [~/N].",
+    "cleanup": "None.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-A-007",
+    "req": "REQ-FUNC-ASTAGE-007",
+    "title": "Empty cache returns original messages",
+    "preconditions": "SQLite DB empty.",
+    "steps": [
+      "Prepare a list of original messages (e.g., 3 messages).",
+      "Call assemble().",
+      "Verify returned list is identical (by content and order) to input.",
+      "Check log for 'cache empty, returning original'."
+    ],
+    "expected": "Original messages returned unchanged.",
+    "cleanup": "None.",
+    "priority": "High",
+    "type": "Exception"
+  },
+  {
+    "id": "TC-A-008",
+    "req": "REQ-FUNC-ASTAGE-008",
+    "title": "Hard truncation when tokens exceed 95% window",
+    "preconditions": "Cache empty. Prepare messages with token estimate > 95% of context window (e.g., 95%+1).",
+    "steps": [
+      "Call assemble with these messages.",
+      "Verify that a log entry 'hard truncation applied' or similar appears.",
+      "Check that returned message list has fewer tokens, and total tokens <= window limit."
+    ],
+    "expected": "Truncation triggered, no overflow.",
+    "cleanup": "None.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-A-008a",
+    "req": "REQ-FUNC-ASTAGE-008",
+    "title": "No truncation when tokens exactly at 95%",
+    "preconditions": "Cache empty. Messages token count equals exactly 95% of window.",
+    "steps": [
+      "Call assemble.",
+      "Assert that the returned messages are identical to input (no truncation).",
+      "Verify no truncation log message."
+    ],
+    "expected": "Original messages returned, no truncation.",
+    "cleanup": "None.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-A-009",
+    "req": "REQ-FUNC-ASTAGE-009",
+    "title": "Tool call and tool result messages preserved untouched",
+    "preconditions": "Message list includes an assistant message with 'tool_calls' field and a subsequent role='tool' message.",
+    "steps": [
+      "Build message list with those tool messages.",
+      "Run assemble.",
+      "Verify the assistant message still has the same tool_calls structure and content.",
+      "Verify the tool message content and role unchanged."
+    ],
+    "expected": "Both messages unchanged.",
+    "cleanup": "None.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-S-001",
+    "req": "REQ-FUNC-STORE-001",
+    "title": "Persistence of L0/L1/embeddings across restarts",
+    "preconditions": "Write a complete turn with non-empty l0_text, l1_text, l0_embedding, l1_embedding.",
+    "steps": [
+      "Write the turn.",
+      "Close the store and create a new SQLiteStore instance pointing to the same DB file.",
+      "Read the same session and turn_index.",
+      "Verify l0_text, l1_text match exactly; embedding blobs deserialize to the original float lists."
+    ],
+    "expected": "All fields identical.",
+    "cleanup": "Delete session records.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-S-002",
+    "req": "REQ-FUNC-STORE-002",
+    "title": "Concurrent writes to different turns no corruption",
+    "preconditions": "10 threads, each assigned a unique turn_index for the same session.",
+    "steps": [
+      "Spawn 10 threads, each calling write_turn with its own turn.",
+      "Wait for all to complete.",
+      "Read all records for the session; verify count is 10.",
+      "Check that each turn's data matches what was written."
+    ],
+    "expected": "10 records, no corruption.",
+    "cleanup": "Delete session records.",
+    "priority": "Medium",
+    "type": "Concurrency"
+  },
+  {
+    "id": "TC-S-002a",
+    "req": "REQ-FUNC-STORE-002",
+    "title": "Concurrent writes to same turn_index handled safely",
+    "preconditions": "5 threads trying to write the same (session_id, turn_index).",
+    "steps": [
+      "Start 5 threads concurrently writing the same turn.",
+      "Wait for all to finish.",
+      "Query DB: count records with that turn_index; must be exactly 1.",
+      "Verify that at least 4 threads experienced an integrity error or returned False (based on write_turn return).",
+      "Ensure no deadlock (all threads finish within timeout)."
+    ],
+    "expected": "Exactly one record inserted, no deadlock.",
+    "cleanup": "Delete session records.",
+    "priority": "Medium",
+    "type": "Concurrency"
+  },
+  {
+    "id": "TC-S-003",
+    "req": "REQ-FUNC-STORE-003",
+    "title": "WAL file size stays under 10MB",
+    "preconditions": "Fresh DB in WAL mode.",
+    "steps": [
+      "Perform 1000 write_turn calls with varying data.",
+      "Invoke manual checkpoint if daemon not immediate.",
+      "Check WAL file size (os.path.getsize('ca_store.db-wal')).",
+      "Assert size < 10 * 1024 * 1024."
+    ],
+    "expected": "WAL size < 10MB.",
+    "cleanup": "Delete test DB.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-S-004",
+    "req": "REQ-FUNC-STORE-004",
+    "title": "Write retry on database busy",
+    "preconditions": "Mock sqlite3.execute to raise sqlite3.OperationalError('database is locked') twice, then succeed.",
+    "steps": [
+      "Attempt write_turn.",
+      "Verify that exactly 3 attempts were made (1 initial + 2 retries).",
+      "Verify the write ultimately succeeds.",
+      "Clean mock."
+    ],
+    "expected": "Write succeeds after retries.",
+    "cleanup": "Remove mock.",
+    "priority": "Medium",
+    "type": "Exception"
+  },
+  {
+    "id": "TC-S-005",
+    "req": "REQ-FUNC-STORE-005",
+    "title": "max_turn_index returns -1 for empty, correct max otherwise",
+    "preconditions": "Empty session.",
+    "steps": [
+      "Call max_turn_index for empty session: expect -1.",
+      "Insert turns with turn_index 0, 2, 5.",
+      "Call max_turn_index again: expect 5."
+    ],
+    "expected": "-1 then 5.",
+    "cleanup": "Delete session records.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-S-006",
+    "req": "REQ-NFR-RELI-002",
+    "title": "Disk full write failure logs error but continues",
+    "preconditions": "Mock store's write_turn to raise an OSError('No space left on device').",
+    "steps": [
+      "Call process_turn_async which triggers a write.",
+      "Verify that ERROR log contains 'write_turn failed' or similar.",
+      "Assert that the process does not terminate and the C-stage fallback summary is attempted (or logged)."
+    ],
+    "expected": "Error logged, process continues.",
+    "cleanup": "Remove mock.",
+    "priority": "High",
+    "type": "Exception"
+  },
+  {
+    "id": "TC-E-001",
+    "req": "REQ-FUNC-EMBED-001",
+    "title": "Multiple embedding backends return non-empty vectors",
+    "preconditions": "Configure backend to 'ollama' (service running), then 'fallback'.",
+    "steps": [
+      "For each backend, call embed('test').",
+      "Verify result is a list of floats with length > 0."
+    ],
+    "expected": "Non-empty list for each.",
+    "cleanup": "Switch back to default backend.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-E-002",
+    "req": "REQ-FUNC-EMBED-002",
+    "title": "LRU cache hit rate >80% for repeated text",
+    "preconditions": "Cache empty, CA_EMBED_CACHE_MAX_SIZE=256.",
+    "steps": [
+      "Call embed('constant string') 100 times in a loop.",
+      "Get stats via get_stats().",
+      "Compute hit_rate = cache_hits / (cache_hits + cache_misses).",
+      "Assert hit_rate > 0.8."
+    ],
+    "expected": "hit_rate > 0.8.",
+    "cleanup": "Clear cache (embedding_client._cache.clear()).",
+    "priority": "Medium",
+    "type": "Performance"
+  },
+  {
+    "id": "TC-E-003",
+    "req": "REQ-FUNC-EMBED-003",
+    "title": "Parallel encoding ratio <= 0.6",
+    "preconditions": "Measure serial baseline first using embed_batch.",
+    "steps": [
+      "Time embed_batch([text1, text2]) serially (sequential calls).",
+      "Time embed_batch_parallel([text1, text2]).",
+      "Compute ratio = parallel_time / serial_time.",
+      "If ratio <= 0.5: pass; if 0.5 < ratio <= 0.6: warn (mark as 'optimization needed'); if > 0.6: fail."
+    ],
+    "expected": "ratio <= 0.6.",
+    "cleanup": "None.",
+    "priority": "Medium",
+    "type": "Performance"
+  },
+  {
+    "id": "TC-E-004",
+    "req": "REQ-FUNC-EMBED-004",
+    "title": "Fallback embedding when Ollama unavailable",
+    "preconditions": "Stop Ollama embedding service.",
+    "steps": [
+      "Call embed('test').",
+      "Verify no exception is raised.",
+      "Check that returned vector length matches expected dimension (1024)."
+    ],
+    "expected": "Vector returned, no crash.",
+    "cleanup": "Restart Ollama.",
+    "priority": "High",
+    "type": "Exception"
+  },
+  {
+    "id": "TC-E-005",
+    "req": "REQ-FUNC-EMBED-005",
+    "title": "Fallback vector dimension matches real embedding",
+    "preconditions": "Ollama embedding service running.",
+    "steps": [
+      "Call embed with Ollama running; record vector length L.",
+      "Stop Ollama embedding service.",
+      "Call embed again; verify fallback vector length equals L."
+    ],
+    "expected": "Dimensions match.",
+    "cleanup": "Restart Ollama.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-CF-001",
+    "req": "REQ-FUNC-CONFIG-001",
+    "title": "Environment variable overrides default config",
+    "preconditions": "Set CA_PROTECT_TAIL_TOKENS=100.",
+    "steps": [
+      "Instantiate Config.",
+      "Read Config.PROTECT_TAIL_TOKENS.",
+      "Assert value is 100."
+    ],
+    "expected": "Value is 100.",
+    "cleanup": "os.environ.pop('CA_PROTECT_TAIL_TOKENS', None).",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-CF-002",
+    "req": "REQ-FUNC-CONFIG-002",
+    "title": "Config validation raises ValueError for illegal value",
+    "preconditions": "Set CA_LLM_TIMEOUT=-1.",
+    "steps": [
+      "Call Config.validate().",
+      "Expect ValueError to be raised."
+    ],
+    "expected": "ValueError raised.",
+    "cleanup": "os.environ.pop('CA_LLM_TIMEOUT', None).",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-CF-003",
+    "req": "REQ-FUNC-CONFIG-003",
+    "title": "Config.reload picks up new env var",
+    "preconditions": "Initial CA_PROTECT_TAIL_TOKENS=20000.",
+    "steps": [
+      "os.environ['CA_PROTECT_TAIL_TOKENS'] = '100'.",
+      "Call Config.reload().",
+      "Assert Config.PROTECT_TAIL_TOKENS == 100."
+    ],
+    "expected": "Value updated to 100.",
+    "cleanup": "Reset to 20000 and reload.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-CF-004",
+    "req": "REQ-FUNC-CONFIG-004",
+    "title": "CA_DEBUG switch toggles debug logs",
+    "preconditions": "Set CA_DEBUG=0.",
+    "steps": [
+      "Perform a simple A-stage operation; capture logs at DEBUG level.",
+      "Assert no DEBUG logs are emitted.",
+      "Set CA_DEBUG=1, reload config.",
+      "Repeat the operation; assert DEBUG logs are present."
+    ],
+    "expected": "Debug logs only when CA_DEBUG=1.",
+    "cleanup": "Set CA_DEBUG=0, reload.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-M-001",
+    "req": "REQ-FUNC-MONITOR-001",
+    "title": "Health check_all returns store and embedding status",
+    "preconditions": "Healthy system.",
+    "steps": [
+      "Call HealthCheck.check_all().",
+      "Parse returned JSON.",
+      "Assert keys 'store' and 'embedding' exist.",
+      "Assert 'store.status' is 'healthy' and 'embedding.status' is 'healthy'."
+    ],
+    "expected": "JSON with healthy components.",
+    "cleanup": "None.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-M-002",
+    "req": "REQ-FUNC-MONITOR-002",
+    "title": "Prometheus metrics endpoint returns text format",
+    "preconditions": "System running.",
+    "steps": [
+      "Call get_prometheus_metrics().",
+      "Assert response contains 'ca_store_healthy', 'ca_embedding_cache_hit_rate'."
+    ],
+    "expected": "Prometheus format text with expected metrics.",
+    "cleanup": "None.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-M-003",
+    "req": "REQ-FUNC-MONITOR-003",
+    "title": "CompressStats log contains phase timings and upgrade count",
+    "preconditions": "Run an A-stage where at least one L0->L1 upgrade occurs.",
+    "steps": [
+      "After assemble(), retrieve the CompressStats instance.",
+      "Call stats.finalize().",
+      "Check that phase_timing dict has keys for 'retrieval', 'budget', etc.",
+      "Assert upgrade_count >= 1.",
+      "Check __str__ output contains phase durations."
+    ],
+    "expected": "Stats reflect execution.",
+    "cleanup": "None.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-CB-001",
+    "req": "REQ-FUNC-CIRCUIT-001",
+    "title": "Failure count increment persists to state file",
+    "preconditions": "State file absent or failures=0.",
+    "steps": [
+      "Simulate one initialization failure (call _record_failure).",
+      "Read state file; assert failures=1.",
+      "Simulate second failure; assert failures=2."
+    ],
+    "expected": "failures incremented and persisted.",
+    "cleanup": "Delete state file (os.remove('~/.hermes/.ca_assembler_state.json')).",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-CB-002",
+    "req": "REQ-FUNC-CIRCUIT-002",
+    "title": "Breaker opens after 3 consecutive failures",
+    "preconditions": "Set CA_CIRCUIT_COOLDOWN=10. State shows failures=2.",
+    "steps": [
+      "Cause third failure.",
+      "Call is_available(); assert returns False.",
+      "Verify state file retry_after is set to a future timestamp."
+    ],
+    "expected": "is_available returns False.",
+    "cleanup": "Delete state file, reset cooldown env.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-CB-003",
+    "req": "REQ-FUNC-CIRCUIT-003",
+    "title": "Breaker auto-resets after cooldown",
+    "preconditions": "Breaker open, retry_after set to now - 1 second. CA_CIRCUIT_COOLDOWN=10 used for testing.",
+    "steps": [
+      "Sleep until retry_after has passed (e.g., sleep(11)).",
+      "Call is_available(); assert returns True."
+    ],
+    "expected": "is_available returns True.",
+    "cleanup": "Delete state file, reset cooldown.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-CB-004",
+    "req": "REQ-FUNC-CIRCUIT-004",
+    "title": "Successful init resets failure count to zero",
+    "preconditions": "State file shows failures=2.",
+    "steps": [
+      "Simulate successful engine init (call _record_success).",
+      "Read state file; assert failures=0."
+    ],
+    "expected": "failures reset to 0.",
+    "cleanup": "Delete state file.",
+    "priority": "Medium",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-INTF-001",
+    "req": "Interface: should_compress",
+    "title": "should_compress always returns False",
+    "preconditions": "Plugin initialized.",
+    "steps": [
+      "Call should_compress() under various states (session active, idle).",
+      "Assert every call returns False."
+    ],
+    "expected": "Always False.",
+    "cleanup": "None.",
+    "priority": "High",
+    "type": "Functional"
+  },
+  {
+    "id": "TC-ST-001",
+    "req": "Full system",
+    "title": "Normal multi-turn dialogue end-to-end",
+    "preconditions": "All services running (Ollama LLM + Embed).",
+    "steps": [
+      "Start session, send user message 1, receive assistant reply 1.",
+      "Send user message 2 that explicitly references information from message 1.",
+      "Wait for assistant reply 2.",
+      "Verify database contains turn_index 0 and 1 with non-empty l1_text.",
+      "Verify that the messages sent for reply 2 contain at least one summary with '[~/0]' or '[~/1]'.",
+      "Optional: check that the assistant reply 2 contains relevant information from turn 1 (content-based assertion)."
+    ],
+    "expected": "DB records present, markers correct, reply 2 contextually relevant.",
+    "cleanup": "Delete session records, reset engine.",
+    "priority": "High",
+    "type": "System"
+  },
+  {
+    "id": "TC-ST-002",
+    "req": "REQ-FUNC-CSTAGE-006",
+    "title": "LLM unavailable degradation and recovery",
+    "preconditions": "All services running.",
+    "steps": [
+      "Stop Ollama LLM service.",
+      "Send user message; basic reply should still be returned (Hermes handles).",
+      "Check C-stage log for 'LLM call failed', and verify DB has fallback summary for that turn.",
+      "Restart Ollama LLM.",
+      "Send another message; verify that the next C-stage produces a normal summary (no fallback)."
+    ],
+    "expected": "Fallback written, no crash, recovery successful.",
+    "cleanup": "Delete test records, ensure Ollama running.",
+    "priority": "High",
+    "type": "System"
+  },
+  {
+    "id": "TC-ST-003",
+    "req": "REQ-FUNC-CIRCUIT-001~004",
+    "title": "Circuit breaker triggers and recovers",
+    "preconditions": "Set CA_CIRCUIT_COOLDOWN=10. Simulate persistent init failure (e.g., invalid DB path).",
+    "steps": [
+      "Attempt to start plugin three times; each must increment failures in state file.",
+      "Fourth attempt: is_available() returns False immediately.",
+      "Wait 11 seconds.",
+      "is_available() returns True.",
+      "Fix the failure cause (e.g., correct DB path), call engine creation successfully.",
+      "Verify state file failures reset to 0."
+    ],
+    "expected": "Breaker behavior correct, state file reflects reset.",
+    "cleanup": "Delete state file, restore valid config.",
+    "priority": "High",
+    "type": "System"
+  },
+  {
+    "id": "TC-CONC-001",
+    "req": "REQ-FUNC-CSTAGE-001, REQ-FUNC-ASTAGE-001",
+    "title": "A-stage and C-stage run concurrently without interference",
+    "preconditions": "System running, a slow C-stage is triggered.",
+    "steps": [
+      "Start a C-stage task that takes 5 seconds (mock LLM delay).",
+      "Immediately call assemble() on the same session.",
+      "Verify that assemble returns within 200ms using available cache (not waiting for C-stage).",
+      "Verify no deadlock or crash."
+    ],
+    "expected": "A-stage completes quickly, no concurrency issues.",
+    "cleanup": "Wait for pending tasks.",
+    "priority": "High",
+    "type": "Concurrency"
+  },
+  {
+    "id": "TC-CONC-002",
+    "req": "REQ-FUNC-STORE-002",
+    "title": "Multiple sessions concurrent operations isolation",
+    "preconditions": "Two different session_ids.",
+    "steps": [
+      "Launch 5 threads writing turns to session A, 5 threads writing to session B concurrently.",
+      "Verify that all writes succeed, and max_turn_index for each session is correct (4 each if 5 turns).",
+      "Verify no cross-session data leakage."
+    ],
+    "expected": "Data isolated per session.",
+    "cleanup": "Delete both sessions.",
+    "priority": "Medium",
+    "type": "Concurrency"
+  },
+  {
+    "id": "TC-PERF-001",
+    "req": "REQ-NFR-PERF-001",
+    "title": "C-stage background task completes within reasonable time",
+    "preconditions": "Normal Ollama LLM performance.",
+    "steps": [
+      "Trigger C-stage and record start time.",
+      "Wait for task to complete (via wait_for_pending).",
+      "Record total duration.",
+      "Assert duration < 60 seconds (typical for ~44s expected)."
+    ],
+    "expected": "C-stage completes within 60s.",
+    "cleanup": "None.",
+    "priority": "Low",
+    "type": "Performance"
+  },
+  {
+    "id": "TC-MAINT-001",
+    "req": "REQ-NFR-MAINT-002",
+    "title": "Public function docstring coverage 100%",
+    "preconditions": "Source code accessible.",
+    "steps": [
+      "Run pydocstyle on the ca/ module and plugins directory.",
+      "Parse output; assert zero missing docstring errors.",
+      "Randomly sample 10% of public functions and manually inspect that docstrings describe parameters, returns, and exceptions."
+    ],
+    "expected": "No pydocstyle errors, sampled docstrings complete.",
+    "cleanup": "None.",
+    "priority": "Medium",
+    "type": "Maintainability"
+  },
+  {
+    "id": "TC-QUAL-001",
+    "req": "Business: summary factual consistency",
+    "title": "Factual consistency: BERTScore and ROUGE-L of L1 summaries (Chinese)",
+    "preconditions": "50 pre-prepared dialogue samples and manually annotated reference summaries (tests/data/reference_summaries/v1.0/). CA configured.",
+    "steps": [
+      "Load 50 dialogue samples and corresponding reference summaries.",
+      "For each dialogue, run CA to produce L1 summary (core_change + facts).",
+      "Compute BERTScore F1 (model: hfl/chinese-roberta-wwm-ext) between generated summary and reference.",
+      "Compute ROUGE-L F1.",
+      "Calculate average over 50 samples.",
+      "Assert: average BERTScore F1 >= 0.70.",
+      "Assert: average ROUGE-L F1 >= 0.40."
+    ],
+    "expected": "Average BERTScore F1 >= 0.70, average ROUGE-L F1 >= 0.40.",
+    "cleanup": "None.",
+    "priority": "High",
+    "type": "Quality"
+  },
+  {
+    "id": "TC-QUAL-002",
+    "req": "Business: compression ratio vs informativeness",
+    "title": "Compression ratio with information retention (Chinese)",
+    "preconditions": "Same dataset as TC-QUAL-001. jieba installed for Chinese word segmentation.",
+    "steps": [
+      "For each sample, count Chinese characters of original dialogue and L1 summary using jieba tokenization.",
+      "Compute compression ratio = summary_chars / dialogue_chars.",
+      "Stratify: short (<1000 chars), medium (1000-2000), long (>2000).",
+      "Calculate average overall and per stratum.",
+      "Assert: overall average compression ratio <= 0.3.",
+      "Assert: per-stratum compression ratio <= 0.4.",
+      "Cross-check: corresponding BERTScore F1 from TC-QUAL-001 >= 0.70 for each sample."
+    ],
+    "expected": "Overall compression ratio <= 0.3, per-stratum <= 0.4, BERTScore F1 >= 0.70.",
+    "cleanup": "None.",
+    "priority": "High",
+    "type": "Quality"
+  },
+  {
+    "id": "TC-QUAL-003",
+    "req": "Business: semantic fidelity via embedding cosine",
+    "title": "Semantic fidelity: cosine similarity between dialogue and summary embeddings",
+    "preconditions": "Qwen3-Embedding-0.6B (v1.0) available. Same dataset.",
+    "steps": [
+      "For each original dialogue, concatenate all user+assistant turns in chronological order, compute embedding via Qwen3-Embedding-0.6B.",
+      "Compute embedding of the generated L1 summary.",
+      "Calculate cosine similarity between the two vectors.",
+      "Average over 50 samples.",
+      "Assert: average cosine similarity >= 0.80."
+    ],
+    "expected": "Average cosine similarity >= 0.80.",
+    "cleanup": "None.",
+    "priority": "High",
+    "type": "Quality"
+  }
+]

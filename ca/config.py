@@ -1,0 +1,213 @@
+"""
+ca/config.py — 集中配置管理 (v4.4.0 alpha)
+
+功能：
+- 所有可调参数通过环境变量暴露，提供默认值。
+- 支持启动校验（validate）和运行时热重载（reload）。
+- 定义 _assemble_status 常量。
+- 去重开关采用 Fail‑Safe 策略：非法值强制回退为 True（启用）。
+- 新增工具轮与 L‑stage 相关配置项、SHUTDOWN_TIMEOUT、BM25_HIT_THRESHOLD。
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import ClassVar, Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+# _assemble_status 常量
+ASSEMBLE_OK = 0
+ASSEMBLE_PENDING_BACKFILL = 1
+ASSEMBLE_PERMANENT_FAILURE = 2
+
+
+class Config:
+    DEBUG_MODE: ClassVar[bool] = os.getenv("CA_DEBUG", "0") == "1"
+
+    DB_MAX_RETRY: ClassVar[int] = int(os.getenv("CA_DB_MAX_RETRY", "3"))
+    DB_BUSY_TIMEOUT_MS: ClassVar[int] = int(os.getenv("CA_DB_BUSY_TIMEOUT", "3000"))
+    DB_IDLE_TIMEOUT_SECONDS: ClassVar[int] = int(os.getenv("CA_DB_IDLE_TIMEOUT", "300"))
+    DB_CHECKPOINT_INTERVAL: ClassVar[int] = int(os.getenv("CA_DB_CHECKPOINT_INTERVAL", "300"))
+
+    CACHE_MAX_SESSIONS: ClassVar[int] = int(os.getenv("CA_CACHE_MAX_SESSIONS", "50"))
+    SESSION_TTL: ClassVar[int] = int(os.getenv("CA_SESSION_TTL", "1800"))
+    CACHE_MAX_SIZE: ClassVar[int] = int(os.getenv("CA_CACHE_MAX_SIZE", "256"))
+
+    EMBED_BACKEND: ClassVar[str] = os.getenv("CA_EMBED_BACKEND", "ollama")
+    EMBED_MODEL: ClassVar[str] = os.getenv("CA_EMBED_MODEL", "dengcao/Qwen3-Embedding-0.6B:Q8_0")
+    EMBED_ENDPOINT: ClassVar[str] = os.getenv("CA_EMBED_ENDPOINT", "http://127.0.0.1:11435")
+    EMBED_TIMEOUT: ClassVar[float] = float(os.getenv("CA_EMBED_TIMEOUT", "10"))
+    EMBED_MAX_RETRIES: ClassVar[int] = int(os.getenv("CA_EMBED_MAX_RETRIES", "2"))
+    EMBED_BATCH_PARALLEL_TIMEOUT: ClassVar[float] = float(os.getenv("CA_EMBED_BATCH_PARALLEL_TIMEOUT", "15"))
+    EMBED_CACHE_MAX_SIZE: ClassVar[int] = int(os.getenv("CA_EMBED_CACHE_MAX_SIZE", "256"))
+
+    OODA_EMBED_CACHE_MAX_SIZE: ClassVar[int] = int(os.getenv("CA_OODA_EMBED_CACHE_MAX_SIZE", "128"))
+    OODA_DEDUP_THRESHOLD: ClassVar[float] = float(os.getenv("CA_OODA_DEDUP_THRESHOLD", "0.88"))
+    RETRIEVAL_RRF_K: ClassVar[int] = int(os.getenv("CA_RETRIEVAL_RRF_K", "60"))
+
+    LLM_MODEL: ClassVar[str] = os.getenv("CA_LLM_MODEL", "qwen3.5:hermes-32k")
+    LLM_ENDPOINT: ClassVar[str] = os.getenv("CA_LLM_ENDPOINT", "http://localhost:11435")
+    LLM_TIMEOUT: ClassVar[float] = float(os.getenv("CA_LLM_TIMEOUT", "120"))
+    LLM_MAX_RETRIES: ClassVar[int] = int(os.getenv("CA_LLM_MAX_RETRIES", "2"))
+    LLM_NUM_PREDICT: ClassVar[int] = int(os.getenv("CA_LLM_NUM_PREDICT", "24768"))
+    LLM_THINK: ClassVar[Optional[bool]] = None
+
+    @classmethod
+    def _parse_llm_think(cls) -> Optional[bool]:
+        raw = os.getenv("CA_LLM_THINK", "").strip().lower()
+        if not raw:
+            return None
+        if raw in ("1", "true", "yes"):
+            return True
+        if raw in ("0", "false", "no"):
+            return False
+        logger.warning("Invalid CA_LLM_THINK: '%s', ignoring", raw)
+        return None
+
+    PROTECT_TAIL_TOKENS: ClassVar[int] = int(os.getenv("CA_PROTECT_TAIL_TOKENS", "20000"))
+    HEAD_AUTO_L1_COUNT: ClassVar[int] = int(os.getenv("CA_HEAD_AUTO_L1_COUNT", "3"))
+    CONTEXT_LENGTH: ClassVar[int] = int(os.getenv("CA_CONTEXT_LENGTH", "32000"))
+
+    # 已知模型上下文窗口（Hermes hook 不传 context_length，需自行查表）
+    _MODEL_CONTEXT_WINDOW: ClassVar[Dict[str, int]] = {
+        "deepseek-v4-flash": 91500,   # ~91.5K
+        "deepseek-v4-pro":   65536,   # ~64K
+        "deepseek-v4":       65536,
+        "deepseek-v3":       65536,
+        "claude-3.5-sonnet": 200000,
+        "claude-3-opus":     200000,
+        "gpt-4o":            128000,
+        "gpt-4-turbo":       128000,
+    }
+
+    @classmethod
+    def context_length_for_model(cls, model_name: str) -> int:
+        """根据模型名查上下文窗口，查不到用 CONTEXT_LENGTH 默认值。"""
+        if not model_name:
+            return cls.CONTEXT_LENGTH
+        # 精确匹配
+        if model_name in cls._MODEL_CONTEXT_WINDOW:
+            return cls._MODEL_CONTEXT_WINDOW[model_name]
+        # 前缀/子串匹配
+        for key, val in cls._MODEL_CONTEXT_WINDOW.items():
+            if key in model_name or model_name in key:
+                return val
+        logger.info("Unknown model '%s', using default CONTEXT_LENGTH=%d", model_name, cls.CONTEXT_LENGTH)
+        return cls.CONTEXT_LENGTH
+
+    TOOL_PRE_UPGRADE_COUNT: ClassVar[int] = int(os.getenv("CA_TOOL_PRE_UPGRADE_COUNT", "3"))
+    TOOL_MAX_UPGRADE_K: ClassVar[int] = int(os.getenv("CA_TOOL_MAX_UPGRADE_K", "3"))
+    TOOL_PRE_UPGRADE_WINDOW: ClassVar[int] = int(os.getenv("CA_TOOL_PRE_UPGRADE_WINDOW", "50"))
+    BACKFILL_DIALOGUE_RATE: ClassVar[int] = int(os.getenv("CA_BACKFILL_DIALOGUE_RATE", "2"))
+    BACKFILL_TOOL_RATE: ClassVar[int] = int(os.getenv("CA_BACKFILL_TOOL_RATE", "5"))
+    TOOL_PRE_UPGRADE_WAIT_TIMEOUT: ClassVar[int] = int(os.getenv("CA_TOOL_PRE_UPGRADE_WAIT_TIMEOUT", "30"))
+    TOOL_FIELD_PRIORITY_PROFILE: ClassVar[str] = os.getenv("CA_TOOL_FIELD_PRIORITY_PROFILE", "")
+
+    SHUTDOWN_TIMEOUT: ClassVar[int] = int(os.getenv("CA_SHUTDOWN_TIMEOUT", "5"))
+    BM25_HIT_THRESHOLD: ClassVar[int] = int(os.getenv("CA_BM25_HIT_THRESHOLD", "5"))
+
+    @staticmethod
+    def _parse_bool_env(key: str, default: bool = True) -> bool:
+        raw = os.getenv(key, "").strip().lower()
+        if raw in ("1", "true", "yes"):
+            return True
+        if raw in ("0", "false", "no"):
+            return False
+        if raw:
+            logger.warning("Invalid value for %s: '%s', falling back to %s (safe mode)", key, raw, default)
+        return default
+
+    @classmethod
+    def is_dedup_enabled(cls) -> bool:
+        return cls._parse_bool_env("CA_DEDUP_ENABLED", default=True)
+
+    @classmethod
+    def validate(cls) -> None:
+        errors = []
+
+        def pos_int(name, val, min_v=1, max_v=None):
+            if val < min_v:
+                errors.append(f"{name} must be >= {min_v} (got {val})")
+            if max_v is not None and val > max_v:
+                errors.append(f"{name} must be <= {max_v} (got {val})")
+
+        def pos_float(name, val, min_v=0.01):
+            if val < min_v:
+                errors.append(f"{name} must be > {min_v} (got {val})")
+
+        pos_int("DB_MAX_RETRY", cls.DB_MAX_RETRY, max_v=10)
+        pos_int("DB_BUSY_TIMEOUT_MS", cls.DB_BUSY_TIMEOUT_MS, min_v=100, max_v=30000)
+        pos_int("DB_IDLE_TIMEOUT_SECONDS", cls.DB_IDLE_TIMEOUT_SECONDS, min_v=10)
+        pos_int("DB_CHECKPOINT_INTERVAL", cls.DB_CHECKPOINT_INTERVAL, min_v=10)
+        pos_int("CACHE_MAX_SESSIONS", cls.CACHE_MAX_SESSIONS, max_v=500)
+        pos_int("SESSION_TTL", cls.SESSION_TTL, min_v=60)
+        pos_int("CACHE_MAX_SIZE", cls.CACHE_MAX_SIZE, min_v=16)
+        pos_float("EMBED_TIMEOUT", cls.EMBED_TIMEOUT)
+        pos_int("EMBED_MAX_RETRIES", cls.EMBED_MAX_RETRIES, max_v=5)
+        pos_float("EMBED_BATCH_PARALLEL_TIMEOUT", cls.EMBED_BATCH_PARALLEL_TIMEOUT)
+        pos_int("EMBED_CACHE_MAX_SIZE", cls.EMBED_CACHE_MAX_SIZE, min_v=16)
+        pos_int("OODA_EMBED_CACHE_MAX_SIZE", cls.OODA_EMBED_CACHE_MAX_SIZE, min_v=16)
+        pos_float("OODA_DEDUP_THRESHOLD", cls.OODA_DEDUP_THRESHOLD, min_v=0.5)
+        pos_int("RETRIEVAL_RRF_K", cls.RETRIEVAL_RRF_K)
+        pos_float("LLM_TIMEOUT", cls.LLM_TIMEOUT)
+        pos_int("LLM_MAX_RETRIES", cls.LLM_MAX_RETRIES, max_v=5)
+        pos_int("LLM_NUM_PREDICT", cls.LLM_NUM_PREDICT, min_v=100)
+        pos_int("CONTEXT_LENGTH", cls.CONTEXT_LENGTH, min_v=1000)
+        pos_int("TOOL_PRE_UPGRADE_COUNT", cls.TOOL_PRE_UPGRADE_COUNT, max_v=10)
+        pos_int("TOOL_MAX_UPGRADE_K", cls.TOOL_MAX_UPGRADE_K, max_v=10)
+        pos_int("TOOL_PRE_UPGRADE_WINDOW", cls.TOOL_PRE_UPGRADE_WINDOW, min_v=10, max_v=200)
+        pos_int("BACKFILL_DIALOGUE_RATE", cls.BACKFILL_DIALOGUE_RATE, max_v=10)
+        pos_int("BACKFILL_TOOL_RATE", cls.BACKFILL_TOOL_RATE, max_v=20)
+        pos_int("TOOL_PRE_UPGRADE_WAIT_TIMEOUT", cls.TOOL_PRE_UPGRADE_WAIT_TIMEOUT, min_v=5, max_v=120)
+        pos_int("SHUTDOWN_TIMEOUT", cls.SHUTDOWN_TIMEOUT, min_v=1, max_v=30)
+        pos_int("BM25_HIT_THRESHOLD", cls.BM25_HIT_THRESHOLD, min_v=1, max_v=20)
+
+        if errors:
+            raise ValueError("Configuration validation failed:\n" + "\n".join(errors))
+
+    @classmethod
+    def reload(cls) -> None:
+        try:
+            cls.DEBUG_MODE = os.getenv("CA_DEBUG", "0") == "1"
+            cls.DB_MAX_RETRY = int(os.getenv("CA_DB_MAX_RETRY", str(cls.DB_MAX_RETRY)))
+            cls.DB_BUSY_TIMEOUT_MS = int(os.getenv("CA_DB_BUSY_TIMEOUT", str(cls.DB_BUSY_TIMEOUT_MS)))
+            cls.DB_IDLE_TIMEOUT_SECONDS = int(os.getenv("CA_DB_IDLE_TIMEOUT", str(cls.DB_IDLE_TIMEOUT_SECONDS)))
+            cls.DB_CHECKPOINT_INTERVAL = int(os.getenv("CA_DB_CHECKPOINT_INTERVAL", str(cls.DB_CHECKPOINT_INTERVAL)))
+            cls.CACHE_MAX_SESSIONS = int(os.getenv("CA_CACHE_MAX_SESSIONS", str(cls.CACHE_MAX_SESSIONS)))
+            cls.SESSION_TTL = int(os.getenv("CA_SESSION_TTL", str(cls.SESSION_TTL)))
+            cls.CACHE_MAX_SIZE = int(os.getenv("CA_CACHE_MAX_SIZE", str(cls.CACHE_MAX_SIZE)))
+            cls.EMBED_BACKEND = os.getenv("CA_EMBED_BACKEND", cls.EMBED_BACKEND)
+            cls.EMBED_MODEL = os.getenv("CA_EMBED_MODEL", cls.EMBED_MODEL)
+            cls.EMBED_ENDPOINT = os.getenv("CA_EMBED_ENDPOINT", cls.EMBED_ENDPOINT)
+            cls.EMBED_TIMEOUT = float(os.getenv("CA_EMBED_TIMEOUT", str(cls.EMBED_TIMEOUT)))
+            cls.EMBED_MAX_RETRIES = int(os.getenv("CA_EMBED_MAX_RETRIES", str(cls.EMBED_MAX_RETRIES)))
+            cls.EMBED_BATCH_PARALLEL_TIMEOUT = float(os.getenv("CA_EMBED_BATCH_PARALLEL_TIMEOUT", str(cls.EMBED_BATCH_PARALLEL_TIMEOUT)))
+            cls.EMBED_CACHE_MAX_SIZE = int(os.getenv("CA_EMBED_CACHE_MAX_SIZE", str(cls.EMBED_CACHE_MAX_SIZE)))
+            cls.OODA_EMBED_CACHE_MAX_SIZE = int(os.getenv("CA_OODA_EMBED_CACHE_MAX_SIZE", str(cls.OODA_EMBED_CACHE_MAX_SIZE)))
+            cls.OODA_DEDUP_THRESHOLD = float(os.getenv("CA_OODA_DEDUP_THRESHOLD", str(cls.OODA_DEDUP_THRESHOLD)))
+            cls.RETRIEVAL_RRF_K = int(os.getenv("CA_RETRIEVAL_RRF_K", str(cls.RETRIEVAL_RRF_K)))
+            cls.LLM_MODEL = os.getenv("CA_LLM_MODEL", cls.LLM_MODEL)
+            cls.LLM_ENDPOINT = os.getenv("CA_LLM_ENDPOINT", cls.LLM_ENDPOINT)
+            cls.LLM_TIMEOUT = float(os.getenv("CA_LLM_TIMEOUT", str(cls.LLM_TIMEOUT)))
+            cls.LLM_MAX_RETRIES = int(os.getenv("CA_LLM_MAX_RETRIES", str(cls.LLM_MAX_RETRIES)))
+            cls.LLM_NUM_PREDICT = int(os.getenv("CA_LLM_NUM_PREDICT", str(cls.LLM_NUM_PREDICT)))
+            cls.LLM_THINK = cls._parse_llm_think()
+            cls.PROTECT_TAIL_TOKENS = int(os.getenv("CA_PROTECT_TAIL_TOKENS", str(cls.PROTECT_TAIL_TOKENS)))
+            cls.HEAD_AUTO_L1_COUNT = int(os.getenv("CA_HEAD_AUTO_L1_COUNT", str(cls.HEAD_AUTO_L1_COUNT)))
+            cls.CONTEXT_LENGTH = int(os.getenv("CA_CONTEXT_LENGTH", str(cls.CONTEXT_LENGTH)))
+            cls.TOOL_PRE_UPGRADE_COUNT = int(os.getenv("CA_TOOL_PRE_UPGRADE_COUNT", str(cls.TOOL_PRE_UPGRADE_COUNT)))
+            cls.TOOL_MAX_UPGRADE_K = int(os.getenv("CA_TOOL_MAX_UPGRADE_K", str(cls.TOOL_MAX_UPGRADE_K)))
+            cls.TOOL_PRE_UPGRADE_WINDOW = int(os.getenv("CA_TOOL_PRE_UPGRADE_WINDOW", str(cls.TOOL_PRE_UPGRADE_WINDOW)))
+            cls.BACKFILL_DIALOGUE_RATE = int(os.getenv("CA_BACKFILL_DIALOGUE_RATE", str(cls.BACKFILL_DIALOGUE_RATE)))
+            cls.BACKFILL_TOOL_RATE = int(os.getenv("CA_BACKFILL_TOOL_RATE", str(cls.BACKFILL_TOOL_RATE)))
+            cls.TOOL_PRE_UPGRADE_WAIT_TIMEOUT = int(os.getenv("CA_TOOL_PRE_UPGRADE_WAIT_TIMEOUT", str(cls.TOOL_PRE_UPGRADE_WAIT_TIMEOUT)))
+            cls.TOOL_FIELD_PRIORITY_PROFILE = os.getenv("CA_TOOL_FIELD_PRIORITY_PROFILE", cls.TOOL_FIELD_PRIORITY_PROFILE)
+            cls.SHUTDOWN_TIMEOUT = int(os.getenv("CA_SHUTDOWN_TIMEOUT", str(cls.SHUTDOWN_TIMEOUT)))
+            cls.BM25_HIT_THRESHOLD = int(os.getenv("CA_BM25_HIT_THRESHOLD", str(cls.BM25_HIT_THRESHOLD)))
+
+            cls.validate()
+            logger.info("Configuration reloaded and validated.")
+        except ValueError as e:
+            logger.critical("Configuration reload failed, keeping old values: %s", e)

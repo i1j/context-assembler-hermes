@@ -1,0 +1,8 @@
+version: "2.0"
+description: "Field priority config with per-tool overrides (v4.4.0)"
+
+default:
+  vip: [tool_name, error, status, command, instruction]
+  p0: [content, thought, result, summary, message, conclusion, output]
+  p1: [args, parameters, input, metadata, context]
+  p2: [timestamp, id, trace_id, request_id, session_id]

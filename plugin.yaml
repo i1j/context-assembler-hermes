@@ -1,0 +1,41 @@
+name: ca_assembler
+version: 4.4.0
+description: >
+  ContextAssembler v4.4.0 - 增量 L0/L1 摘要 + 工具轮摘要 + L‑stage 异步补全。
+pip_dependencies:
+  - numpy
+  - urllib3
+  - sentence-transformers
+  - pyyaml
+requires_env: []
+hooks:
+  - on_session_start
+  - on_session_end
+  - on_session_reset
+  - pre_llm_call
+  - post_llm_call
+context_engine:
+  class: ca_assembler.CAContextAssemblerPlugin
+config_schema:
+  db_path_template:
+    type: string
+    default: "{hermes_home}/ca_cache/{session_id}.db"
+  embed_backend:
+    type: string
+    default: "ollama"
+    enum: ["ollama", "sentence-transformers", "fallback"]
+  protect_tail_tokens:
+    type: integer
+    default: 20000
+  head_auto_l1_count:
+    type: integer
+    default: 3
+  llm_num_predict:
+    type: integer
+    default: 24768
+  context_length:
+    type: integer
+    default: 32000
+  debug:
+    type: boolean
+    default: false
