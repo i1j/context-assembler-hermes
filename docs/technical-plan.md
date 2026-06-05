@@ -360,21 +360,16 @@ def _token_estimate(text):
     return max(1, len(text) // 2)     # ASCII: 2 chars/token（偏保守）
 ```
 
-### 5.7 上下文窗口查询（v4.4.1 修正 → 当前调试配置）
+### 5.7 上下文窗口查询（v4.4.1）
 
-三级回退，但默认两条路径被调试屏蔽：
+三级回退：
 
-1. ~~Hermes `agent.model_metadata.get_model_context_length()`~~ — `if False` 调试屏蔽（2026-06-05）。
-2. ~~自有 `_MODEL_CONTEXT_WINDOW` 查表~~ — `if False` 调试屏蔽（2026-06-14）。
-3. **`CONTEXT_LENGTH` 默认值（50K）** — 当前唯一生效的兜底路径。
+1. Hermes `agent.model_metadata.get_model_context_length()` — 运行时获取，覆盖所有 provider。
+2. 自有 `_MODEL_CONTEXT_WINDOW` 查表 — 离线/单元测试时使用。
+3. `CONTEXT_LENGTH`（默认 50K）— 兜底。
 
-压缩预算 = `model_window × COMPRESSION_THRESHOLD`（默认 0.50）。
-当前实际值：`50,000 × 0.50 = 25,000 tokens`。
-
-当两个 `if False` 恢复后，deepseek-v4-flash: 1M × 0.50 = **500K tokens**。
-
-> 调试屏蔽原因：Hermes hook 传入的 context_length 有时偏小（Ollama 自定义模型），自有查表也处于调试期。
-> 两段 `if False` 各自独立，恢复时可单独放开。详见 `ca/config.py:117,126`。
+压缩预算 = `model_window × COMPRESSION_THRESHOLD`（默认 0.50，对齐 Hermes `compression.threshold`）。
+deepseek-v4-flash: 1M × 0.50 = **500K tokens**。
 
 ---
 
@@ -459,7 +454,7 @@ def _token_estimate(text):
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-|| `CA_CONTEXT_LENGTH` | 50000（config.py 兜底） | 上下文总 Token 窗口上限。两路查表（Hermes + 自有）均被 `if False` 调试屏蔽，当前实际走此值 |
+|| `CA_CONTEXT_LENGTH` | 50000 | 上下文总 Token 窗口上限 |
 | `CA_PROTECT_TAIL_TOKENS` | 10000 | 对话尾区 token 预算（`//2` 后 ≈ 20K chars） |
 | `CA_TOOL_TAIL_TURN_COUNT` | 2 | 工具尾区保护最近 N 个对话轮 |
 | `CA_HEAD_AUTO_L1_COUNT` | 3 | 对话轮 Head 自动 L1 数量 |
@@ -667,56 +662,5 @@ C-stage 末尾执行：
 
 ---
 
-## 附录 C：变更记录
 
-### C.1 Fallback CONTEXT_LENGTH 收紧（2026-06-05）
-- 默认值 200K → **150K**（`ca/config.py:76`）
-- `context_length_for_model()` 保留三层查表逻辑，Hermes 运行时查表保持 `if False` 调试屏蔽
 
-### C.2 Head 保护区方向修复（2026-06-05）
-- `_compute_layers_v2()` 第 669 行 `[-HEAD_AUTO_L1_COUNT:]` → `[:HEAD_AUTO_L1_COUNT]`
-- 头保护区从保护**最近** N 轮改为保护**最开始** N 轮有效 L1，保障早期关键信息不丢失
-
-### C.3 Executor shutdown 修复（2026-06-05）
-- `destroy()` 与 `reset()` 中 `self.cache.cancel_retry_timer()` + `self._shutdown_cache_executor()` → `self.cache.destroy()`
-- 补上了 `_destroyed = True` 的设置，防止 C-stage 线程完成后 `_submit_rebuild()` 误调已关闭的 executor
-
-### C.4 ToolSummarizer 10 个结构化 handler（2026-06-06）
-- 重构 `summarize()` 分发机制：`getattr(self, f"_summarize_{sanitized}", None)` → handler
-- 新增 10 个 handler：terminal / execute_code / write_file / patch / read_file / search_files / skills_list / skill_view / skill_manage / memory
-- 各 handler 提取工具特定关键字段，替代通用 `_head_tail_truncate` 碎片
-- 工具名 `.`/`-` 自动映射为 `_`
-
-### C.5 terminal 错误标记（2026-06-06）
-- `_summarize_terminal` 内加 `_ERROR_RE` 正则（Traceback/Error:/Exception/ModuleNotFound/ImportError/NotFound/failed/FAILED）
-- 匹配时 `result_summary` 和 L0 前缀 `[ERROR]`，LLM 一眼识别错误
-
-### C.6 search_files 目录分布（2026-06-06）
-- total_count > 3 时用 `Counter` 按父目录名分组，取前 4 组
-- 输出示例：`search_files: 66 matches [ca:30, tests:25, docs:11]`
-
-### C.7 连续同工具空结果合并（2026-06-14）
-- 插件层 `pre_llm_call()` 合并相邻相同摘要，剥离 `[~/N/M]` 前缀后比较正文
-- 保留 `×n` 计数标记，LLM 知道重复次数
-- 全在插件层（`plugins/__init__.py:280-299`），不动核心引擎
-
-### C.8 指纹去重实现（2026-06-14）
-- `_deduplicate_messages()` + `_msg_fingerprint()` 完整实现
-- 剥离 `[~/N]` / `[~/N/M]` 前缀标签后归一化指纹，跨轮相同摘要只保留最后出现
-- 默认启用（`Config.is_dedup_enabled()`），Fail-Safe 策略：非法配置值时强制启用
-
-### C.9 CONTEXT_LENGTH 收紧至 50K（2026-06-14）
-- env 默认值 `CA_CONTEXT_LENGTH` 从 150K → **50K**（`ca/config.py:76`）
-- 自有 `_MODEL_CONTEXT_WINDOW` 查表路径设为 `if False` 调试屏蔽
-- 当前实际压缩预算：50,000 × 0.50 = **25,000 tokens**
-- 详细上下文窗口路径见 §5.7
-
-### C.10 system_overhead 动态测量移除（2026-06-14）
-- 动态测量代码（`plugins/__init__.py:324-332`）已移除
-- `_system_overhead` 默认值 20K 仅保留作保守缓冲区
-- `set_system_overhead()` 保留方法签名以防外部调用，已标记弃用
-- 原因：Hermes 不暴露 tool schemas/resp_format 等非消息开销，测量范围过窄且反作用
-
----
-
-**文档结束**
