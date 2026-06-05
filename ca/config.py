@@ -168,6 +168,11 @@ class Config:
         return cls._parse_bool_env("CA_DEDUP_ENABLED", default=True)
 
     @classmethod
+    def is_plan_build_enabled(cls) -> bool:
+        """基于 turn_plan 构建消息（替代旧的 v4 两步走）。默认启用。"""
+        return cls._parse_bool_env("CA_PLAN_BUILD_ENABLED", default=True)
+
+    @classmethod
     def validate(cls) -> None:
         errors = []
 

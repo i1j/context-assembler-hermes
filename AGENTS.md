@@ -4,7 +4,7 @@
 
 | 项       | 值                                                                        |
 | -------- | ------------------------------------------------------------------------- |
-| 版本     | v4.4.1 |
+| 版本     | v4.5.0 |
 | 部署方式 | 自包含独立副本                                                            |
 | 插件路径 | `~/.hermes/profiles/tester/plugins/ca_assembler/`                       |
 | 核心引擎 | `ca/` 子目录（入口 `ca/__init__.py` → `ContextAssembler`）         |
@@ -248,7 +248,27 @@ ca_count = sum(1 for m in result
 print(f"{ca_count} CA summaries in assembled context")
 ```
 
-## 当前遗留状态（2026-06-14）
+### Plan-based 消息组装（2026-07-01 — v4.5.0）
+
+| 改进 | 说明 | 代码位置 |
+|------|------|---------|
+| `_compute_turn_plan()` | 合并 `_build_final_messages_v4` 和 `_compute_and_store_turn_plan` 的决策逻辑，消除两处重复。返回 `List[TurnPlanEntry]` | `ca/__init__.py` |
+| `_build_messages_from_plan()` | 按 plan 中每条 entry 的 `target_level` 从 `store.read_turn_texts()` 按 level 读取文本（L2→l2_text, L1→l1_text, L0→l0_text），构建消息列表 | `ca/__init__.py` |
+| `store.read_turn_texts()` | 新增方法，返回 `(l2_text, l1_text, l0_text)` 三元组 | `ca/store.py` |
+| `Config.is_plan_build_enabled()` | 通过 `CA_PLAN_BUILD_ENABLED` 环境变量控制（默认启用） | `ca/config.py` |
+
+**核心改进**：
+- **决策统一**：head/tail/middle/upgrades 判断逻辑只有一处（`_compute_turn_plan`），不再分散在两个方法中
+- **对话轮级决策**：plan 以 turn 为单位做决策，消除旧 v4 的 per-message 不一致（如同一 turn 的 user 和 assistant 消息被不同方式处理）
+- **旧方法保留**：`_build_final_messages_v4` 和 `_compute_and_store_turn_plan` 保留为 deprecated，`CA_PLAN_BUILD_ENABLED=0` 回退
+- **plan 未覆盖消息处理**：当前轮用户消息等非缓存消息自动追加以保持完整性
+
+**旧 v4 的不一致性修复**：
+- head 保护区方向错误已在 v4.4.0 修复（`[-N:]` → `[:N]`）
+- **升级候选 L1 无效时的 fallback**：旧 v4 回退到 L2（正确），旧 `_compute_and_store_turn_plan` 错误地回退到 L0。plan 统一采用 v4 行为（L2 fallback）
+- **跨 tail 边界的对话轮**：旧 v4 按消息粒度处理导致同一 turn 的 user 和 assistant 被不同级别处理。plan 统一为 turn 级（有任一消息在 tail 则整 turn 为 L2）
+
+## 当前遗留状态（2026-07-01）
 
 | 问题                                  | 说明                                                                         | 优先级 |
 | ------------------------------------- | ---------------------------------------------------------------------------- | ------ |
@@ -256,6 +276,34 @@ print(f"{ca_count} CA summaries in assembled context")
 | 空摘要 BM25 排除                      | `result_summary="无返回数据"` 的工具轮仍进入检索/升级候选                  | 低     |
 | 系统消息降级                          | `background_review` ContextVar 路径已修。其他系统触发消息仍可能被 LLM 误判 | 低     |
 | bare `except:` 吞异常               | 在 `tests/conftest.py`，不影响被测代码                                     | 低     |
+| 旧方法 `_build_final_messages_v4` / `_compute_and_store_turn_plan` deprecated | v4.5.0 plan-based 路径已稳定后可移除                | 低     |
+| 去重标注 `(同[~/N])` 缺少计数 | 当前只标注引用目标，不显示该模式跨轮出现了几次（如"连续15轮 read_file: 无返回数据"） | 低     |
+
+### 指纹去重标注（2026-07-01 — v4.5.0）
+
+| 改进 | 说明 |
+|------|------|
+| `_deduplicate_messages` 增强 | 去重策略改为 **留最后，在被删位置插标记**。同一指纹的去重组保留**最后出现**的完整消息，在之前被删消息的原位置插入轻量指向标记 `(同[~/19/1])`，使 LLM 知晓时间线上的分布 |
+| 标注不在幸存消息上 | 幸存者保留纯净内容，标记在被删位置原位——标注在「发生的时刻」而不是「结果上」 |
+
+**5 个历史 DB 实测（plan-based 路径）**：
+| DB | 标记数 | 标记 token | 总 token | 占比 |
+|----|--------|-----------|---------|------|
+| 30 轮 | — | — | — | — |
+| 15 轮 | — | — | — | — |
+| 16 轮 | — | — | — | — |
+| 44 轮 | — | — | — | — |
+| 21 轮 | 1,150 | 10,247 | 471,089 | 2% |
+
+**输出示例**：
+```
+[  1] (同[~/19/1])                        ← 原位标记
+[  2] (同[~/19/2])
+  ...
+[1088] [~/19/1] search_files: 失败        ← 最后一条，完整内容
+```
+
+**无标签消息**（如 tail 区原始 tool_calls 消息，content 为空）不受影响——`ref_tag` 为空时不做标记，静默去重。
 
 ## 预算实测结论（2026-06-14）
 

@@ -56,9 +56,9 @@ v4.4.1 在此基础上解决了对话轮与工具轮尾区混用、Token 估算�
 │  │     → 清洗+提取 L0      │  │  → BM25/向量检索 (RRF)   │ │
 │  │     → 嵌入(L1,L0)       │  │  → 动态预算闸门         │ │
 │  │     → 写入 SQLite       │  │  → Head/Middle/Tail 组装 │ │
-│  │     → 更新 AssemblyCache│  │  → 全指纹去重           │ │
+│  │     → 更新 AssemblyCache│  │  → 全指纹去重(原位标记) │ │
 │  │     → 工具轮规则摘要    │  │  → turn_plan 拣选记录   │ │
-│  │     → 话题边界检测      │  │  → 阶段统计             │ │
+│  │     → 话题边界检测      │  │  → turn_plan 驱动组装   │ │
 │  │     → 预选工具轮        │  │                          │ │
 │  └───────────┬─────────────┘  └──────────┬───────────────┘ │
 │              │                           │                 │
@@ -279,12 +279,14 @@ A‑stage 由 `ContextAssembler.assemble` 实现，包含完整的阶段统计�
    - `Retriever.retrieve_tools` 获取工具轮升级候选。
    - `_build_candidates` 计算每个候选的 token 节省量。
    - `_select_upgrades` 贪心拣选。
-9. `_build_final_messages_v4` 根据分层和升级标记组装消息，注入 `[~/N]` 标记。
-10. `_compute_and_store_turn_plan` 写入拣选决策到 `turn_plan` 表。
-11. 若启用去重，执行 `_deduplicate_messages`。
+9. 统一拣选决策（`_compute_turn_plan`），写入 `turn_plan` 表。
+10. 按 plan 构建消息（`_build_messages_from_plan`）：每条 entry 的 `target_level` 决定从 turn_cache 按需读取的文本级别（L2→展开 l2_text JSON，L1/L0→单行摘要 `[~/N]` 标记）。
+11. 若启用去重，执行 `_deduplicate_messages`（保留最后出现，原位插 `(同[~/N])` 标记）。
 12. `stats.finalize` 汇总阶段统计。
 
-**阶段计时覆盖**：`get_snapshot` / `layers` / `embed_query` / `retrieval` / `assemble` / `dedup`。
+**阶段计时覆盖**：`get_snapshot` / `layers` / `embed_query` / `retrieval` / `plan` / `build` / `dedup`。
+
+> 旧路径（`_build_final_messages_v4` + `_compute_and_store_turn_plan`）保留为 deprecated，通过 `CA_PLAN_BUILD_ENABLED=0` 回退。
 
 ### 5.2 对话轮与工具轮尾区分离（v4.4.1）
 
@@ -335,24 +337,50 @@ A‑stage 由 `ContextAssembler.assemble` 实现，包含完整的阶段统计�
 2. 同类型内按 token 节省量降序。
 3. 在预算范围内贪心升级。
 
-### 5.5 消息组装（`_build_final_messages_v4`）
+### 5.5 消息组装（`_build_messages_from_plan` / `_compute_turn_plan` — v4.5.0）
 
-按消息顺序遍历，应用优先级链：
+v4.5.0 将 turn_plan 从调试记录升级为**消息组装的直接输入**。所有拣选决策统一在 `_compute_turn_plan` 中计算，写入 `turn_plan` 表，再由 `_build_messages_from_plan` 按 plan 读取构建。
 
-**工具组处理**：
-1. 提取完整工具调用组。
-2. 构造复合键 `(turn_index, sub_index)`。
-3. 若在 `tool_head` 且未在 upgrades 中 → L1 摘要（兜底保障）。
-4. 若所属对话轮在 `tool_tail_turns` → 保留原文（L2）。
-5. 若在 upgrades 中 → 检索摘要（L1/L0）。
-6. 若在 `tool_middle` → L0 一行。
-7. 否则保留原文。
+**决策规则（`_compute_turn_plan`）：**
 
-**对话消息处理**：
-- Head → L1 摘要，标签 `[~/turn]`。
-- >= tail_start → 保留原文。
-- Middle + 在 upgrades → L1 摘要。
-- Middle + 不在 upgrades → L0 一行。
+对话轮：
+| 条件 | target_level | decision_reason |
+|------|-------------|-----------------|
+| head + 有效 L1 | L1 | head |
+| head + L1 无效 | L2（回退） | head |
+| tail（消息下标 ≥ tail_start） | L2 | tail |
+| upgrades + 有效 L1 | L1 | retrieved |
+| middle + 有 L0 | L0 | middle |
+| 兜底 | L2 | middle |
+
+工具轮：
+| 条件 | target_level | decision_reason |
+|------|-------------|-----------------|
+| tool_head + !upgrades + L1 | L1 | tool_head |
+| tool_head + 无 L1 | L2 | tool_head |
+| 所属轮在 tool_tail_turns | L2 | tail |
+| upgrades + L1 | L1 | retrieved |
+| upgrades + L0 | L0 | retrieved |
+| middle + L0 | L0 | middle |
+| 兜底 | L2 | middle |
+
+**Plan 排序**：先按 `turn_index`，再按 `dialogue`（priority=0）→ `tool`（priority=1），保证对话轮在其附属工具轮之前。
+
+**消息构建（`_build_messages_from_plan`）：**
+
+对于每条 plan entry，从 `store.read_turn_texts()` 按需读取文本：
+
+- `target_level=L2` → 从 `l2_text`（JSON 消息数组）展开全部消息
+- `target_level=L1/L0` → 生成单条 `[~/N]` 或 `[~/N/M]` 摘要消息
+- L1 优先用 l1_text，降级到 l0_text；L0 相反
+- plan 未覆盖的消息（当前轮用户消息等）自动追加到末尾
+
+**相比旧 v4 的改进：**
+1. **turn 级决策**：旧 v4 按消息粒度处理，导致同一 turn 的 user/assistant/tool 响应走不同分支。plan 统一为 turn 级，同一个 turn 的所有消息共享同一决策。
+2. **消除工具尾区泄漏**：旧 v4 中 role=tool 的响应消息通过"普通消息"分支被对话 tail 保护捕获。plan 按 turn 级判断，工具组不会独立泄漏。
+3. **决策即存储**：`_compute_turn_plan` 同时产出 plan 列表和写库，不重复遍历。
+
+> 旧路径 `_build_final_messages_v4` + `_compute_and_store_turn_plan` 保留为 deprecated，通过 `CA_PLAN_BUILD_ENABLED=0` 回退。
 
 **硬截断兜底**：系统消息无条件保留。工具组整体保留或移除。从尾部反向填充，超出预算时停止。插入提示消息 `[工具调用结果因上下文截断已被省略]`。
 
@@ -480,6 +508,7 @@ deepseek-v4-flash: 1M × 0.50 = **500K tokens**。
 | `CA_TOOL_PRE_UPGRADE_WINDOW` | 50 | 预选检索窗口（最近 N 轮） |
 | `CA_TOPIC_BOUNDARY_DISTANCE` | 0.50 | 话题边界余弦距离阈值 |
 | `CA_DEDUP_ENABLED` | True | 全指纹去重开关 |
+| `CA_PLAN_BUILD_ENABLED` | True | turn_plan 驱动消息组装（false 回退旧 v4 路径） |
 | `CA_LLM_NUM_PREDICT` | 24768 | LLM 生成 token 上限 |
 | `CA_BACKFILL_DIALOGUE_RATE` | 2 | 对话轮补全速率 |
 | `CA_BACKFILL_TOOL_RATE` | 5 | 工具轮补全速率 |
@@ -568,16 +597,37 @@ C-stage 末尾执行：
 
 ---
 
-## 16. turn_plan 拣选决策记录（v4.4.1）
+## 16. turn_plan 拣选决策记录（v4.4.1 → v4.5.0 升级为组装驱动源）
 
-每次 `assemble()` 调用结束后，`_compute_and_store_turn_plan` 遍历所有对话轮和工具轮，为每个 turn 生成一条 `TurnPlanEntry` 记录：
+v4.4.1 引入 turn_plan 表记录拣选决策，用途仅为调试比对。v4.5.0 将 turn_plan 升级为**A-stage 消息组装的直接输入**：
 
-- `target_level`：L2（原文保留）/ L1（摘要替换）/ L0（一行压缩）。
-- `decision_reason`：`head` / `tail` / `retrieved` / `pre_upgraded` / `tool_head` / `middle`。
-- `tokens_saved`：相比保留 L2 节省的 token 数。
-- `topic_group`：话题分组 ID。
+**旧流程**（v4.4.1 及之前）：
+```
+_compute_layers_v2 → _build_final_messages_v4(组装) → _compute_and_store_turn_plan(写库)
+                                                                    ↓
+                                                              仅调试使用
+```
 
-所有记录写入 `turn_plan` 表（每次 `assemble` 先清后写）。当前用途是调试比对拣选决策；下一步是**基于 turn_plan 做 turn 级拣选组装**，不再重建全量消息列表。
+**新流程**（v4.5.0）：
+```
+_compute_layers_v2 → _compute_turn_plan(统一决策) → write_turn_plan(持久化)
+                                                          ↓
+                                              _build_messages_from_plan(按plan构建)
+```
+
+`TurnPlanEntry` 结构维持不变：
+
+| 字段 | 说明 |
+|------|------|
+| `turn_index` | 对话轮次 |
+| `turn_type` | `dialogue` 或 `tool` |
+| `tool_sub_index` | 工具组序号（对话轮恒为 0） |
+| `target_level` | L2（原文）/ L1（摘要）/ L0（一行） |
+| `decision_reason` | `head` / `tail` / `retrieved` / `tool_head` / `middle` |
+| `tokens_saved` | 相比保留 L2 节省的 token 数 |
+| `topic_group` | 话题分组 ID |
+
+plan 按 `(turn_index, type_priority, tool_sub_index)` 排序，保证对话轮在前、其工具轮在后。`_build_messages_from_plan` 遍历 plan，对每条 entry 调 `store.read_turn_texts()` 按 target_level 读取对应文本，plan 未覆盖的消息（当前轮用户输入等）自动追加。
 
 ---
 
@@ -606,6 +656,8 @@ C-stage 末尾执行：
 | 去重 Fail‑Safe 策略                      | 非法配置值时强制启用去重，遵循"故障导向安全"，宁可误杀重复，不可撑爆窗口                                                                                                   |
 | **话题边界检测**                          | 余弦相似度 < 0.50 → 新话题，为未来按话题归并邻接轮次提供数据基础                                                                                                           |
 | **turn_plan 表**                         | 记录每次拣选决策，当前用于调试，下一步支持 turn 级拣选组装                                                                                                                  |
+| **turn_plan 驱动组装**                   | v4.5.0：turn_plan 从调试记录升级为 A-stage 消息组装的直接输入。`_compute_turn_plan` 统一决策，`_build_messages_from_plan` 按 plan 读取文本                                                                                                                     |
+| **原位去重标记**                          | `(同[~/N])` 标记替换静默删除——LLM 在时间线上看到"这事又在 N 轮发生了"，而非被删项凭空消失。标注在删位而非幸存者上，幸存者内容纯净                                                                                          |
 
 ---
 

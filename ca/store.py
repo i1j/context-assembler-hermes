@@ -21,7 +21,7 @@ import struct
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import Config
 
@@ -430,6 +430,27 @@ class SQLiteStore:
             (session_id, turn_index, turn_type, sub_index),
         )
         self.conn.commit()
+
+    # ── 按 level 读取单条 turn 文本（供 plan-based 消息组装使用）──
+
+    def read_turn_texts(self, session_id: str, turn_index: int,
+                        turn_type: str = "dialogue",
+                        tool_sub_index: int = 0) -> Tuple[Optional[str], str, str]:
+        """返回该 turn 的 (l2_text, l1_text, l0_text) 三元组。
+
+        l2_text 可能为 None（如果该 turn 未存储 L2），l1/l0 至少为空字符串。
+        调用方根据 target_level 选择对应字段构建消息。
+        """
+        cur = self.conn.execute(
+            """SELECT l2_text, l1_text, l0_text
+               FROM turn_cache
+               WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?""",
+            (session_id, turn_index, turn_type, tool_sub_index),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return (None, "", "")
+        return (row[0], row[1] or "", row[2] or "")
 
     # ── turn_plan 读写 ──
 
