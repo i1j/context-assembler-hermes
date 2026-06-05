@@ -277,7 +277,26 @@ class CAContextAssemblerPlugin:
         if not parts:
             return None
 
-        return "\n\n".join(parts)
+        # 合并连续相同内容的 CA 摘要（剥离 [~/N/M] 前缀后比较），保留 xN 计数
+        merged: List[str] = []
+        count = 1
+        for p in parts:
+            text = p.split("] ", 1)[-1] if "] " in p else p
+            if merged:
+                last_text = merged[-1].split("] ", 1)[-1] if "] " in merged[-1] else merged[-1]
+                if text == last_text:
+                    count += 1
+                    continue
+                elif count > 1:
+                    merged[-1] += f" ×{count}"
+                    count = 1
+            merged.append(p)
+        if count > 1:
+            merged[-1] += f" ×{count}"
+        if len(merged) < len(parts):
+            logger.debug("[CA] merged %d → %d consecutive identical summaries", len(parts), len(merged))
+
+        return "\n\n".join(merged)
 
     def post_llm_call(self, **kwargs: Any) -> None:
         """在 LLM 响应后处理该轮对话，构建未来上下文的摘要。"""

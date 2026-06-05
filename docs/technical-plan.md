@@ -211,6 +211,34 @@ turn_plan(session_id, turn_index, turn_type, tool_sub_index,
 
 **字段优先级配置**：YAML/JSON 配置文件，分为 VIP（全文保留）、P0（头尾截断）、P1（仅名称）、P2（丢弃）四级。支持 Profile 机制。
 
+### 4.3.1 按工具类型结构化摘要（v4.4.0+）
+
+**问题**：通用字段提取逻辑对所有工具一视同仁，但 terminal/read_file 等工具的原始输出包含大量行级数据，`_head_tail_truncate` (120 字符) + L0 `[:100]` 硬截断产生不可读的碎片。
+
+**方案**：`ToolSummarizer.summarize()` 入口通过 `getattr(self, "_summarize_{tool_name}", None)` 分发到专用 handler。未匹配的工具走原通用逻辑。
+
+**当前 handler（10 个）**：
+
+| 工具 | Handler（行号） | L0 示例（改前 → 改后） | L1 摘要方法 |
+|------|----------------|------------------------|-------------|
+| `terminal` | `_summarize_terminal` (129) | `terminal: DB: ...T 1 tool ...L1: 13.4` → `terminal: find /home -name "*.py" (4 lines)` | 提取命令 + 去重前 5 关键行。内建 pytest 检测 → `pytest: 8 passed, 2 skipped — 0.44s` |
+| `execute_code` | `_summarize_execute_code` (228) | 同 terminal 碎片 | 代理到 terminal handler，替换 tool_name |
+| `write_file` | `_summarize_write_file` (235) | `write_file: 无返回数据` → `write_file: /home/i1j/test.txt` | 只保留文件路径，不含内容 |
+| `patch` | `_summarize_patch` (266) | `patch: 无返回数据` → `patch: /home/i1j/tool_summarizer.py` | 目标文件 + replace_all 标记 |
+| `read_file` | `_summarize_read_file` (302) | `read_file: {"content": "1|import pytest..."` → `read_file: /tmp/test.py` | 文件名 + 行数范围 |
+| `search_files` | `_summarize_search_files` (342) | `search_files: {"total_count": 0}` → `search_files: *.py → 0 hits` 或 `66 matches [ca:30, tests:25, docs:11]` | 查询模式 + 命中数 + >3 时 Counter 按父目录分组 |
+| `skills_list` | `_summarize_skills_list` (404) | `skills_list: 无返回数据` → `skills_list: 3 skills (tester-workflow, ...)` | 提取技能名列表（前 5） |
+| `skill_view` | `_summarize_skill_view` (444) | `skill_view: 无返回数据` → `skill_view: tester-workflow — 12 lines` | 技能名 + 行数 |
+| `skill_manage` | `_summarize_skill_manage` (496) | `skill_manage: 失败` → `skill_manage: patch tester-workflow (error)` | 提取 action/name/file_path 关键参数；old_string/new_string 等 bulk content 不进入 result_summary。失败时展示 `key_params | err=...` |
+| `memory` | `_summarize_memory` (547) | `memory: {"success": false, ...}` → `memory: replace memory (error)` | 提取 action/target/old_text 关键参数；content 仅取前 80 字符预览 |
+| 其他 | （无 handler） | 不变 | 通用字段提取 |
+
+**增加新 handler**：在 `ToolSummarizer` 类中定义 `_summarize_<tool_name>` 方法，返回 `(l1_dict, l0_str)`。工具名中的 `.` 和 `-` 自动映射为 `_`（如 `read-file` → `_summarize_read_file`）。
+
+**零影响**：handler 失败时 `try/except` 回退到通用逻辑。未注册工具行为不变。
+
+**后续成熟**：结构化摘要策略稳定后可推入 `tool_field_priority.yaml` 作为通用默认。
+
 ### 4.4 预选工具轮
 
 `_pre_upgrade_tools` 以对话 L1 的 `core_change` 为 Query，在工具轮 BM25 索引中检索 Top-K（`CA_TOOL_PRE_UPGRADE_COUNT`，默认 3），标记为预选。
@@ -282,7 +310,13 @@ A‑stage 由 `ContextAssembler.assemble` 实现，包含完整的阶段统计�
 1. **系统消息 Token**：累加所有 `role: system` 消息。
 2. **Head Token**：对话轮 Head 中的消息 + 工具轮 Head 中的工具组。
 3. **Tail Token**：对话消息 >= `tail_start` 的 + 工具组所属对话轮在 `tool_tail_turns` 中的。Head 优先于 Tail（`elif` 避免重复计数）。
-4. **公式**：`budget = context_length × 0.95 - system_tokens - head_tokens - tail_tokens`。≤0 时跳过检索。
+4. **公式**：`budget = context_length × 0.95 - system_tokens - head_tokens - tail_tokens - system_overhead`。≤0 时跳过检索。
+
+**系统提示词开销**（`system_overhead`）：
+1. **默认 20000**：首次运行时预估 Hermes 系统提示词占用 ≈ 20K tokens。
+2. **动态覆盖**：首次 `post_llm_call` 从 `conversation_history` 中提取所有 `role: system` 的消息，`len // 4` 估算 token 数，调用 `set_system_overhead()` 更新。
+3. **覆盖条件**：仅当测得的实际值 > 0 且与当前值不同时更新，避免冗余写入。
+4. **fallback**：若 `conversation_history` 为空或无 system 消息，20000 默认保留，确保 CA 不占用模型的实际系统提示词窗口。
 
 **候选计算**（`_build_candidates`）：
 - 对话轮：该轮次下所有非 system、非 tool 消息的 token 总和减去摘要 token。
@@ -326,16 +360,21 @@ def _token_estimate(text):
     return max(1, len(text) // 2)     # ASCII: 2 chars/token（偏保守）
 ```
 
-### 5.7 上下文窗口查询（v4.4.1 修正）
+### 5.7 上下文窗口查询（v4.4.1 修正 → 当前调试配置）
 
-三级回退：
+三级回退，但默认两条路径被调试屏蔽：
 
-1. Hermes `agent.model_metadata.get_model_context_length()` — 覆盖所有 provider。
-2. 自有 `_MODEL_CONTEXT_WINDOW` 查表 — 离线/单元测试。
-3. `CONTEXT_LENGTH` 默认值（200K）— 兜底。
+1. ~~Hermes `agent.model_metadata.get_model_context_length()`~~ — `if False` 调试屏蔽（2026-06-05）。
+2. ~~自有 `_MODEL_CONTEXT_WINDOW` 查表~~ — `if False` 调试屏蔽（2026-06-14）。
+3. **`CONTEXT_LENGTH` 默认值（50K）** — 当前唯一生效的兜底路径。
 
-压缩预算 = `model_window × COMPRESSION_THRESHOLD`（默认 0.50，对齐 Hermes `compression.threshold`）。
-deepseek-v4-flash: 1M × 0.50 = **500K tokens**。
+压缩预算 = `model_window × COMPRESSION_THRESHOLD`（默认 0.50）。
+当前实际值：`50,000 × 0.50 = 25,000 tokens`。
+
+当两个 `if False` 恢复后，deepseek-v4-flash: 1M × 0.50 = **500K tokens**。
+
+> 调试屏蔽原因：Hermes hook 传入的 context_length 有时偏小（Ollama 自定义模型），自有查表也处于调试期。
+> 两段 `if False` 各自独立，恢复时可单独放开。详见 `ca/config.py:117,126`。
 
 ---
 
@@ -420,7 +459,7 @@ deepseek-v4-flash: 1M × 0.50 = **500K tokens**。
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `CA_CONTEXT_LENGTH` | 32000（v4.4.1: 200000 兜底） | 上下文总 Token 窗口上限 |
+|| `CA_CONTEXT_LENGTH` | 50000（config.py 兜底） | 上下文总 Token 窗口上限。两路查表（Hermes + 自有）均被 `if False` 调试屏蔽，当前实际走此值 |
 | `CA_PROTECT_TAIL_TOKENS` | 10000 | 对话尾区 token 预算（`//2` 后 ≈ 20K chars） |
 | `CA_TOOL_TAIL_TURN_COUNT` | 2 | 工具尾区保护最近 N 个对话轮 |
 | `CA_HEAD_AUTO_L1_COUNT` | 3 | 对话轮 Head 自动 L1 数量 |
@@ -625,6 +664,58 @@ C-stage 末尾执行：
 | `ca/tool_field_priority.yaml`       | 字段优先级配置                       | REQ-TOOL-C005                                                                                                           |
 | `ca/lstage.py`                      | 异步补全线程                         | REQ-L-STAGE-001~006                                                                                                     |
 | `plugins/ca_assembler/__init__.py`  | 插件适配与断路器                     | REQ-REL-004                                                                                                             |
+
+---
+
+## 附录 C：变更记录
+
+### C.1 Fallback CONTEXT_LENGTH 收紧（2026-06-05）
+- 默认值 200K → **150K**（`ca/config.py:76`）
+- `context_length_for_model()` 保留三层查表逻辑，Hermes 运行时查表保持 `if False` 调试屏蔽
+
+### C.2 Head 保护区方向修复（2026-06-05）
+- `_compute_layers_v2()` 第 669 行 `[-HEAD_AUTO_L1_COUNT:]` → `[:HEAD_AUTO_L1_COUNT]`
+- 头保护区从保护**最近** N 轮改为保护**最开始** N 轮有效 L1，保障早期关键信息不丢失
+
+### C.3 Executor shutdown 修复（2026-06-05）
+- `destroy()` 与 `reset()` 中 `self.cache.cancel_retry_timer()` + `self._shutdown_cache_executor()` → `self.cache.destroy()`
+- 补上了 `_destroyed = True` 的设置，防止 C-stage 线程完成后 `_submit_rebuild()` 误调已关闭的 executor
+
+### C.4 ToolSummarizer 10 个结构化 handler（2026-06-06）
+- 重构 `summarize()` 分发机制：`getattr(self, f"_summarize_{sanitized}", None)` → handler
+- 新增 10 个 handler：terminal / execute_code / write_file / patch / read_file / search_files / skills_list / skill_view / skill_manage / memory
+- 各 handler 提取工具特定关键字段，替代通用 `_head_tail_truncate` 碎片
+- 工具名 `.`/`-` 自动映射为 `_`
+
+### C.5 terminal 错误标记（2026-06-06）
+- `_summarize_terminal` 内加 `_ERROR_RE` 正则（Traceback/Error:/Exception/ModuleNotFound/ImportError/NotFound/failed/FAILED）
+- 匹配时 `result_summary` 和 L0 前缀 `[ERROR]`，LLM 一眼识别错误
+
+### C.6 search_files 目录分布（2026-06-06）
+- total_count > 3 时用 `Counter` 按父目录名分组，取前 4 组
+- 输出示例：`search_files: 66 matches [ca:30, tests:25, docs:11]`
+
+### C.7 连续同工具空结果合并（2026-06-14）
+- 插件层 `pre_llm_call()` 合并相邻相同摘要，剥离 `[~/N/M]` 前缀后比较正文
+- 保留 `×n` 计数标记，LLM 知道重复次数
+- 全在插件层（`plugins/__init__.py:280-299`），不动核心引擎
+
+### C.8 指纹去重实现（2026-06-14）
+- `_deduplicate_messages()` + `_msg_fingerprint()` 完整实现
+- 剥离 `[~/N]` / `[~/N/M]` 前缀标签后归一化指纹，跨轮相同摘要只保留最后出现
+- 默认启用（`Config.is_dedup_enabled()`），Fail-Safe 策略：非法配置值时强制启用
+
+### C.9 CONTEXT_LENGTH 收紧至 50K（2026-06-14）
+- env 默认值 `CA_CONTEXT_LENGTH` 从 150K → **50K**（`ca/config.py:76`）
+- 自有 `_MODEL_CONTEXT_WINDOW` 查表路径设为 `if False` 调试屏蔽
+- 当前实际压缩预算：50,000 × 0.50 = **25,000 tokens**
+- 详细上下文窗口路径见 §5.7
+
+### C.10 system_overhead 动态测量移除（2026-06-14）
+- 动态测量代码（`plugins/__init__.py:324-332`）已移除
+- `_system_overhead` 默认值 20K 仅保留作保守缓冲区
+- `set_system_overhead()` 保留方法签名以防外部调用，已标记弃用
+- 原因：Hermes 不暴露 tool schemas/resp_format 等非消息开销，测量范围过窄且反作用
 
 ---
 

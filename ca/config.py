@@ -73,7 +73,7 @@ class Config:
     # 工具轮与对话轮功能不同——对话需要 20K token 尾区保护，
     # 但工具轮只需最近 2-3 轮的上下文即可。
     TOOL_TAIL_TURN_COUNT: ClassVar[int] = int(os.getenv("CA_TOOL_TAIL_TURN_COUNT", "2"))
-    CONTEXT_LENGTH: ClassVar[int] = int(os.getenv("CA_CONTEXT_LENGTH", "200000"))
+    CONTEXT_LENGTH: ClassVar[int] = int(os.getenv("CA_CONTEXT_LENGTH", "50000"))
 
     # 压缩警戒比值：对齐 Hermes compression.threshold。
     # context_length = model_window × threshold（触发压缩的预算上限）。
@@ -103,21 +103,27 @@ class Config:
 
         优先用 Hermes 的 get_model_context_length()（缓存命中时零开销，
         覆盖 Ollama / Anthropic / OpenRouter 等所有 provider）。
-        加载失败或未知模型 → 自己的查表 → CONTEXT_LENGTH 兜底（200K）。
+        加载失败或未知模型 → 自己的查表 → CONTEXT_LENGTH 兜底（150K）。
+
+        调试期临时屏蔽：if False 跳过 Hermes 查表，走自有查表 + 兜底。
+        恢复调试后将 if False 改为 if True 即可。
         """
         if not model_name:
             return cls.CONTEXT_LENGTH
         window: Optional[int] = None
 
         # 1. Hermes 运行时（同一进程，缓存命中时极快）
-        try:
-            from agent.model_metadata import get_model_context_length
-            window = get_model_context_length(model_name, base_url="")
-        except Exception:
-            pass
+        # [2026-06-05 调试屏蔽] 避免 Hermes hook 传入过小的 context_length
+        if False:
+            try:
+                from agent.model_metadata import get_model_context_length
+                window = get_model_context_length(model_name, base_url="")
+            except Exception:
+                pass
 
         # 2. 自己的已知模型表（离线/单元测试时）
-        if window is None:
+        # [2026-06-14 调试屏蔽] 强制走兜底 CONTEXT_LENGTH，用 fallback 值测试预算
+        if False:
             window = cls._MODEL_CONTEXT_WINDOW.get(model_name)
             if window is None:
                 for key, val in cls._MODEL_CONTEXT_WINDOW.items():

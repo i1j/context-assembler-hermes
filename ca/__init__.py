@@ -242,8 +242,7 @@ class ContextAssembler:
         self._tool_backfill.join(timeout=Config.SHUTDOWN_TIMEOUT)
         if self._dialogue_backfill.is_alive() or self._tool_backfill.is_alive():
             logger.warning("L-stage threads did not exit cleanly")
-        self.cache.cancel_retry_timer()
-        self._shutdown_cache_executor()
+        self.cache.destroy()
         try:
             self.store.close()
             self.embed_client.close()
@@ -315,11 +314,7 @@ class ContextAssembler:
             if bg_review:
                 cleaned = {
                     "core_change": "系统后台审查",
-                    "_assemble_status": 0,
-                    "new_materials": [],
-                    "objective_facts": [],
-                    "consensus": [],
-                    "todo": []
+                    "_assemble_status": 0
                 }
                 dialogue_ok = True
             else:
@@ -516,9 +511,6 @@ class ContextAssembler:
 
         按 turn_index + turn_type 顺序拼接。
 
-        TODO: 指纹去重 — 防止网络故障多路返回等完全重复信息污染上下文。
-        原实现（_msg_fp + dialogue_count 累积快照去重）已随累计快照模式移除，
-        需在合适的层级加回（A-stage 组装时或 C-stage 写入时）。
         """
         messages: List[Dict] = []
         for rec in self.store.read_session(self._session_id):
@@ -667,7 +659,7 @@ class ContextAssembler:
     def _compute_layers_v2(self, messages, l1_texts, tool_l1_texts, tool_head_snapshot):
         valid_dialogue = sorted(
             [idx for idx in l1_texts if self._is_valid_summary(l1_texts[idx])]
-        )[-Config.HEAD_AUTO_L1_COUNT:]
+        )[:Config.HEAD_AUTO_L1_COUNT]
         dialogue_head = set(valid_dialogue)
         tail_start = self._compute_tail_start(messages)
         dialogue_middle = set(l1_texts.keys()) - dialogue_head
@@ -714,6 +706,12 @@ class ContextAssembler:
 
         used = system_tokens + head_tokens + tail_tokens
         return max(0, int(context_length * 0.95) - used)
+
+    def set_system_overhead(self, overhead: int):
+        """(已弃用) 动态测量不可行——Hermes 不暴露 tool schemas 等非消息开销。
+        测量代码已于 2026-06-14 移除。保留方法作为公开 API 以防外部调用。"""
+        if overhead > 0:
+            self._system_overhead = overhead
 
     def _build_candidates(self, dial_keys, tool_keys, l1_texts, l0_texts,
                           tool_l1_texts, tool_l0_texts, tool_key_map,
@@ -1147,8 +1145,7 @@ class ContextAssembler:
 
     def reset(self):
         self.wait_for_pending(5.0)
-        self._shutdown_cache_executor()
-        self.cache.cancel_retry_timer()
+        self.cache.destroy()
         builder = CacheBuilder(self.store)
         self.cache = builder.build(self._session_id)
         with self._task_lock:
