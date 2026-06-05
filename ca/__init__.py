@@ -616,6 +616,12 @@ class ContextAssembler:
             dialogue_head, dialogue_middle, tool_middle, tail_start = \
                 self._compute_layers_v2(messages, l1_texts, tool_l1_texts, tool_head_snapshot)
 
+            # 工具尾区保护：与对话 tail 分离，只保留最近 N 个对话轮的工具原文。
+            # 工具和对话功能不同——对话需要 ~20K token 上下文保护，
+            # 但旧工具响应对 LLM 价值递减，只需最近 2-3 轮的上下文。
+            all_turns = sorted(l1_texts.keys())
+            tool_tail_turns = set(all_turns[-Config.TOOL_TAIL_TURN_COUNT:]) if all_turns else set()
+
         with stats.time_phase("embed_query"):
             try:
                 q_emb = self.embed_client.embed(user_message)
@@ -623,7 +629,7 @@ class ContextAssembler:
                 q_emb = None
 
         with stats.time_phase("retrieval"):
-            budget = self._available_budget(context_length, messages, dialogue_head, tool_head_snapshot, tail_start, idx_to_turn, tool_key_map)
+            budget = self._available_budget(context_length, messages, dialogue_head, tool_head_snapshot, tail_start, tool_tail_turns, idx_to_turn, tool_key_map)
             retriever = Retriever(snapshot)
             dial_upgrades = retriever.retrieve(user_message, query_embedding=q_emb, upgrade_budget=budget) if budget > 0 else []
             tool_upgrades_raw = retriever.retrieve_tools(user_message, query_embedding=q_emb, max_k=Config.TOOL_MAX_UPGRADE_K) if budget > 0 else []
@@ -640,13 +646,13 @@ class ContextAssembler:
             final = self._build_final_messages_v4(
                 messages, l1_texts, l0_texts, tool_l1_texts, tool_l0_texts,
                 dialogue_head, tool_head_snapshot, dialogue_middle, tool_middle,
-                upgrades, tail_start, idx_to_turn, tool_key_map
+                upgrades, tail_start, tool_tail_turns, idx_to_turn, tool_key_map
             )
 
         self._compute_and_store_turn_plan(
             messages, l1_texts, l0_texts, tool_l1_texts, tool_l0_texts,
             dialogue_head, tool_head_snapshot, upgrades,
-            tail_start, idx_to_turn, tool_key_map, budget)
+            tail_start, tool_tail_turns, idx_to_turn, tool_key_map, budget)
 
         if Config.is_dedup_enabled():
             with stats.time_phase("dedup"):
@@ -667,7 +673,7 @@ class ContextAssembler:
         tool_middle = set(tool_l1_texts.keys()) - tool_head_snapshot
         return dialogue_head, dialogue_middle, tool_middle, tail_start
 
-    def _available_budget(self, context_length, messages, dialogue_head, tool_head, tail_start, idx_to_turn, tool_key_map):
+    def _available_budget(self, context_length, messages, dialogue_head, tool_head, tail_start, tool_tail_turns, idx_to_turn, tool_key_map):
         system_tokens = 0
         head_tokens = 0
         tail_tokens = 0
@@ -685,12 +691,11 @@ class ContextAssembler:
                 if i in tool_key_map:
                     entries = tool_key_map[i]
                     for key, token_count in entries:
-                        # 工具尾区优先级高于 head：同组若在 tail 则整组原文保留，
-                        # 不应再计入 head_tokens
-                        if i >= tail_start:
-                            tail_tokens += token_count
-                        elif key in tool_head:
+                        # head 工具始终计摘要 token（非原文），优先级高于尾区
+                        if key in tool_head:
                             head_tokens += token_count
+                        elif key[0] in tool_tail_turns:
+                            tail_tokens += token_count
                     group_len = len(self._extract_tool_group(messages, i)[0])
                     i += group_len
                 else:
@@ -757,7 +762,7 @@ class ContextAssembler:
                                  tool_l1_texts, tool_l0_texts,
                                  dialogue_head, tool_head,
                                  dialogue_middle, tool_middle,
-                                 upgrades, tail_start, idx_to_turn,
+                                 upgrades, tail_start, tool_tail_turns, idx_to_turn,
                                  tool_key_map):
         result = []
         i = 0
@@ -776,14 +781,14 @@ class ContextAssembler:
                     call_id = call.get("id")
                     matched_responses = [r for r in group[1:] if r.get("tool_call_id") == call_id]
                     tool_msgs = [msg] + matched_responses
-                    if i >= tail_start:
-                        result.extend(tool_msgs)
-                        continue
                     if key in tool_head and key not in upgrades:
                         l1 = tool_l1_texts.get(key)
                         if l1:
                             result.append({"role": "assistant", "content": f"[~/{key[0]}/{key[1]}] {l1}"})
                             continue
+                    if key[0] in tool_tail_turns:
+                        result.extend(tool_msgs)
+                        continue
                     if key in upgrades:
                         summary = tool_l1_texts.get(key) or tool_l0_texts.get(key)
                         if summary:
@@ -831,7 +836,7 @@ class ContextAssembler:
     def _compute_and_store_turn_plan(self, messages, l1_texts, l0_texts,
                                      tool_l1_texts, tool_l0_texts,
                                      dialogue_head, tool_head, upgrades,
-                                     tail_start, idx_to_turn, tool_key_map,
+                                     tail_start, tool_tail_turns, idx_to_turn, tool_key_map,
                                      budget):
         """计算每轮拣选决策并写入 store.turn_plan，供调试比对。"""
         entries: List[TurnPlanEntry] = []
@@ -881,13 +886,12 @@ class ContextAssembler:
         for key, l1 in sorted(tool_l1_texts.items(), key=lambda x: (x[0][0], x[0][1])):
             l0 = tool_l0_texts.get(key) or ""
 
-            # 确定工具组起始消息索引是否在 tail 中
-            in_tail = False
+            # 确定工具组所属对话轮是否在 tail 内
+            in_tail = key[0] in tool_tail_turns
             l2_tk = 0
             for msg_idx, entries_map in tool_key_map.items():
                 for (ekey, tk) in entries_map:
                     if ekey == key:
-                        in_tail = msg_idx >= tail_start
                         l2_tk = tk
                         break
                 if l2_tk > 0:
@@ -901,16 +905,16 @@ class ContextAssembler:
                                   tokens_saved=max(0, l2_tk - sum_tk),
                                   budget_remaining=budget)
 
-            if in_tail:
-                entry.target_level = "L2"
-                entry.decision_reason = "tail"
-            elif key in tool_head and key not in upgrades:
+            if key in tool_head and key not in upgrades:
                 if l1:
                     entry.target_level = "L1"
                     entry.decision_reason = "tool_head"
                 else:
                     entry.target_level = "L2"
                     entry.decision_reason = "tool_head"
+            elif in_tail:
+                entry.target_level = "L2"
+                entry.decision_reason = "tail"
             elif key in upgrades:
                 summary = l1 or l0
                 if summary:
@@ -932,12 +936,15 @@ class ContextAssembler:
 
     # ---------- 辅助方法 ----------
     def _token_estimate(self, text: str) -> int:
+        """粗略 token 估算。CJK 文本按 1.5× 字符数，其他按 0.5×。
+        与 Hermes 的 _CHARS_PER_TOKEN=4 对齐（但 CA 偏保守以保护对话轮）。
+        """
         if not text:
             return 0
         cjk = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
         if cjk > len(text) * 0.5:
             return int(len(text) * 1.5)
-        return max(1, len(text))
+        return max(1, len(text) // 2)
 
     def _is_valid_summary(self, l1_text: str) -> bool:
         if not l1_text or not l1_text.strip():
@@ -950,18 +957,18 @@ class ContextAssembler:
             return False
 
     def _compute_tail_start(self, messages):
-        """从消息尾部反向累计 token 数，找到 tail 保护区的起始索引。
+        """从消息尾部反向累计 token 数，找到对话 tail 保护区的起始索引。
 
-        tool 响应（role=tool）不单独计 token —— 它们属于工具组，
-        其压缩/保留决策由前导 tool_calls 消息统一管理。
-        跳过它们可防止末尾大量工具响应"劫持" tail 预算。
+        遍历所有消息（含工具响应），token 估算采用 len//2 对齐 Hermes 风格。
+        1.5× 软上限防止单条超大 tool 响应截断整条 tail。
         """
         tail_tokens = 0
+        soft_ceiling = int(Config.PROTECT_TAIL_TOKENS * 1.5)
         for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "tool":
-                continue
             tail_tokens += self._token_estimate(messages[i].get("content", ""))
-            if tail_tokens >= Config.PROTECT_TAIL_TOKENS:
+            if tail_tokens >= soft_ceiling:
+                return i
+            elif tail_tokens >= Config.PROTECT_TAIL_TOKENS:
                 return i
         return 0
 

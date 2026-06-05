@@ -68,6 +68,11 @@ class Config:
 
     PROTECT_TAIL_TOKENS: ClassVar[int] = int(os.getenv("CA_PROTECT_TAIL_TOKENS", "20000"))
     HEAD_AUTO_L1_COUNT: ClassVar[int] = int(os.getenv("CA_HEAD_AUTO_L1_COUNT", "3"))
+
+    # 工具尾区保护：只保留最近 N 个对话轮的工具原文。
+    # 工具轮与对话轮功能不同——对话需要 20K token 尾区保护，
+    # 但工具轮只需最近 2-3 轮的上下文即可。
+    TOOL_TAIL_TURN_COUNT: ClassVar[int] = int(os.getenv("CA_TOOL_TAIL_TURN_COUNT", "2"))
     CONTEXT_LENGTH: ClassVar[int] = int(os.getenv("CA_CONTEXT_LENGTH", "32000"))
 
     # 话题边界检测：当前轮 L1 向量与上一对话轮 L1 向量的余弦距离
@@ -200,6 +205,7 @@ class Config:
             cls.LLM_THINK = cls._parse_llm_think()
             cls.PROTECT_TAIL_TOKENS = int(os.getenv("CA_PROTECT_TAIL_TOKENS", str(cls.PROTECT_TAIL_TOKENS)))
             cls.HEAD_AUTO_L1_COUNT = int(os.getenv("CA_HEAD_AUTO_L1_COUNT", str(cls.HEAD_AUTO_L1_COUNT)))
+            cls.TOOL_TAIL_TURN_COUNT = int(os.getenv("CA_TOOL_TAIL_TURN_COUNT", str(cls.TOOL_TAIL_TURN_COUNT)))
             cls.TOPIC_BOUNDARY_DISTANCE = float(os.getenv("CA_TOPIC_BOUNDARY_DISTANCE", str(cls.TOPIC_BOUNDARY_DISTANCE)))
             cls.CONTEXT_LENGTH = int(os.getenv("CA_CONTEXT_LENGTH", str(cls.CONTEXT_LENGTH)))
             cls.TOOL_PRE_UPGRADE_COUNT = int(os.getenv("CA_TOOL_PRE_UPGRADE_COUNT", str(cls.TOOL_PRE_UPGRADE_COUNT)))
