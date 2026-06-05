@@ -482,3 +482,16 @@ class SQLiteStore:
     def delete_turn_plan(self, session_id: str) -> None:
         self.conn.execute("DELETE FROM turn_plan WHERE session_id=?", (session_id,))
         self.conn.commit()
+
+    def upsert_turn_plan_topic(self, session_id: str, turn_index: int,
+                               turn_type: str, tool_sub_index: int,
+                               topic_id: int) -> None:
+        """写入或更新单条 turn_plan 的 topic_group，供 C-stage 话题检测使用。"""
+        self.conn.execute(
+            """INSERT INTO turn_plan (session_id, turn_index, turn_type, tool_sub_index, topic_group)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(session_id, turn_index, turn_type, tool_sub_index)
+               DO UPDATE SET topic_group=excluded.topic_group""",
+            (session_id, turn_index, turn_type, tool_sub_index, topic_id),
+        )
+        self.conn.commit()

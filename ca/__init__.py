@@ -18,13 +18,13 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import Config
 from .store import SQLiteStore
 from .cache import AssemblyCache, CacheBuilder, BM25Snapshot, tokenise
-from .retrieval import Retriever
+from .retrieval import Retriever, cosine_similarity
 from .embedding import EmbeddingClient
 from .ooda_parser import OODAParser
 from .post_process import robust_json_parse, clean_increment
@@ -207,6 +207,10 @@ class ContextAssembler:
         self._dialogue_backfill.start()
         self._tool_backfill.start()
 
+        # 话题边界追踪：从 turn_plan 恢复上次 topic_id
+        self._current_topic_id = self._restore_topic_id()
+        self._topic_lock = threading.Lock()
+
     def _restore_turn_index(self) -> int:
         try:
             idx = self.store.max_turn_index(self._session_id)
@@ -217,6 +221,15 @@ class ContextAssembler:
         except Exception as e:
             logger.error("Failed to restore turn index: %s, defaulting to 0", e)
             return 0
+
+    def _restore_topic_id(self) -> int:
+        try:
+            plans = self.store.read_turn_plan(self._session_id)
+            if plans:
+                return max(p.get("topic_group", 0) or 0 for p in plans)
+        except Exception:
+            pass
+        return 1
 
     def destroy(self):
         # 1. 先等待所有 C‑stage 任务完成
@@ -344,6 +357,28 @@ class ContextAssembler:
                 _assemble_status=cleaned["_assemble_status"]
             )
             self.cache.add_turn(turn_index, l0_text, l1_str, l0_emb, l1_emb)
+
+            # 话题边界检测：与上一对话轮的 L1 向量做余弦距离
+            # 若距离超过阈值 → 新话题，递增 topic_id
+            if l1_emb is not None and not bg_review:
+                prev_emb = self._get_previous_l1_embedding(turn_index)
+                if prev_emb is not None:
+                    sim = cosine_similarity(l1_emb, prev_emb)
+                    is_new_topic = sim < Config.TOPIC_BOUNDARY_DISTANCE
+                    with self._topic_lock:
+                        if is_new_topic:
+                            self._current_topic_id += 1
+                        topic_id = self._current_topic_id
+                    logger.info("[CA] turn %d: topic sim=%.3f topic_id=%d new=%s",
+                               turn_index, sim, topic_id, is_new_topic)
+                else:
+                    with self._topic_lock:
+                        topic_id = self._current_topic_id
+            else:
+                with self._topic_lock:
+                    topic_id = self._current_topic_id
+            self.store.upsert_turn_plan_topic(
+                session_id, turn_index, "dialogue", 0, topic_id)
 
             if messages:
                 tool_turns = self._extract_tool_calls(messages)
@@ -1058,6 +1093,23 @@ class ContextAssembler:
                 return json.loads(rec["l1_text"])
             except Exception:
                 pass
+        return None
+
+    def _get_previous_l1_embedding(self, current_turn: int) -> Optional[List[float]]:
+        """读上一对话轮的 L1 向量，供话题边界检测。
+        走 DB 而非 cache，避免 C-stage 异步乱序时读到未写入的旧缓存。
+        """
+        if current_turn <= 1:
+            return None
+        prev_idx = current_turn - 1
+        # 先查 cache（更快），失败再查 DB
+        if prev_idx in self.cache.l1_embeddings:
+            emb = self.cache.l1_embeddings[prev_idx]
+            if emb and len(emb) > 0:
+                return emb
+        rec = self.store.read_turn(self._session_id, prev_idx)
+        if rec and rec.get("l1_embedding") and len(rec["l1_embedding"]) > 0:
+            return rec["l1_embedding"]
         return None
 
     def reset(self):

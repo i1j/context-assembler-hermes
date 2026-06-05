@@ -70,6 +70,10 @@ class Config:
     HEAD_AUTO_L1_COUNT: ClassVar[int] = int(os.getenv("CA_HEAD_AUTO_L1_COUNT", "3"))
     CONTEXT_LENGTH: ClassVar[int] = int(os.getenv("CA_CONTEXT_LENGTH", "32000"))
 
+    # 话题边界检测：当前轮 L1 向量与上一对话轮 L1 向量的余弦距离
+    # 低于此阈值 → 新话题。范围 [0, 1]，默认 0.50。
+    TOPIC_BOUNDARY_DISTANCE: ClassVar[float] = float(os.getenv("CA_TOPIC_BOUNDARY_DISTANCE", "0.50"))
+
     # 已知模型上下文窗口（Hermes hook 不传 context_length，需自行查表）
     _MODEL_CONTEXT_WINDOW: ClassVar[Dict[str, int]] = {
         "deepseek-v4-flash": 91500,   # ~91.5K
@@ -196,6 +200,7 @@ class Config:
             cls.LLM_THINK = cls._parse_llm_think()
             cls.PROTECT_TAIL_TOKENS = int(os.getenv("CA_PROTECT_TAIL_TOKENS", str(cls.PROTECT_TAIL_TOKENS)))
             cls.HEAD_AUTO_L1_COUNT = int(os.getenv("CA_HEAD_AUTO_L1_COUNT", str(cls.HEAD_AUTO_L1_COUNT)))
+            cls.TOPIC_BOUNDARY_DISTANCE = float(os.getenv("CA_TOPIC_BOUNDARY_DISTANCE", str(cls.TOPIC_BOUNDARY_DISTANCE)))
             cls.CONTEXT_LENGTH = int(os.getenv("CA_CONTEXT_LENGTH", str(cls.CONTEXT_LENGTH)))
             cls.TOOL_PRE_UPGRADE_COUNT = int(os.getenv("CA_TOOL_PRE_UPGRADE_COUNT", str(cls.TOOL_PRE_UPGRADE_COUNT)))
             cls.TOOL_MAX_UPGRADE_K = int(os.getenv("CA_TOOL_MAX_UPGRADE_K", str(cls.TOOL_MAX_UPGRADE_K)))
