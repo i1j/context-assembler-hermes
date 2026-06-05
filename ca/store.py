@@ -27,7 +27,7 @@ from .config import Config
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 INITIAL_BACKFILL_ATTEMPTS = 0
 
 _SCHEMA_SQL = f"""
@@ -54,6 +54,42 @@ CREATE INDEX IF NOT EXISTS idx_tc_offset ON turn_cache(session_id, token_offset)
 CREATE INDEX IF NOT EXISTS idx_tc_turn_type ON turn_cache(session_id, turn_type);
 CREATE INDEX IF NOT EXISTS idx_tc_assemble_status ON turn_cache(_assemble_status);
 CREATE INDEX IF NOT EXISTS idx_pending_backfill ON turn_cache(session_id, turn_type, _assemble_status);
+
+-- TurnPlan: 记录 A-stage 每轮拣选决策，供调试比对。
+-- 后期可扩展 topic_group 字段，将相邻对话轮合并为话题。
+CREATE TABLE IF NOT EXISTS turn_plan (
+    session_id     TEXT    NOT NULL,
+    turn_index     INTEGER NOT NULL,
+    turn_type      TEXT    NOT NULL DEFAULT 'dialogue',
+    tool_sub_index INTEGER NOT NULL DEFAULT 0,
+
+    -- 拣选决策
+    target_level   TEXT    NOT NULL DEFAULT 'L0',
+    decision_reason TEXT   NOT NULL DEFAULT 'middle',
+
+    -- Token 信息
+    l2_tokens      INTEGER NOT NULL DEFAULT 0,
+    summary_tokens INTEGER NOT NULL DEFAULT 0,
+    tokens_saved   INTEGER NOT NULL DEFAULT 0,
+
+    -- 检索升级记录（仅 retrieved 时有值）
+    rrf_score      REAL,
+    upgrade_rank   INTEGER,
+
+    -- 预算快照
+    budget_remaining INTEGER,
+
+    -- 后期扩展：话题归并
+    topic_group    INTEGER,
+
+    created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+
+    PRIMARY KEY (session_id, turn_index, turn_type, tool_sub_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tp_session ON turn_plan(session_id);
+CREATE INDEX IF NOT EXISTS idx_tp_level ON turn_plan(session_id, target_level);
+CREATE INDEX IF NOT EXISTS idx_tp_topic ON turn_plan(session_id, topic_group);
 
 CREATE TABLE IF NOT EXISTS _meta (
     key   TEXT PRIMARY KEY,
@@ -153,7 +189,7 @@ class SQLiteStore:
 
     def _rebuild(self) -> None:
         conn = self.conn
-        conn.executescript("DROP TABLE IF EXISTS turn_cache; DROP TABLE IF EXISTS _meta;")
+        conn.executescript("DROP TABLE IF EXISTS turn_cache; DROP TABLE IF EXISTS turn_plan; DROP TABLE IF EXISTS _meta;")
         conn.executescript(_SCHEMA_SQL)
         conn.commit()
 
@@ -361,6 +397,7 @@ class SQLiteStore:
 
     def delete_session(self, session_id: str) -> None:
         self.conn.execute("DELETE FROM turn_cache WHERE session_id=?", (session_id,))
+        self.conn.execute("DELETE FROM turn_plan WHERE session_id=?", (session_id,))
         self.conn.commit()
         self._invalidate_session_cache()
 
@@ -392,4 +429,56 @@ class SQLiteStore:
                WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?""",
             (session_id, turn_index, turn_type, sub_index),
         )
+        self.conn.commit()
+
+    # ── turn_plan 读写 ──
+
+    def write_turn_plan(self, session_id: str, entries: List[Dict[str, Any]]) -> bool:
+        """写入一次 assemble() 产生的全部拣选决策。先清空再批量写入。"""
+        if not entries:
+            return True
+        try:
+            conn = self.conn
+            conn.execute("DELETE FROM turn_plan WHERE session_id=?", (session_id,))
+            conn.executemany(
+                """INSERT INTO turn_plan
+                   (session_id, turn_index, turn_type, tool_sub_index,
+                    target_level, decision_reason,
+                    l2_tokens, summary_tokens, tokens_saved,
+                    rrf_score, upgrade_rank, budget_remaining, topic_group)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(session_id,
+                  e["turn_index"], e.get("turn_type", "dialogue"), e.get("tool_sub_index", 0),
+                  e["target_level"], e["decision_reason"],
+                  e.get("l2_tokens", 0), e.get("summary_tokens", 0), e.get("tokens_saved", 0),
+                  e.get("rrf_score"), e.get("upgrade_rank"), e.get("budget_remaining"),
+                  e.get("topic_group")) for e in entries]
+            )
+            conn.commit()
+            return True
+        except sqlite3.Error as exc:
+            logger.error("write_turn_plan failed: %s", exc)
+            return False
+
+    def read_turn_plan(self, session_id: str) -> List[Dict[str, Any]]:
+        cur = self.conn.execute(
+            """SELECT session_id, turn_index, turn_type, tool_sub_index,
+                      target_level, decision_reason,
+                      l2_tokens, summary_tokens, tokens_saved,
+                      rrf_score, upgrade_rank, budget_remaining, topic_group
+               FROM turn_plan WHERE session_id=?
+               ORDER BY turn_index, turn_type, tool_sub_index""",
+            (session_id,),
+        )
+        return [
+            {"turn_index": r[1], "turn_type": r[2], "tool_sub_index": r[3],
+             "target_level": r[4], "decision_reason": r[5],
+             "l2_tokens": r[6], "summary_tokens": r[7], "tokens_saved": r[8],
+             "rrf_score": r[9], "upgrade_rank": r[10], "budget_remaining": r[11],
+             "topic_group": r[12]}
+            for r in cur
+        ]
+
+    def delete_turn_plan(self, session_id: str) -> None:
+        self.conn.execute("DELETE FROM turn_plan WHERE session_id=?", (session_id,))
         self.conn.commit()

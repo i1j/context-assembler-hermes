@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import Config
@@ -138,6 +139,47 @@ class SessionManager:
 
 session_manager = SessionManager(max_sessions=Config.CACHE_MAX_SESSIONS,
                                  session_ttl=Config.SESSION_TTL)
+
+
+@dataclass
+class TurnPlanEntry:
+    """A-stage 单轮拣选决策记录。
+
+    供 assemble() 写入 turn_plan 表，实现拣选过程可观测、可回放。
+    后期可通过 topic_group 字段将相邻轮次归并为话题。
+    """
+    turn_index: int
+    turn_type: str = "dialogue"
+    tool_sub_index: int = 0
+
+    target_level: str = "L0"           # L2 | L1 | L0
+    decision_reason: str = "middle"    # head | tail | retrieved | pre_upgraded | tool_head | middle
+
+    l2_tokens: int = 0
+    summary_tokens: int = 0
+    tokens_saved: int = 0
+
+    rrf_score: Optional[float] = None
+    upgrade_rank: Optional[int] = None
+
+    budget_remaining: Optional[int] = None
+    topic_group: Optional[int] = None
+
+    def as_dict(self) -> dict:
+        return {
+            "turn_index": self.turn_index,
+            "turn_type": self.turn_type,
+            "tool_sub_index": self.tool_sub_index,
+            "target_level": self.target_level,
+            "decision_reason": self.decision_reason,
+            "l2_tokens": self.l2_tokens,
+            "summary_tokens": self.summary_tokens,
+            "tokens_saved": self.tokens_saved,
+            "rrf_score": self.rrf_score,
+            "upgrade_rank": self.upgrade_rank,
+            "budget_remaining": self.budget_remaining,
+            "topic_group": self.topic_group,
+        }
 
 
 class ContextAssembler:
@@ -566,6 +608,11 @@ class ContextAssembler:
                 upgrades, tail_start, idx_to_turn, tool_key_map
             )
 
+        self._compute_and_store_turn_plan(
+            messages, l1_texts, l0_texts, tool_l1_texts, tool_l0_texts,
+            dialogue_head, tool_head_snapshot, upgrades,
+            tail_start, idx_to_turn, tool_key_map, budget)
+
         if Config.is_dedup_enabled():
             with stats.time_phase("dedup"):
                 final = self._deduplicate_messages(final)
@@ -745,6 +792,108 @@ class ContextAssembler:
                 result.append(msg)
             i += 1
         return result
+
+    def _compute_and_store_turn_plan(self, messages, l1_texts, l0_texts,
+                                     tool_l1_texts, tool_l0_texts,
+                                     dialogue_head, tool_head, upgrades,
+                                     tail_start, idx_to_turn, tool_key_map,
+                                     budget):
+        """计算每轮拣选决策并写入 store.turn_plan，供调试比对。"""
+        entries: List[TurnPlanEntry] = []
+
+        # ── 对话轮 ──
+        for turn in sorted(l1_texts.keys()):
+            l1 = l1_texts.get(turn) or ""
+            l0 = l0_texts.get(turn) or ""
+            l1_valid = self._is_valid_summary(l1)
+
+            # 确定该 turn 的任一消息是否在 tail 中
+            in_tail = any(i >= tail_start for i, mi in enumerate(messages)
+                         if mi.get("_turn_index", i) == turn
+                         and mi.get("role") not in ("system", "tool")
+                         and "tool_calls" not in mi)
+
+            l2_tk = sum(self._token_estimate(m.get("content", ""))
+                       for m in messages
+                       if m.get("_turn_index", -1) == turn
+                       and m.get("role") not in ("system", "tool")
+                       and "tool_calls" not in m)
+            sum_tk = self._token_estimate(l1) if l1_valid else self._token_estimate(l0 or "")
+
+            entry = TurnPlanEntry(turn_index=turn, turn_type="dialogue",
+                                  l2_tokens=l2_tk, summary_tokens=sum_tk,
+                                  tokens_saved=max(0, l2_tk - sum_tk),
+                                  budget_remaining=budget)
+
+            if turn in dialogue_head and l1_valid:
+                entry.target_level = "L1"
+                entry.decision_reason = "head"
+            elif in_tail:
+                entry.target_level = "L2"
+                entry.decision_reason = "tail"
+            elif turn in upgrades and l1_valid:
+                entry.target_level = "L1"
+                entry.decision_reason = "retrieved"
+            elif l0:
+                entry.target_level = "L0"
+                entry.decision_reason = "middle"
+            else:
+                entry.target_level = "L2"
+                entry.decision_reason = "middle"
+            entries.append(entry)
+
+        # ── 工具轮 ──
+        for key, l1 in sorted(tool_l1_texts.items(), key=lambda x: (x[0][0], x[0][1])):
+            l0 = tool_l0_texts.get(key) or ""
+
+            # 确定工具组起始消息索引是否在 tail 中
+            in_tail = False
+            l2_tk = 0
+            for msg_idx, entries_map in tool_key_map.items():
+                for (ekey, tk) in entries_map:
+                    if ekey == key:
+                        in_tail = msg_idx >= tail_start
+                        l2_tk = tk
+                        break
+                if l2_tk > 0:
+                    break
+
+            sum_tk = self._token_estimate(l1) or self._token_estimate(l0 or "")
+
+            entry = TurnPlanEntry(turn_index=key[0], turn_type="tool",
+                                  tool_sub_index=key[1],
+                                  l2_tokens=l2_tk, summary_tokens=sum_tk,
+                                  tokens_saved=max(0, l2_tk - sum_tk),
+                                  budget_remaining=budget)
+
+            if in_tail:
+                entry.target_level = "L2"
+                entry.decision_reason = "tail"
+            elif key in tool_head and key not in upgrades:
+                if l1:
+                    entry.target_level = "L1"
+                    entry.decision_reason = "tool_head"
+                else:
+                    entry.target_level = "L2"
+                    entry.decision_reason = "tool_head"
+            elif key in upgrades:
+                summary = l1 or l0
+                if summary:
+                    entry.target_level = "L1" if l1 else "L0"
+                    entry.decision_reason = "retrieved"
+                else:
+                    entry.target_level = "L2"
+                    entry.decision_reason = "retrieved"
+            elif l0:
+                entry.target_level = "L0"
+                entry.decision_reason = "middle"
+            else:
+                entry.target_level = "L2"
+                entry.decision_reason = "middle"
+            entries.append(entry)
+
+        self.store.write_turn_plan(self._session_id, [e.as_dict() for e in entries])
+        logger.info("[CA] turn_plan: wrote %d entries for session %s", len(entries), self._session_id)
 
     # ---------- 辅助方法 ----------
     def _token_estimate(self, text: str) -> int:
