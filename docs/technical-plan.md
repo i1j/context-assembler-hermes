@@ -239,6 +239,14 @@ turn_plan(session_id, turn_index, turn_type, tool_sub_index,
 
 **后续成熟**：结构化摘要策略稳定后可推入 `tool_field_priority.yaml` 作为通用默认。
 
+### 4.3.2 通用摘要增强
+
+各 structured handler 之上，两个跨 handler 的增强规则：
+
+**terminal 错误标记**：`_summarize_terminal()` 检测输出是否包含运行时错误，通过 `_ERROR_RE` 正则（Traceback/Error:/Exception/ModuleNotFound/ImportError/NotFound/failed/FAILED 等）扫描所有非空行。匹配时 `result_summary` 和 L0 均以 `[ERROR]` 前缀标记，使 LLM 一眼识别本次调用失败了。
+
+**search_files 目录分组**：`_summarize_search_files()` 对大量命中（total_count > 3）的文件路径用 `Counter` 按父目录名聚合，取前 4 组。替代罗列前 3 个文件名，LLM 直接看到匹配分布。输出示例：`search_files: 66 matches [ca:30, tests:25, docs:11]`。
+
 ### 4.4 预选工具轮
 
 `_pre_upgrade_tools` 以对话 L1 的 `core_change` 为 Query，在工具轮 BM25 索引中检索 Top-K（`CA_TOOL_PRE_UPGRADE_COUNT`，默认 3），标记为预选。
@@ -370,6 +378,14 @@ def _token_estimate(text):
 
 压缩预算 = `model_window × COMPRESSION_THRESHOLD`（默认 0.50，对齐 Hermes `compression.threshold`）。
 deepseek-v4-flash: 1M × 0.50 = **500K tokens**。
+
+### 5.8 插件层后处理（上下文注入优化）
+
+`pre_llm_call()` 收到 `assemble()` 返回的 CA 摘要列表后，注入 Hermes user message 前执行两项跨回合优化，均在插件层（`plugins/__init__.py`），不涉及核心引擎：
+
+**连续同工具空结果合并 + ×n 计数**：遍历摘要列表，对相邻条目剥离 `[~/N/M]` 前缀标签后比较正文。相同则跳过后续条目并在保留条目末尾追加 `×{count}`。例如两条连续 `search_files: 0 hits` 合并为 `search_files: 0 hits ×2`。既避免重复行膨胀，又保留重复次数供 LLM 判断工具调用健康度。
+
+设计决策：消费端修复而非生产端。理由：① 零风险——不动核心引擎、DB 或缓存；② 注入编号（`[~/N/M]`）仅在当前注入上下文偏移，DB 索引不受影响；③ ×n 标记补偿了信息丢失。
 
 ---
 
