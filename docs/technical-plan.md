@@ -1,4 +1,4 @@
-# ContextAssembler 详细设计文档
+# ContextAssembler 详细设计文档 (v4.4.1)
 
 ## 文档信息
 
