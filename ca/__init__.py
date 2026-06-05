@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import logging
 import sys
 import threading
@@ -1007,21 +1008,47 @@ class ContextAssembler:
             result.extend(grp)
         return result
 
+    # 匹配 [~/N] 或 [~/N/M] 前缀标签（N,M 为正整数）
+    _CA_TAG_RE = re.compile(r'^\[~/\d+(?:/\d+)?\]\s*')
+
     def _deduplicate_messages(self, messages):
-        seen = set()
-        deduped = []
-        for msg in messages:
+        """全指纹去重，含跨轮摘要标签归一化。
+
+        对 content 中的 [~/N] / [~/N/M] 前缀标签做剥离后再计算指纹，
+        使跨轮相同摘要（同名工具同结果、同 core_change 对话轮等）可命中同一指纹。
+        重复项保留**最后**出现的那条——最后一轮更靠近 tail 保护区且 LLM 更关心。
+        system 消息豁免，始终保留。
+        """
+        # Pass 1: 计算每条消息的指纹，记下最后出现的索引
+        fp_last_idx: dict = {}
+        for i, msg in enumerate(messages):
             if msg.get("role") == "system":
-                deduped.append(msg)
-                continue
-            normalized = self._deep_normalize(msg)
-            key = hashlib.sha256(json.dumps(normalized, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-            if key not in seen:
-                seen.add(key)
-                deduped.append(msg)
+                continue  # system 消息不参与去重
+            key = self._msg_fingerprint(msg)
+            fp_last_idx[key] = i  # 相同指纹 → 覆盖为最后出现位置
+
+        # Pass 2: 仅保留最后出现的 + 所有 system 消息
+        keep = set(fp_last_idx.values())
+        deduped = [
+            msg for i, msg in enumerate(messages)
+            if msg.get("role") == "system" or i in keep
+        ]
+
         if Config.DEBUG_MODE:
             logger.debug("dedup: before=%d, after=%d", len(messages), len(deduped))
         return deduped
+
+    def _msg_fingerprint(self, msg: dict) -> str:
+        """计算消息指纹，CA 摘要标签 [~/N] / [~/N/M] 剥离后归一化。"""
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            stripped = self._CA_TAG_RE.sub('', content)
+            if stripped != content:
+                msg = {**msg, "content": stripped}
+        normalized = self._deep_normalize(msg)
+        return hashlib.sha256(
+            json.dumps(normalized, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
 
     def _deep_normalize(self, obj, depth=0):
         if depth > 10:
