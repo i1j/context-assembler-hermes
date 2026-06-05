@@ -66,7 +66,7 @@ class Config:
         logger.warning("Invalid CA_LLM_THINK: '%s', ignoring", raw)
         return None
 
-    PROTECT_TAIL_TOKENS: ClassVar[int] = int(os.getenv("CA_PROTECT_TAIL_TOKENS", "20000"))
+    PROTECT_TAIL_TOKENS: ClassVar[int] = int(os.getenv("CA_PROTECT_TAIL_TOKENS", "10000"))
     HEAD_AUTO_L1_COUNT: ClassVar[int] = int(os.getenv("CA_HEAD_AUTO_L1_COUNT", "3"))
 
     # 工具尾区保护：只保留最近 N 个对话轮的工具原文。

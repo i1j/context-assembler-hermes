@@ -957,18 +957,17 @@ class ContextAssembler:
             return False
 
     def _compute_tail_start(self, messages):
-        """从消息尾部反向累计 token 数，找到对话 tail 保护区的起始索引。
+        """从消息尾部反向累计对话消息的 token 数，找到对话 tail 保护区。
 
-        遍历所有消息（含工具响应），token 估算采用 len//2 对齐 Hermes 风格。
-        1.5× 软上限防止单条超大 tool 响应截断整条 tail。
+        工具响应（role=tool）不参与计数——它们已有独立的 TOOL_TAIL_TURN_COUNT
+        保护机制。对话 tail 只需保护对话文本的最近 ~N tokens。
         """
         tail_tokens = 0
-        soft_ceiling = int(Config.PROTECT_TAIL_TOKENS * 1.5)
         for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "tool":
+                continue
             tail_tokens += self._token_estimate(messages[i].get("content", ""))
-            if tail_tokens >= soft_ceiling:
-                return i
-            elif tail_tokens >= Config.PROTECT_TAIL_TOKENS:
+            if tail_tokens >= Config.PROTECT_TAIL_TOKENS:
                 return i
         return 0
 
