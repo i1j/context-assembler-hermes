@@ -576,10 +576,12 @@ class ContextAssembler:
                 if i in tool_key_map:
                     entries = tool_key_map[i]
                     for key, token_count in entries:
-                        if key in tool_head:
-                            head_tokens += token_count
+                        # 工具尾区优先级高于 head：同组若在 tail 则整组原文保留，
+                        # 不应再计入 head_tokens
                         if i >= tail_start:
                             tail_tokens += token_count
+                        elif key in tool_head:
+                            head_tokens += token_count
                     group_len = len(self._extract_tool_group(messages, i)[0])
                     i += group_len
                 else:
@@ -590,7 +592,8 @@ class ContextAssembler:
             token = self._token_estimate(msg.get("content", ""))
             if turn in dialogue_head:
                 head_tokens += token
-            if i >= tail_start:
+            elif i >= tail_start:
+                # elif 确保 head 优先（head 摘要比 tail 原文更节省），避免双计
                 tail_tokens += token
             i += 1
 
@@ -679,7 +682,12 @@ class ContextAssembler:
                         else:
                             result.extend(tool_msgs)
                     else:
-                        result.extend(tool_msgs)
+                        # 中段末升级工具轮 → L0 一行摘要（与对话 middle 行为一致）
+                        l0 = tool_l0_texts.get(key)
+                        if l0:
+                            result.append({"role": "assistant", "content": f"[~/{key[0]}/{key[1]}] {l0}"})
+                        else:
+                            result.extend(tool_msgs)
                 i = next_i
                 continue
             # 普通消息
@@ -690,6 +698,9 @@ class ContextAssembler:
                     result.append({"role": "assistant", "content": f"[~/{turn}] {l1}"})
                 else:
                     result.append(msg)
+            elif i >= tail_start:
+                # tail 保护：最近的消息保留原文，优先级高于 middle 降级
+                result.append(msg)
             elif turn in dialogue_middle:
                 if turn in upgrades:
                     l1 = l1_texts.get(turn)
@@ -703,8 +714,6 @@ class ContextAssembler:
                         result.append({"role": "assistant", "content": f"[~/{turn}] {l0}"})
                     else:
                         result.append(msg)
-            elif i >= tail_start:
-                result.append(msg)
             else:
                 result.append(msg)
             i += 1
@@ -730,8 +739,16 @@ class ContextAssembler:
             return False
 
     def _compute_tail_start(self, messages):
+        """从消息尾部反向累计 token 数，找到 tail 保护区的起始索引。
+
+        tool 响应（role=tool）不单独计 token —— 它们属于工具组，
+        其压缩/保留决策由前导 tool_calls 消息统一管理。
+        跳过它们可防止末尾大量工具响应"劫持" tail 预算。
+        """
         tail_tokens = 0
         for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "tool":
+                continue
             tail_tokens += self._token_estimate(messages[i].get("content", ""))
             if tail_tokens >= Config.PROTECT_TAIL_TOKENS:
                 return i

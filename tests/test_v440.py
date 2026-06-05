@@ -298,6 +298,8 @@ class TestToolTurnAStage:
     @patch('ca.ContextAssembler._call_llm_for_l1', return_value='核心摘要：对话')
     def test_TC_A_021_pre_upgrade_l1_fallback(self, mock_llm, ca_engine, monkeypatch):
         """预选工具轮在 Head/Middle 区域至少以 L1 替换（兜底保障）"""
+        # tail_start 由非 tool 消息内容决定；设小阈值并在消息尾部放置
+        # 足够填充 tail 的消息，使工具组落在 tail 之外的 middle 区域
         monkeypatch.setattr('ca.config.Config.PROTECT_TAIL_TOKENS', 1)
         tidx = max(ca_engine._turn_counter, 0) + 1
         ca_engine._pre_upgraded_tool_turns = {(tidx, 1)}
@@ -307,12 +309,15 @@ class TestToolTurnAStage:
             "implicit_knowledge": [], "next_action_hint": ""
         }), None, None)
         ca_engine.cache.rebuild_bm25_snapshot()
+        # 工具组 + 尾部用户/助手消息填充 tail_start 使其 > 工具组索引
         msgs = [
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "", "tool_calls": [
                 {"id": "t1", "function": {"name": "t", "arguments": "{}"}}
             ]},
-            {"role": "tool", "tool_call_id": "t1", "content": "ok"}
+            {"role": "tool", "tool_call_id": "t1", "content": "ok"},
+            {"role": "user", "content": "filler text"},
+            {"role": "assistant", "content": "done"},
         ]
         ca_engine.store.write_turn(
             TEST_SESSION, tidx, l0_text="", l1_text="{}",
