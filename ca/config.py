@@ -73,7 +73,11 @@ class Config:
     # 工具轮与对话轮功能不同——对话需要 20K token 尾区保护，
     # 但工具轮只需最近 2-3 轮的上下文即可。
     TOOL_TAIL_TURN_COUNT: ClassVar[int] = int(os.getenv("CA_TOOL_TAIL_TURN_COUNT", "2"))
-    CONTEXT_LENGTH: ClassVar[int] = int(os.getenv("CA_CONTEXT_LENGTH", "32000"))
+    CONTEXT_LENGTH: ClassVar[int] = int(os.getenv("CA_CONTEXT_LENGTH", "200000"))
+
+    # 压缩警戒比值：对齐 Hermes compression.threshold。
+    # context_length = model_window × threshold（触发压缩的预算上限）。
+    COMPRESSION_THRESHOLD: ClassVar[float] = float(os.getenv("CA_COMPRESSION_THRESHOLD", "0.50"))
 
     # 话题边界检测：当前轮 L1 向量与上一对话轮 L1 向量的余弦距离
     # 低于此阈值 → 新话题。范围 [0, 1]，默认 0.50。
@@ -81,9 +85,11 @@ class Config:
 
     # 已知模型上下文窗口（Hermes hook 不传 context_length，需自行查表）
     _MODEL_CONTEXT_WINDOW: ClassVar[Dict[str, int]] = {
-        "deepseek-v4-flash": 91500,   # ~91.5K
-        "deepseek-v4-pro":   65536,   # ~64K
-        "deepseek-v4":       65536,
+        "deepseek-v4-flash": 1_000_000,
+        "deepseek-v4-pro":   1_000_000,
+        "deepseek-chat":     1_000_000,
+        "deepseek-reasoner": 1_000_000,
+        "deepseek-v4":       1_000_000,
         "deepseek-v3":       65536,
         "claude-3.5-sonnet": 200000,
         "claude-3-opus":     200000,
@@ -93,18 +99,41 @@ class Config:
 
     @classmethod
     def context_length_for_model(cls, model_name: str) -> int:
-        """根据模型名查上下文窗口，查不到用 CONTEXT_LENGTH 默认值。"""
+        """返回压缩预算上限 = model_window × COMPRESSION_THRESHOLD。
+
+        优先用 Hermes 的 get_model_context_length()（缓存命中时零开销，
+        覆盖 Ollama / Anthropic / OpenRouter 等所有 provider）。
+        加载失败或未知模型 → 自己的查表 → CONTEXT_LENGTH 兜底（200K）。
+        """
         if not model_name:
             return cls.CONTEXT_LENGTH
-        # 精确匹配
-        if model_name in cls._MODEL_CONTEXT_WINDOW:
-            return cls._MODEL_CONTEXT_WINDOW[model_name]
-        # 前缀/子串匹配
-        for key, val in cls._MODEL_CONTEXT_WINDOW.items():
-            if key in model_name or model_name in key:
-                return val
-        logger.info("Unknown model '%s', using default CONTEXT_LENGTH=%d", model_name, cls.CONTEXT_LENGTH)
-        return cls.CONTEXT_LENGTH
+        window: Optional[int] = None
+
+        # 1. Hermes 运行时（同一进程，缓存命中时极快）
+        try:
+            from agent.model_metadata import get_model_context_length
+            window = get_model_context_length(model_name, base_url="")
+        except Exception:
+            pass
+
+        # 2. 自己的已知模型表（离线/单元测试时）
+        if window is None:
+            window = cls._MODEL_CONTEXT_WINDOW.get(model_name)
+            if window is None:
+                for key, val in cls._MODEL_CONTEXT_WINDOW.items():
+                    if key in model_name or model_name in key:
+                        window = val
+                        break
+
+        # 3. 兜底
+        if window is None:
+            logger.info("Unknown model '%s', using default CONTEXT_LENGTH=%d", model_name, cls.CONTEXT_LENGTH)
+            window = cls.CONTEXT_LENGTH
+
+        result = int(window * cls.COMPRESSION_THRESHOLD)
+        logger.debug("context_length_for_model(%s): window=%d × threshold=%.2f = %d",
+                     model_name, window, cls.COMPRESSION_THRESHOLD, result)
+        return result
 
     TOOL_PRE_UPGRADE_COUNT: ClassVar[int] = int(os.getenv("CA_TOOL_PRE_UPGRADE_COUNT", "3"))
     TOOL_MAX_UPGRADE_K: ClassVar[int] = int(os.getenv("CA_TOOL_MAX_UPGRADE_K", "3"))
@@ -207,6 +236,7 @@ class Config:
             cls.HEAD_AUTO_L1_COUNT = int(os.getenv("CA_HEAD_AUTO_L1_COUNT", str(cls.HEAD_AUTO_L1_COUNT)))
             cls.TOOL_TAIL_TURN_COUNT = int(os.getenv("CA_TOOL_TAIL_TURN_COUNT", str(cls.TOOL_TAIL_TURN_COUNT)))
             cls.TOPIC_BOUNDARY_DISTANCE = float(os.getenv("CA_TOPIC_BOUNDARY_DISTANCE", str(cls.TOPIC_BOUNDARY_DISTANCE)))
+            cls.COMPRESSION_THRESHOLD = float(os.getenv("CA_COMPRESSION_THRESHOLD", str(cls.COMPRESSION_THRESHOLD)))
             cls.CONTEXT_LENGTH = int(os.getenv("CA_CONTEXT_LENGTH", str(cls.CONTEXT_LENGTH)))
             cls.TOOL_PRE_UPGRADE_COUNT = int(os.getenv("CA_TOOL_PRE_UPGRADE_COUNT", str(cls.TOOL_PRE_UPGRADE_COUNT)))
             cls.TOOL_MAX_UPGRADE_K = int(os.getenv("CA_TOOL_MAX_UPGRADE_K", str(cls.TOOL_MAX_UPGRADE_K)))
