@@ -29,6 +29,12 @@ from .ooda_parser import OODAParser
 from .post_process import robust_json_parse, clean_increment
 from .prompts import L1_GENERATION_PROMPT
 from .stats import AssembleStats
+
+try:
+    from tools.skill_provenance import get_current_write_origin
+except ImportError:
+    def get_current_write_origin() -> str:
+        return "unknown"
 from .tool_summarizer import ToolSummarizer
 from .lstage import BackfillThread
 
@@ -221,10 +227,15 @@ class ContextAssembler:
         prev_l1 = self._get_previous_l1()
         token_offset = self._estimate_token_offset(conversation_history)
 
+        # 在主线程捕获 write_origin（ContextVar 不自动传播到 daemon 线程）
+        _bg_review = (get_current_write_origin() == "background_review")
+        if _bg_review:
+            logger.info("[CA] process_turn_async: background review detected for turn %d", turn_index)
+
         thread = threading.Thread(
             target=self._run_c_stage,
             args=(self._session_id, turn_index, prev_l1, l2_text, token_offset, messages,
-                  user_message, assistant_response),
+                  user_message, assistant_response, _bg_review),
             daemon=True, name=f"CA-CStage-{turn_index}"
         )
         with self._task_lock:
@@ -235,20 +246,36 @@ class ContextAssembler:
         return turn_index
 
     def _run_c_stage(self, session_id, turn_index, prev_l1, l2_text, token_offset,
-                     messages=None, user_message="", assistant_response=""):
+                     messages=None, user_message="", assistant_response="",
+                     bg_review=False):
         start = time.monotonic()
         logger.info("[CA] _run_c_stage: START turn %d", turn_index)
         dialogue_ok = False
+
+        if bg_review:
+            logger.info("[CA] _run_c_stage turn %d: background review, skipping LLM", turn_index)
+
         try:
-            logger.info("[CA] _run_c_stage turn %d: calling LLM", turn_index)
-            ooda_text = self._call_llm_for_l1(prev_l1, l2_text)
-            parsed = self.ooda_parser.parse(ooda_text, previous_summary=prev_l1)
-            robust, _ = robust_json_parse(json.dumps(parsed, ensure_ascii=False))
-            cleaned = clean_increment(robust)
-            is_llm_fallback = ooda_text.startswith("核心摘要：无有效增量") and "资源与观察：\n- 无" in ooda_text
-            cleaned["_assemble_status"] = 1 if is_llm_fallback else 0
-            if not is_llm_fallback:
+            if bg_review:
+                cleaned = {
+                    "core_change": "系统后台审查",
+                    "_assemble_status": 0,
+                    "new_materials": [],
+                    "objective_facts": [],
+                    "consensus": [],
+                    "todo": []
+                }
                 dialogue_ok = True
+            else:
+                logger.info("[CA] _run_c_stage turn %d: calling LLM", turn_index)
+                ooda_text = self._call_llm_for_l1(prev_l1, l2_text)
+                parsed = self.ooda_parser.parse(ooda_text, previous_summary=prev_l1)
+                robust, _ = robust_json_parse(json.dumps(parsed, ensure_ascii=False))
+                cleaned = clean_increment(robust)
+                is_llm_fallback = ooda_text.startswith("核心摘要：无有效增量") and "资源与观察：\n- 无" in ooda_text
+                cleaned["_assemble_status"] = 1 if is_llm_fallback else 0
+                if not is_llm_fallback:
+                    dialogue_ok = True
 
             l1_str = json.dumps(cleaned, ensure_ascii=False)
             l0_text = self._extract_l0(cleaned)
