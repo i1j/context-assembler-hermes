@@ -758,3 +758,110 @@ C‑stage 在生成对话轮 L1 后，按以下步骤处理工具轮：
 ---
 
 **文档结束**
+
+---
+
+## v4.4.1 补充设计（2026-06-05）
+
+以下变更在本次调试会话中完成，尚未合并回源项目。
+
+### A. 对话轮与工具轮尾区分离（§4.2 修正）
+
+**问题**：原设计将所有消息放在同一 `_compute_tail_start` 切割线下处理。工具响应（read_file 5K-57K chars）位于消息列表末尾，单条即消耗完对话 tail 预算（20K tokens），导致最近 N 轮对话轮落入压缩区而非保护为原文。
+
+**修正**：对话轮与工具轮是两种不同资源，功能不同，不应混用同一拣选规则。
+
+| 维度 | 对话轮 | 工具轮 |
+|------|--------|--------|
+| 尾区保护 | `_compute_tail_start`：反向累计**仅对话消息**（跳过 `role=tool`），10K tokens（`//2` 估算后 ≈ 20K chars） | `TOOL_TAIL_TURN_COUNT=2`：最近 N 个**对话轮**的工具原文保留 |
+| Head | 最后 3 个有效 L1 → L1 JSON 摘要 | 预升级（`_pre_upgrade_tools`）→ L1 JSON 摘要 |
+| Middle | → L0 一行（或检索升级→L1） | → L0 一行（与对话 Middle 一致） |
+
+**工具尾区按对话轮判定而非消息索引**：一个工具组的 `(turn_index, sub_index)` key 中 `turn_index` 标记了它属于哪个对话轮。工具是否在尾区取决于其所属对话轮是否在最后 N 轮，与工具组在消息列表中的物理位置无关。这避免了消息排列导致的误判。
+
+### B. Token 估算修正（§4.3 修正）
+
+**问题**：原估算 `max(1, len(text))` 对 ASCII 文本 1 char = 1 token，严重高估。一条 28K chars 的工具响应被估算为 28K tokens，实际应为 ~7K（4 chars/token）。
+
+**修正**：对齐 Hermes `context_compressor._CHARS_PER_TOKEN=4`：
+
+```python
+def _token_estimate(text):
+    cjk = sum(1 for c in text if 0x4e00 <= c <= 0x9fff)
+    if cjk > len(text) * 0.5:
+        return int(len(text) * 1.5)   # CJK: 保守 1.5×
+    return max(1, len(text) // 2)     # ASCII: 2 chars/token（偏保守）
+```
+
+### C. 上下文窗口查询（§8 修正）
+
+**问题**：`_MODEL_CONTEXT_WINDOW` 维护过时的值（deepseek-v4-flash: 91.5K，实际 1M 窗口），且无法覆盖 Ollama 自定义模型。
+
+**修正**：三级回退。
+
+```
+1. Hermes agent.model_metadata.get_model_context_length()
+   → 覆盖所有 provider（Ollama / Anthropic / OpenRouter）
+   → 同一进程 import，缓存命中时零开销
+
+2. 自有 _MODEL_CONTEXT_WINDOW 查表
+   → 离线/单元测试时
+
+3. CONTEXT_LENGTH 默认值（200K，环境变量可覆盖）
+   → 兜底
+```
+
+压缩预算 = `model_window × COMPRESSION_THRESHOLD`（默认 0.50，对齐 Hermes `compression.threshold`）。
+deepseek-v4-flash: 1M × 0.50 = **500K tokens** 预算。
+
+### D. 后台审查轮跳过 LLM（§3 修正）
+
+**问题**：Hermes 后台 skill/memory review 注入的 ~6000 字符系统 prompt（"Review the conversation above and update the skill library..."）被 CA C-stage 送入 LLM 生成 OODA 摘要，结果始终为 `"无有效增量"`——浪费一次 LLM 调用的同时后续 A-stage 无法感知该轮。
+
+**修正**：`process_turn_async`（主线程）读取 `tools.skill_provenance.get_current_write_origin()` ContextVar（由 `conversation_loop.py:412` 设置）。若为 `"background_review"`，将标志传入 daemon 线程（ContextVar 不跨线程传播），跳过 `_call_llm_for_l1`，规则生成结构化 L1：
+
+```json
+{"core_change": "系统后台审查", "_assemble_status": 0, ...}
+```
+
+与工具轮规则摘要思路一致。
+
+### E. 话题边界检测
+
+C-stage 末尾：当前轮 L1 向量与上一对话轮 L1 向量（从 DB 读取，避免异步线程竞态）计算余弦相似度。低于 `TOPIC_BOUNDARY_DISTANCE`（默认 0.50）→ 递增 `topic_id`。结果通过 `store.upsert_turn_plan_topic()` 持久化到 `turn_plan.topic_group`，供后期 A-stage 按话题归并邻接轮次。
+
+### F. turn_plan 表（新增）
+
+新增 `turn_plan` 表（schema v3），记录每次 `assemble()` 的拣选决策：
+
+```sql
+turn_plan(session_id, turn_index, turn_type, tool_sub_index,
+          target_level, decision_reason,
+          l2_tokens, summary_tokens, tokens_saved,
+          rrf_score, upgrade_rank, budget_remaining,
+          topic_group)
+```
+
+`decision_reason` 枚举：`head | tail | retrieved | pre_upgraded | tool_head | middle`。
+`topic_group` 预留话题归并字段。
+
+当前用途：调试比对拣选决策。下一步：基于 turn_plan 做 turn 级拣选组装，不再重建全量消息列表。
+
+### G. 挑拣流程更新（§4.1 修正）
+
+同步流程第 5 步之后增加：
+
+5a. 计算 `tool_tail_turns = 最后 TOOL_TAIL_TURN_COUNT 个对话轮`（默认 2）。
+5b. 预算计算中工具轮按 `key[0] in tool_tail_turns` 计尾区 token（而非 `i >= tail_start` 按消息索引）。
+5c. 消息组装中工具尾区判定同样改为按 `key[0] in tool_tail_turns`，`tool_head` 优先级高于 `tail`。
+5d. 组装后调用 `_compute_and_store_turn_plan()` 写入拣选决策。
+
+### 配置项汇总
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `PROTECT_TAIL_TOKENS` | 10000 | 对话尾区 token 预算（`//2` 后 ≈ 20K chars） |
+| `TOOL_TAIL_TURN_COUNT` | 2 | 工具尾区保护最近 N 个对话轮 |
+| `CONTEXT_LENGTH` | 200000 | 未知模型兜底窗口大小 |
+| `COMPRESSION_THRESHOLD` | 0.50 | 压缩警戒比值 |
+| `TOPIC_BOUNDARY_DISTANCE` | 0.50 | 话题边界余弦距离阈值 |

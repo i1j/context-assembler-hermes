@@ -50,3 +50,56 @@ Hermes 有两条完全独立的机制：
 | 集成历史 | `viking://user/python-api-dev/memories/events/2026/05/23/ca_plugin_integration.md` |
 | 项目架构文档 | `~/projects/context-assembler/AGENTS.md` |
 | 测试执行指南 | 同目录 `agents.md` |
+
+## v4.4.1 改进记录（2026-06-05）
+
+调试会话中完成，尚未合并回源项目。详见 `technical-plan.md` 末尾补充。
+
+### 拣选策略：对话轮与工具轮分离
+
+核心洞察：对话轮和工具轮是两种不同的资源——对话需要深度上下文保护，旧工具响应对 LLM 价值递减。
+
+| 维度 | 对话轮 | 工具轮 |
+|------|--------|--------|
+| 尾区保护 | `_compute_tail_start`：仅计对话消息，10K tokens | `TOOL_TAIL_TURN_COUNT=2`：最近 2 个对话轮 |
+| Head | 最后 3 个有效 L1 → 结构化摘要 | 预升级工具 → L1 摘要 |
+| Middle | → L0 一行 | → L0 一行 |
+
+- 工具尾区判定：`key[0] in tool_tail_turns`（按所属对话轮），而非 `i >= tail_start`（按消息索引）
+- `_token_estimate`：ASCII `len // 2`（对齐 Hermes 4 chars/token），CJK `1.5×`
+- `PROTECT_TAIL_TOKENS`：20000 → 10000（`//2` 后 ≈ 20K chars 对话文本）
+
+### 上下文窗口
+
+- 三级回退：Hermes `get_model_context_length()` → 自有查表 → 200K 兜底
+- 压缩预算 = `model_window × COMPRESSION_THRESHOLD`（默认 0.50）
+- deepseek-v4-flash: 1M × 0.50 = 500K tokens
+- `_MODEL_CONTEXT_WINDOW` 已更新 deepseek-v4 系列至 1M
+
+### 后台审查轮识别
+
+`process_turn_async`（主线程）读 `tools.skill_provenance.get_current_write_origin()` ContextVar。
+若为 `"background_review"`，跳过 LLM，规则生成 `{"core_change": "系统后台审查"}`。
+ContextVar 不跨线程传播，需在主线程捕获后传入 daemon 线程。
+
+### 话题边界检测
+
+C-stage 末尾：当前轮 L1 向量与上一轮 L1 向量（DB 读）算余弦相似度。
+低于 0.50 → 新话题，递增 topic_id，写入 `turn_plan.topic_group`。
+
+### turn_plan 表（schema v3）
+
+记录每次 A-stage 拣选决策（turn_index, target_level, decision_reason, l2_tokens, summary_tokens, tokens_saved, topic_group）。
+下一步：基于 turn_plan 做 turn 级拣选组装，不再拼全量消息列表。
+
+### Git 提交
+
+| 提交 | 内容 |
+|------|------|
+| `774d80f` | tail 预算劫持 + 工具 middle L0 + 对话 tail 顺序 + 预算双计 |
+| `bf99b7b` | 后台审查轮跳过 LLM — ContextVar 检测 |
+| `e47fb64` | turn_plan 表 — 记录 A-stage 拣选决策 |
+| `b4e3420` | 话题边界检测 — 余弦距离 |
+| `cc63136` | 对话/工具尾区分离 — token estimator、软上限、工具 2 轮 |
+| `ba9f27c` | 对话 tail 单独计算，排除工具响应 |
+| `6f024d1` | context_length 三级回退 + 200K 兜底 |
