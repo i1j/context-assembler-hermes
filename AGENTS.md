@@ -367,6 +367,11 @@ print(f"{ca_count} CA summaries in assembled context")
 | | `TestDedupPerformance` | 1 | 去重：200 条 < 2ms 性能 |
 | | `TestDebugLogging` | 1 | 去重：CA_DEBUG 日志输出 |
 | | `TestEdgeCases` | 4 | 去重：空列表、单条、全唯一、全重复 |
+| `tests/test_plugin.py` | `TestIsAvailable` | 4 | 插件：断路器初始/3次失败/2次失败/恢复 |
+| | `TestLifecycle` | 6 | 插件：init/session_start/end/reset/空引擎 |
+| | `TestPreLlmCall` | 4 | 插件：pre_llm_call 引擎错误/CA标记提取/失败降级 |
+| | `TestPostLlmCall` | 3 | 插件：post_llm_call 调用process/错误跳过/空跳过 |
+| | `TestRegister` | 1 | 插件：register() 注册 5 个钩子 |
 
 ### 测试用例数据源（`tests/testcases/`）
 
