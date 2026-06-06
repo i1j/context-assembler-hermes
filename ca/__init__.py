@@ -606,8 +606,7 @@ class ContextAssembler:
         with stats.time_phase("layers"):
             with self._pre_upgraded_lock:
                 tool_head_snapshot = set(self._pre_upgraded_tool_turns)
-            dialogue_head, dialogue_middle, tool_middle, tail_start = \
-                self._compute_layers_v2(messages, l1_texts, tool_l1_texts, tool_head_snapshot)
+            tail_start = self._compute_tail_start(messages)
 
             # 工具尾区保护：与对话 tail 分离，只保留最近 N 个对话轮的工具原文。
             # 工具和对话功能不同——对话需要 ~20K token 上下文保护，
@@ -622,7 +621,7 @@ class ContextAssembler:
                 q_emb = None
 
         with stats.time_phase("retrieval"):
-            budget = self._available_budget(context_length, messages, dialogue_head, tool_head_snapshot, tail_start, tool_tail_turns, idx_to_turn, tool_key_map)
+            budget = self._available_budget(context_length, messages, tool_head_snapshot, tail_start, tool_tail_turns, idx_to_turn, tool_key_map)
             retriever = Retriever(snapshot)
             dial_upgrades = retriever.retrieve(user_message, query_embedding=q_emb, upgrade_budget=budget) if budget > 0 else []
             tool_upgrades_raw = retriever.retrieve_tools(user_message, query_embedding=q_emb, max_k=Config.TOOL_MAX_UPGRADE_K) if budget > 0 else []
@@ -635,31 +634,17 @@ class ContextAssembler:
             upgrades = self._select_upgrades(all_candidates, budget)
             stats.tool_upgrade_count = sum(1 for k in upgrades if isinstance(k, tuple))
 
-        if Config.is_plan_build_enabled():
-            # ── plan-based 路径：决策 → 存储 → 构建 ──
-            with stats.time_phase("plan"):
-                plan = self._compute_turn_plan(
-                    messages, l1_texts, l0_texts, tool_l1_texts, tool_l0_texts,
-                    dialogue_head, tool_head_snapshot, dialogue_middle, tool_middle,
-                    upgrades, tail_start, tool_tail_turns, idx_to_turn, tool_key_map, budget
-                )
-                self.store.write_turn_plan(self._session_id, [e.as_dict() for e in plan])
-
-            with stats.time_phase("build"):
-                final = self._build_messages_from_plan(plan, messages)
-        else:
-            # ── 旧路径（deprecated，通过 CA_PLAN_BUILD_ENABLED=0 回退）──
-            with stats.time_phase("assemble"):
-                final = self._build_final_messages_v4(
-                    messages, l1_texts, l0_texts, tool_l1_texts, tool_l0_texts,
-                    dialogue_head, tool_head_snapshot, dialogue_middle, tool_middle,
-                    upgrades, tail_start, tool_tail_turns, idx_to_turn, tool_key_map
-                )
-
-            self._compute_and_store_turn_plan(
+        # ── plan-based 路径：决策 → 存储 → 构建 ──
+        with stats.time_phase("plan"):
+            plan = self._compute_turn_plan(
                 messages, l1_texts, l0_texts, tool_l1_texts, tool_l0_texts,
-                dialogue_head, tool_head_snapshot, upgrades,
-                tail_start, tool_tail_turns, idx_to_turn, tool_key_map, budget)
+                tool_head_snapshot,
+                upgrades, tail_start, tool_tail_turns, idx_to_turn, tool_key_map, budget
+            )
+            self.store.write_turn_plan(self._session_id, [e.as_dict() for e in plan])
+
+        with stats.time_phase("build"):
+            final = self._build_messages_from_plan(plan, messages)
 
         if Config.is_dedup_enabled():
             with stats.time_phase("dedup"):
@@ -670,17 +655,8 @@ class ContextAssembler:
             logger.debug("Assemble stats: %s", stats)
         return final
 
-    def _compute_layers_v2(self, messages, l1_texts, tool_l1_texts, tool_head_snapshot):
-        valid_dialogue = sorted(
-            [idx for idx in l1_texts if self._is_valid_summary(l1_texts[idx])]
-        )[:Config.HEAD_AUTO_L1_COUNT]
-        dialogue_head = set(valid_dialogue)
-        tail_start = self._compute_tail_start(messages)
-        dialogue_middle = set(l1_texts.keys()) - dialogue_head
-        tool_middle = set(tool_l1_texts.keys()) - tool_head_snapshot
-        return dialogue_head, dialogue_middle, tool_middle, tail_start
 
-    def _available_budget(self, context_length, messages, dialogue_head, tool_head, tail_start, tool_tail_turns, idx_to_turn, tool_key_map):
+    def _available_budget(self, context_length, messages, tool_head, tail_start, tool_tail_turns, idx_to_turn, tool_key_map):
         system_tokens = 0
         head_tokens = 0
         tail_tokens = 0
@@ -711,10 +687,7 @@ class ContextAssembler:
 
             turn = idx_to_turn.get(i, i)
             token = self._token_estimate(msg.get("content", ""))
-            if turn in dialogue_head:
-                head_tokens += token
-            elif i >= tail_start:
-                # elif 确保 head 优先（head 摘要比 tail 原文更节省），避免双计
+            if i >= tail_start:
                 tail_tokens += token
             i += 1
 
@@ -775,17 +748,14 @@ class ContextAssembler:
 
     def _compute_turn_plan(self, messages, l1_texts, l0_texts,
                            tool_l1_texts, tool_l0_texts,
-                           dialogue_head, tool_head,
-                           dialogue_middle, tool_middle,
+                           tool_head,
                            upgrades, tail_start, tool_tail_turns, idx_to_turn, tool_key_map,
                            budget) -> List[TurnPlanEntry]:
         """统一计算对话轮与工具轮的拣选决策，返回 TurnPlanEntry 列表。
 
-        合并了 _build_final_messages_v4 和 _compute_and_store_turn_plan 的决策逻辑，
-        消除两处重复。决策规则：
+        已移除自动头区，全部走拣选。决策规则：
 
         对话轮：
-          head + 有效 L1 → L1 (head)
           tail           → L2 (tail)
           upgrades + L1  → L1 (retrieved)
           middle + L0    → L0 (middle)
@@ -824,15 +794,7 @@ class ContextAssembler:
                                   tokens_saved=max(0, l2_tk - sum_tk),
                                   budget_remaining=budget)
 
-            if turn in dialogue_head:
-                if l1_valid:
-                    entry.target_level = "L1"
-                    entry.decision_reason = "head"
-                else:
-                    # 防御：head turn 的 L1 无效则保留 L2（与旧 v4 一致）
-                    entry.target_level = "L2"
-                    entry.decision_reason = "head"
-            elif in_tail:
+            if in_tail:
                 entry.target_level = "L2"
                 entry.decision_reason = "tail"
             elif turn in upgrades:
@@ -938,6 +900,8 @@ class ContextAssembler:
             prefix = f"[~/{entry.turn_index}"
             if is_tool:
                 prefix += f"/{entry.tool_sub_index}"
+            else:
+                prefix += "/0"
             prefix += "] "
 
             if entry.target_level == "L2":
@@ -990,192 +954,6 @@ class ContextAssembler:
                 result.append({"role": "user", "content": l2_text, "_turn_index": turn_index})
         except (json.JSONDecodeError, TypeError):
             result.append({"role": "user", "content": l2_text, "_turn_index": turn_index})
-
-    # ── 旧方法（deprecated，通过 CA_PLAN_BUILD_ENABLED=0 回退）──
-
-    def _build_final_messages_v4(self, messages, l1_texts, l0_texts,
-                                 tool_l1_texts, tool_l0_texts,
-                                 dialogue_head, tool_head,
-                                 dialogue_middle, tool_middle,
-                                 upgrades, tail_start, tool_tail_turns, idx_to_turn,
-                                 tool_key_map):
-        """(deprecated) 旧消息组装路径。已被 _compute_turn_plan + _build_messages_from_plan 替代。
-
-        通过 CA_PLAN_BUILD_ENABLED=0 回退到此路径。
-        """
-        result = []
-        i = 0
-        while i < len(messages):
-            msg = messages[i]
-            role = msg.get("role", "user")
-            if role == "system":
-                result.append(msg)
-                i += 1
-                continue
-            if "tool_calls" in msg:
-                entries = tool_key_map.get(i, [])
-                group, next_i = self._extract_tool_group(messages, i)
-                for idx_in_msg, (key, _) in enumerate(entries):
-                    call = msg["tool_calls"][idx_in_msg]
-                    call_id = call.get("id")
-                    matched_responses = [r for r in group[1:] if r.get("tool_call_id") == call_id]
-                    tool_msgs = [msg] + matched_responses
-                    if key in tool_head and key not in upgrades:
-                        l1 = tool_l1_texts.get(key)
-                        if l1:
-                            result.append({"role": "assistant", "content": f"[~/{key[0]}/{key[1]}] {l1}"})
-                            continue
-                    if key[0] in tool_tail_turns:
-                        result.extend(tool_msgs)
-                        continue
-                    if key in upgrades:
-                        summary = tool_l1_texts.get(key) or tool_l0_texts.get(key)
-                        if summary:
-                            result.append({"role": "assistant", "content": f"[~/{key[0]}/{key[1]}] {summary}"})
-                        else:
-                            result.extend(tool_msgs)
-                    else:
-                        # 中段末升级工具轮 → L0 一行摘要（与对话 middle 行为一致）
-                        l0 = tool_l0_texts.get(key)
-                        if l0:
-                            result.append({"role": "assistant", "content": f"[~/{key[0]}/{key[1]}] {l0}"})
-                        else:
-                            result.extend(tool_msgs)
-                i = next_i
-                continue
-            # 普通消息
-            turn = idx_to_turn.get(i, i)
-            if turn in dialogue_head:
-                l1 = l1_texts.get(turn)
-                if l1 and self._is_valid_summary(l1):
-                    result.append({"role": "assistant", "content": f"[~/{turn}] {l1}"})
-                else:
-                    result.append(msg)
-            elif i >= tail_start:
-                # tail 保护：最近的消息保留原文，优先级高于 middle 降级
-                result.append(msg)
-            elif turn in dialogue_middle:
-                if turn in upgrades:
-                    l1 = l1_texts.get(turn)
-                    if l1 and self._is_valid_summary(l1):
-                        result.append({"role": "assistant", "content": f"[~/{turn}] {l1}"})
-                    else:
-                        result.append(msg)
-                else:
-                    l0 = l0_texts.get(turn)
-                    if l0:
-                        result.append({"role": "assistant", "content": f"[~/{turn}] {l0}"})
-                    else:
-                        result.append(msg)
-            else:
-                result.append(msg)
-            i += 1
-        return result
-
-    def _compute_and_store_turn_plan(self, messages, l1_texts, l0_texts,
-                                     tool_l1_texts, tool_l0_texts,
-                                     dialogue_head, tool_head, upgrades,
-                                     tail_start, tool_tail_turns, idx_to_turn, tool_key_map,
-                                     budget):
-        """(deprecated) 旧 turn_plan 写入路径。
-
-        已被 assemble() 中直接调用 _compute_turn_plan + store.write_turn_plan 替代。
-        通过 CA_PLAN_BUILD_ENABLED=0 回退到此路径。
-        """
-        entries: List[TurnPlanEntry] = []
-
-        # ── 对话轮 ──
-        for turn in sorted(l1_texts.keys()):
-            l1 = l1_texts.get(turn) or ""
-            l0 = l0_texts.get(turn) or ""
-            l1_valid = self._is_valid_summary(l1)
-
-            # 确定该 turn 的任一消息是否在 tail 中
-            in_tail = any(i >= tail_start for i, mi in enumerate(messages)
-                         if mi.get("_turn_index", i) == turn
-                         and mi.get("role") not in ("system", "tool")
-                         and "tool_calls" not in mi)
-
-            l2_tk = sum(self._token_estimate(m.get("content", ""))
-                       for m in messages
-                       if m.get("_turn_index", -1) == turn
-                       and m.get("role") not in ("system", "tool")
-                       and "tool_calls" not in m)
-            sum_tk = self._token_estimate(l1) if l1_valid else self._token_estimate(l0 or "")
-
-            entry = TurnPlanEntry(turn_index=turn, turn_type="dialogue",
-                                  l2_tokens=l2_tk, summary_tokens=sum_tk,
-                                  tokens_saved=max(0, l2_tk - sum_tk),
-                                  budget_remaining=budget)
-
-            if turn in dialogue_head and l1_valid:
-                entry.target_level = "L1"
-                entry.decision_reason = "head"
-            elif in_tail:
-                entry.target_level = "L2"
-                entry.decision_reason = "tail"
-            elif turn in upgrades and l1_valid:
-                entry.target_level = "L1"
-                entry.decision_reason = "retrieved"
-            elif l0:
-                entry.target_level = "L0"
-                entry.decision_reason = "middle"
-            else:
-                entry.target_level = "L2"
-                entry.decision_reason = "middle"
-            entries.append(entry)
-
-        # ── 工具轮 ──
-        for key, l1 in sorted(tool_l1_texts.items(), key=lambda x: (x[0][0], x[0][1])):
-            l0 = tool_l0_texts.get(key) or ""
-
-            # 确定工具组所属对话轮是否在 tail 内
-            in_tail = key[0] in tool_tail_turns
-            l2_tk = 0
-            for msg_idx, entries_map in tool_key_map.items():
-                for (ekey, tk) in entries_map:
-                    if ekey == key:
-                        l2_tk = tk
-                        break
-                if l2_tk > 0:
-                    break
-
-            sum_tk = self._token_estimate(l1) or self._token_estimate(l0 or "")
-
-            entry = TurnPlanEntry(turn_index=key[0], turn_type="tool",
-                                  tool_sub_index=key[1],
-                                  l2_tokens=l2_tk, summary_tokens=sum_tk,
-                                  tokens_saved=max(0, l2_tk - sum_tk),
-                                  budget_remaining=budget)
-
-            if key in tool_head and key not in upgrades:
-                if l1:
-                    entry.target_level = "L1"
-                    entry.decision_reason = "tool_head"
-                else:
-                    entry.target_level = "L2"
-                    entry.decision_reason = "tool_head"
-            elif in_tail:
-                entry.target_level = "L2"
-                entry.decision_reason = "tail"
-            elif key in upgrades:
-                summary = l1 or l0
-                if summary:
-                    entry.target_level = "L1" if l1 else "L0"
-                    entry.decision_reason = "retrieved"
-                else:
-                    entry.target_level = "L2"
-                    entry.decision_reason = "retrieved"
-            elif l0:
-                entry.target_level = "L0"
-                entry.decision_reason = "middle"
-            else:
-                entry.target_level = "L2"
-                entry.decision_reason = "middle"
-            entries.append(entry)
-
-        self.store.write_turn_plan(self._session_id, [e.as_dict() for e in entries])
-        logger.info("[CA] turn_plan: wrote %d entries for session %s", len(entries), self._session_id)
 
     # ---------- 辅助方法 ----------
     def _token_estimate(self, text: str) -> int:
@@ -1254,12 +1032,15 @@ class ContextAssembler:
     _CA_TAG_RE = re.compile(r'^\[~/\d+(?:/\d+)?\]\s*')
 
     def _deduplicate_messages(self, messages):
-        """全指纹去重，含跨轮摘要标签归一化 + 位置原位标记。
+        """全指纹去重，含跨轮摘要标签归一化 + 原位指向标记。
 
         对 content 中的 [~/N] / [~/N/M] 前缀标签做剥离后再计算指纹，
         使跨轮相同摘要（同名工具同结果、同 core_change 对话轮等）可命中同一指纹。
-        重复项保留**最后**出现的那条，在之前被删的位置插入轻量标记
-        `(同[~/N])`，使 LLM 知晓时间线上的分布。
+        重复项保留**最先**出现的那条（留最先），后续重复在原位替换为
+        指向标记 `(同[~/N/0])` / `(同[~/N/m])`，指向第一次出现的 tag。
+        两位格式统一：对话轮 `[~/N/0]`，工具轮 `[~/N/m]`。
+        留最先策略：首次出现位置永远不动 → 前缀稳定；
+        标记在原位替换不会进一步破坏缓存（重复位置本就要变动）。
         system 消息豁免，始终保留。
         """
         # Pass 1: 计算每条消息的指纹，收集所有出现位置及其标签
@@ -1276,33 +1057,36 @@ class ContextAssembler:
                     tag = content[:end+1]
             fp_occurrences.setdefault(key, []).append((i, tag))
 
-        # Pass 2: 为重复组构建标记映射：earlier_idx → survivor_tag
-        placeholders: dict = {}  # earlier_idx → placeholder_text
+        # Pass 2: 为重复组构建标记映射：later_idx → first_tag
+        # 留最先：第一次出现的位置永远保留，后续位置插入指向标记
+        placeholders: dict = {}  # later_idx → placeholder_text
         for key, occurrences in fp_occurrences.items():
             if len(occurrences) <= 1:
                 continue
-            last_idx, last_tag = occurrences[-1]
-            # 幸存者自身的标签作为引用目标
-            ref_tag = last_tag if last_tag else ""
+            first_idx, first_tag = occurrences[0]
+            ref_tag = first_tag if first_tag else ""
             if not ref_tag:
                 continue  # 无标签的不做标记
-            for idx, _ in occurrences[:-1]:
+            for idx, _ in occurrences[1:]:
                 placeholders[idx] = f"(同{ref_tag})"
 
-        # Pass 3: 构建输出，原位替换
-        keep_last = {occ[-1][0] for occ in fp_occurrences.values()}
+        # ── Pass 3: 构建输出 ──
+        # 首次出现保留不动（前缀稳定），后续重复在原位替换为指向标记。
+        # 标记 (同[~/N/0]) / (同[~/N/m]) 指向第一次出现的 tag。
+        # 原位替换仅影响重复位置（它们本就要变动），首次出现位置永远不变。
+        keep_first = {occ[0][0] for occ in fp_occurrences.values()}
         deduped = []
         for i, msg in enumerate(messages):
             if msg.get("role") == "system":
                 deduped.append(msg)
+            elif i in keep_first:
+                deduped.append(msg)
             elif i in placeholders:
-                # 被删消息的位置 → 轻量标记
+                # 被删位置 → 指向首次出现的标记，原位保留不偏移
                 deduped.append({
                     "role": "assistant",
                     "content": placeholders[i]
                 })
-            elif i in keep_last:
-                deduped.append(msg)
             # else: singletons not in fp_occurrences? shouldn't happen, but skip
 
         if Config.DEBUG_MODE:

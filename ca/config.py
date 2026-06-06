@@ -67,7 +67,6 @@ class Config:
         return None
 
     PROTECT_TAIL_TOKENS: ClassVar[int] = int(os.getenv("CA_PROTECT_TAIL_TOKENS", "10000"))
-    HEAD_AUTO_L1_COUNT: ClassVar[int] = int(os.getenv("CA_HEAD_AUTO_L1_COUNT", "3"))
 
     # 工具尾区保护：只保留最近 N 个对话轮的工具原文。
     # 工具轮与对话轮功能不同——对话需要 20K token 尾区保护，
@@ -167,10 +166,6 @@ class Config:
     def is_dedup_enabled(cls) -> bool:
         return cls._parse_bool_env("CA_DEDUP_ENABLED", default=True)
 
-    @classmethod
-    def is_plan_build_enabled(cls) -> bool:
-        """基于 turn_plan 构建消息（替代旧的 v4 两步走）。默认启用。"""
-        return cls._parse_bool_env("CA_PLAN_BUILD_ENABLED", default=True)
 
     @classmethod
     def validate(cls) -> None:
@@ -244,7 +239,6 @@ class Config:
             cls.LLM_NUM_PREDICT = int(os.getenv("CA_LLM_NUM_PREDICT", str(cls.LLM_NUM_PREDICT)))
             cls.LLM_THINK = cls._parse_llm_think()
             cls.PROTECT_TAIL_TOKENS = int(os.getenv("CA_PROTECT_TAIL_TOKENS", str(cls.PROTECT_TAIL_TOKENS)))
-            cls.HEAD_AUTO_L1_COUNT = int(os.getenv("CA_HEAD_AUTO_L1_COUNT", str(cls.HEAD_AUTO_L1_COUNT)))
             cls.TOOL_TAIL_TURN_COUNT = int(os.getenv("CA_TOOL_TAIL_TURN_COUNT", str(cls.TOOL_TAIL_TURN_COUNT)))
             cls.TOPIC_BOUNDARY_DISTANCE = float(os.getenv("CA_TOPIC_BOUNDARY_DISTANCE", str(cls.TOPIC_BOUNDARY_DISTANCE)))
             cls.COMPRESSION_THRESHOLD = float(os.getenv("CA_COMPRESSION_THRESHOLD", str(cls.COMPRESSION_THRESHOLD)))

@@ -156,6 +156,23 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 - **terminal 错误标记**：`_ERROR_RE` 正则（Traceback/Error:/Exception/...）扫描输出，匹配时前缀 `[ERROR]`
 - **search_files 目录分组**：total_count > 3 时 `Counter` 按父目录名聚合，取前 4 组
 
+### Bug 修复（2026-06-06）
+
+| 修复 | 说明 | 代码位置 |
+|------|------|---------|
+| **arguments JSON string → dict 适配** | reduce 所有 10 个 structured handler 因 `args.get()` 在 JSON string 上调用时全部崩溃回退到通用逻辑。根因：OpenAI API 标准中 `function.arguments` 是 JSON string，但 handler 假设已是 parsed dict。修复：在 `summarize()` 入口（L603-615）做一次 JSON parse，全部 handler 同时生效 | `ca/tool_summarizer.py:603-615` |
+| **旧数据全量回填** | 部署至今所有 DB 中 6,762 条工具轮 L0 存的是 raw JSON 格式（`{"total_count": N}`）。`scripts/backfill_tool_summaries.py` 离线重跑 summarizer，已全部升级为结构化摘要 | 共修复 174 个 DB |
+
+**验证日志**：日志中有 ~50 条 `WARNING` 记录（`Tool-specific summarizer for 'search_files' failed: 'str' object has no attribute 'get', falling back`），所有 handler 命中。修复后 DB 中 0 条此格式 WARNING。
+
+### 遗留问题状态（2026-06-06）
+
+| 问题 | 说明 | 优先级 |
+|------|------|--------|
+| **空摘要 BM25 排除** | `result_summary="无返回数据"` 的工具轮仍进入 BM25 检索/升级候选。**但 DB 实测 0 条工具轮走 `retrieved` 路径**，当前运行负载下无实际风险 | 低 |
+| **系统消息降级**（非 background_review 路径） | 仅 `background_review` ContextVar 修复了。其他系统触发消息仍可能被 LLM 误判降级。DB 实测 1411 行全部 status=0，未实际触发 | 低 |
+| **去重标注缺少计数** | `(同[~/N])` 只标注引用目标，不显示该模式跨轮出现了几次（如「连续15轮 read_file: 无返回数据」无法通过标记知道重复次数） | 低 |
+
 ## 存储结构
 
 ### DB 路径
@@ -268,7 +285,7 @@ print(f"{ca_count} CA summaries in assembled context")
 - **升级候选 L1 无效时的 fallback**：旧 v4 回退到 L2（正确），旧 `_compute_and_store_turn_plan` 错误地回退到 L0。plan 统一采用 v4 行为（L2 fallback）
 - **跨 tail 边界的对话轮**：旧 v4 按消息粒度处理导致同一 turn 的 user 和 assistant 被不同级别处理。plan 统一为 turn 级（有任一消息在 tail 则整 turn 为 L2）
 
-## 当前遗留状态（2026-07-01）
+## 当前遗留状态（2026-06-06）
 
 | 问题                                  | 说明                                                                         | 优先级 |
 | ------------------------------------- | ---------------------------------------------------------------------------- | ------ |
@@ -277,14 +294,15 @@ print(f"{ca_count} CA summaries in assembled context")
 | 系统消息降级                          | `background_review` ContextVar 路径已修。其他系统触发消息仍可能被 LLM 误判 | 低     |
 | bare `except:` 吞异常               | 在 `tests/conftest.py`，不影响被测代码                                     | 低     |
 | 旧方法 `_build_final_messages_v4` / `_compute_and_store_turn_plan` deprecated | v4.5.0 plan-based 路径已稳定后可移除                | 低     |
-| 去重标注 `(同[~/N])` 缺少计数 | 当前只标注引用目标，不显示该模式跨轮出现了几次（如"连续15轮 read_file: 无返回数据"） | 低     |
+| **去重方向（留最先）** | 2026-07-01 已修复：`_deduplicate_messages()` 改为留最先+原位 `(同[~/N/0])`/`(同[~/N/m])` 标记。首次出现位置不动 → 前缀稳定。 | 已修复 |
+| **Head 区移除** | assemble() 固定保留最近 3 轮为完整对话（Head 区），其余压缩为 L0/L1。Head/Middle 边界每轮翻转 → 缓存前缀从边界断裂。在拣选机制下 Head 区无必要——相关轮次自然被拣选为 L1/L2。应改为纯拣选驱动的全量分层 | 中 |
 
-### 指纹去重标注（2026-07-01 — v4.5.0）
+### 指纹去重标注（v4.5.1 — 留最先+原位指向标记）
 
 | 改进 | 说明 |
 |------|------|
-| `_deduplicate_messages` 增强 | 去重策略改为 **留最后，在被删位置插标记**。同一指纹的去重组保留**最后出现**的完整消息，在之前被删消息的原位置插入轻量指向标记 `(同[~/19/1])`，使 LLM 知晓时间线上的分布 |
-| 标注不在幸存消息上 | 幸存者保留纯净内容，标记在被删位置原位——标注在「发生的时刻」而不是「结果上」 |
+| `_deduplicate_messages` 增强 | 去重策略改为 **留最先，原位指向标记**。同一指纹的去重组保留**首次出现**的完整消息，后续重复在原位替换为轻量指向标记 `(同[~/N/0])` / `(同[~/N/m])`。对话轮摘要标签统一为 `[~/N/0]` 两位格式。 |
+| **缓存稳定性** | 首次出现位置永远不动 → 前缀不断裂。标记原位替入不影响已缓存前缀（重复位置本就要变化） |
 
 **5 个历史 DB 实测（plan-based 路径）**：
 | DB | 标记数 | 标记 token | 总 token | 占比 |
@@ -297,10 +315,10 @@ print(f"{ca_count} CA summaries in assembled context")
 
 **输出示例**：
 ```
-[  1] (同[~/19/1])                        ← 原位标记
-[  2] (同[~/19/2])
+[  1] (同[~/19/0])                          ← 指向首次出现的对话轮
+[  2] (同[~/19/0])                           ← 同上
   ...
-[1088] [~/19/1] search_files: 失败        ← 最后一条，完整内容
+[1088] [~/19/0] 搜索: 失败                     ← 首次出现，完整内容
 ```
 
 **无标签消息**（如 tail 区原始 tool_calls 消息，content 为空）不受影响——`ref_tag` 为空时不做标记，静默去重。
@@ -345,3 +363,4 @@ Hermes 有两条完全独立的机制：
 | ToolSummarizer 结构改进 | `docs/tool-summary-improvements.md`                            | 10 handlers 清单 + 待改进/已排除           |
 | L0 摘要质量观察         | `ca-ctx-inspect/references/l0-summary-quality-observations.md` | 对话轮 L0 摘要质量实测                     |
 | system_overhead 分析    | `docs/system-overhead-measurement-analysis.md`                 | 测量代码移除分析                           |
+| CA v5 试验计划          | `docs/ca-v5-test-plan.md`                                      | 缓存友好改进 + 参数自动调优试验方案        |
