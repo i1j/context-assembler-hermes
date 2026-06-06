@@ -4,7 +4,7 @@
 
 | 项       | 值                                                                        |
 | -------- | ------------------------------------------------------------------------- |
-| 版本     | v4.5.0 |
+| 版本     | v4.5.1 |
 | 部署方式 | 自包含独立副本                                                            |
 | 插件路径 | `~/.hermes/profiles/tester/plugins/ca_assembler/`                       |
 | 核心引擎 | `ca/` 子目录（入口 `ca/__init__.py` → `ContextAssembler`）         |
@@ -83,14 +83,14 @@ def _on_pre_llm_call(**kwargs: Any) -> Optional[str]:
 
 - 引擎不可用或出错 → 返回 `None`（不注入）
 - 调用 `engine.assemble(user_message, context_length)` 完整管线
-- 从返回消息列表中提取 `[~/N]` 标记（CA 摘要注入）
+- 从返回消息列表中提取 `[~/N/0]` / `[~/N/M]` 标记（CA 摘要注入）
 - 多条摘要用 `\n\n` 拼接返回
 - Hermes 会将返回文本注入到 user message 中
 
 **返回格式示例**：
 
 ```
-[~/1] CA插件运行正常钩子路径完整
+[~/1/0] CA插件运行正常钩子路径完整
 [~/1/3] search_files: 无返回数据
 [~/1/5] terminal: 配置项 `context.engine` 为 compressor
 ```
@@ -265,25 +265,24 @@ ca_count = sum(1 for m in result
 print(f"{ca_count} CA summaries in assembled context")
 ```
 
-### Plan-based 消息组装（2026-07-01 — v4.5.0）
+### Plan-based 消息组装（v4.5.0 → v4.5.1）
 
 | 改进 | 说明 | 代码位置 |
 |------|------|---------|
-| `_compute_turn_plan()` | 合并 `_build_final_messages_v4` 和 `_compute_and_store_turn_plan` 的决策逻辑，消除两处重复。返回 `List[TurnPlanEntry]` | `ca/__init__.py` |
-| `_build_messages_from_plan()` | 按 plan 中每条 entry 的 `target_level` 从 `store.read_turn_texts()` 按 level 读取文本（L2→l2_text, L1→l1_text, L0→l0_text），构建消息列表 | `ca/__init__.py` |
-| `store.read_turn_texts()` | 新增方法，返回 `(l2_text, l1_text, l0_text)` 三元组 | `ca/store.py` |
-| `Config.is_plan_build_enabled()` | 通过 `CA_PLAN_BUILD_ENABLED` 环境变量控制（默认启用） | `ca/config.py` |
+| `_compute_turn_plan()` | 统一决策逻辑，返回 `List[TurnPlanEntry]` | `ca/__init__.py` |
+| `_build_messages_from_plan()` | 按 plan entry 的 `target_level` 从 `store.read_turn_texts()` 读取对应 level 文本构建消息列表 | `ca/__init__.py` |
+| `store.read_turn_texts()` | 返回 `(l2_text, l1_text, l0_text)` 三元组 | `ca/store.py` |
 
 **核心改进**：
 - **决策统一**：head/tail/middle/upgrades 判断逻辑只有一处（`_compute_turn_plan`），不再分散在两个方法中
-- **对话轮级决策**：plan 以 turn 为单位做决策，消除旧 v4 的 per-message 不一致（如同一 turn 的 user 和 assistant 消息被不同方式处理）
-- **旧方法保留**：`_build_final_messages_v4` 和 `_compute_and_store_turn_plan` 保留为 deprecated，`CA_PLAN_BUILD_ENABLED=0` 回退
+- **对话轮级决策**：plan 以 turn 为单位做决策，消除旧 v4 的 per-message 不一致
 - **plan 未覆盖消息处理**：当前轮用户消息等非缓存消息自动追加以保持完整性
-
-**旧 v4 的不一致性修复**：
-- head 保护区方向错误已在 v4.4.0 修复（`[-N:]` → `[:N]`）
-- **升级候选 L1 无效时的 fallback**：旧 v4 回退到 L2（正确），旧 `_compute_and_store_turn_plan` 错误地回退到 L0。plan 统一采用 v4 行为（L2 fallback）
-- **跨 tail 边界的对话轮**：旧 v4 按消息粒度处理导致同一 turn 的 user 和 assistant 被不同级别处理。plan 统一为 turn 级（有任一消息在 tail 则整 turn 为 L2）
+- **v4.5.1 变更**：
+  - 移除旧 `CA_PLAN_BUILD_ENABLED` 回退开关，plan-based 为唯一路径
+  - 删除 `_build_final_messages_v4`、`_compute_and_store_turn_plan`、`_compute_layers_v2` 方法（净减 ~220 行）
+  - 移除 head 自动提升机制（`HEAD_AUTO_L1_COUNT`），全部走拣选
+  - 对话轮标签统一为 `[~/N/0]` 两位格式
+  - 去重改为留最先+原位 `(同[~/N/0])`/`(同[~/N/m])` 标记
 
 ## 当前遗留状态（2026-06-06）
 
@@ -293,9 +292,15 @@ print(f"{ca_count} CA summaries in assembled context")
 | 空摘要 BM25 排除                      | `result_summary="无返回数据"` 的工具轮仍进入检索/升级候选                  | 低     |
 | 系统消息降级                          | `background_review` ContextVar 路径已修。其他系统触发消息仍可能被 LLM 误判 | 低     |
 | bare `except:` 吞异常               | 在 `tests/conftest.py`，不影响被测代码                                     | 低     |
-| 旧方法 `_build_final_messages_v4` / `_compute_and_store_turn_plan` deprecated | v4.5.0 plan-based 路径已稳定后可移除                | 低     |
-| **去重方向（留最先）** | 2026-07-01 已修复：`_deduplicate_messages()` 改为留最先+原位 `(同[~/N/0])`/`(同[~/N/m])` 标记。首次出现位置不动 → 前缀稳定。 | 已修复 |
-| **Head 区移除** | assemble() 固定保留最近 3 轮为完整对话（Head 区），其余压缩为 L0/L1。Head/Middle 边界每轮翻转 → 缓存前缀从边界断裂。在拣选机制下 Head 区无必要——相关轮次自然被拣选为 L1/L2。应改为纯拣选驱动的全量分层 | 中 |
+
+**已修复（v4.5.1）**：
+
+| 问题 | 说明 |
+|------|------|
+| 旧方法 deprecated | `_build_final_messages_v4`、`_compute_and_store_turn_plan`、`_compute_layers_v2` 已删除。plan-based 为唯一路径。净减 ~220 行。 |
+| 去重方向 | `_deduplicate_messages()` 改为留最先+原位 `(同[~/N/0])`/`(同[~/N/m])` 标记。首次出现位置不动 → 前缀稳定。 |
+| Head 区移除 | `HEAD_AUTO_L1_COUNT` 已移除。所有对话轮平等走拣选（tail→L2 / upgrades+L1→L1 / middle→L0）。 |
+| 对话轮标签格式 | `[~/N]` 改为 `[~/N/0]`，与工具轮 `[~/N/m]` 统一两位格式。 |
 
 ### 指纹去重标注（v4.5.1 — 留最先+原位指向标记）
 

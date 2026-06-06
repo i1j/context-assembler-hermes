@@ -184,3 +184,24 @@ tool_upgrades = retriever.retrieve_tools(...) if budget > 0 else []
 
 - 2.1 连续同工具空结果合并 — 已修复（插件层消费端去重 + ×n 计数，`plugins/__init__.py:280-299`）
 - 指纹去重 — 已实现（`_deduplicate_messages()` `ca/__init__.py:1016`，`_msg_fingerprint()` `ca/__init__.py:1043`）
+
+### 2026-06-06 快照：调试修复
+
+| 发现 | 修复 | 说明 |
+|------|------|------|
+| **10 个 structured handler 全部崩溃回退** | `summarize()` 入口加 `arguments` JSON→dict 适配层（8 行） | 根因：OpenAI API 标准中 `function.arguments` 是 JSON string，所有 handler 的 `args.get("key")` 在 string 上调用时抛出 `AttributeError`，`try/except` 回退到通用逻辑。修复后 6,762 条旧数据通过 `scripts/backfill_tool_summaries.py` 离线回填 |
+
+### 2026-06-06 快照：待改进项（非 bug）
+
+以下条目不是 bug，而是基于缓存命中率的分析后识别出的结构性改进方向。
+
+| 改进项 | 当前行为 | 问题 | 改进方向 |
+|--------|----------|------|----------|
+### 2026-07-01 更新：已修复项
+
+以下两项已在 v4.5.1 中修复：
+
+| 改进项 | 修复 | 状态 |
+|--------|------|------|
+| **去重方向** | `_deduplicate_messages()` 改为留最先+原位指向标记。首次出现保留不动，后续重复替换为 `(同[~/N/0])`/`(同[~/N/m])`，指向首次出现位置。首次出现位置永远不变 → 前缀稳定。 | ✅ 已修复 |
+| **Head 区移除** | 移除 `HEAD_AUTO_L1_COUNT` 和 `dialogue_head` 机制。所有对话轮平等走拣选（tail→L2 / upgrades+L1→L1 / middle→L0）。无固定 Head/Middle 边界，不会因边界翻转破坏缓存。 | ✅ 已修复 |

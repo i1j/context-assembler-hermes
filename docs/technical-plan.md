@@ -1,4 +1,4 @@
-# ContextAssembler 详细设计文档 (v4.4.1)
+# ContextAssembler 详细设计文档 (v4.5.1)
 
 ## 文档信息
 
@@ -237,6 +237,8 @@ turn_plan(session_id, turn_index, turn_type, tool_sub_index,
 
 **零影响**：handler 失败时 `try/except` 回退到通用逻辑。未注册工具行为不变。
 
+**数据契约**：`summarize()` 入口对 `function.arguments` 做 JSON string → dict 归一化（OpenAI API 标准格式）。所有 handler 直接以 parsed dict 接收 `arguments`，无需自行 `json.loads`。通用回退路径（§4.3 通用字段提取）也受益于同一份 parsed args。
+
 **后续成熟**：结构化摘要策略稳定后可推入 `tool_field_priority.yaml` 作为通用默认。
 
 ### 4.3.2 通用摘要增强
@@ -270,7 +272,7 @@ A‑stage 由 `ContextAssembler.assemble` 实现，包含完整的阶段统计�
 1. 从 DB 重建消息历史（`_rebuild_messages_from_cache`），追加当前用户消息。
 2. 检查消息列表，若缓存快照为空且 Token 溢出则进行硬截断。
 3. 获取不可变快照 `BM25Snapshot` 及数据副本。
-4. 计算分层：`_compute_layers_v2` → `dialogue_head`, `dialogue_middle`, `tool_middle`, `tail_start`。
+4. 计算 `tail_start`（`_compute_tail_start`）。
 5. 建立 `idx_to_turn` 映射和 `tool_key_map`（消息索引 → `(turn_index, sub_index)` 复合键）。
 6. 计算 `tool_tail_turns`：最后 `TOOL_TAIL_TURN_COUNT`（默认 2）个对话轮的工具原文保护集。
 7. 嵌入用户查询（失败时降级为 None）。
@@ -280,13 +282,13 @@ A‑stage 由 `ContextAssembler.assemble` 实现，包含完整的阶段统计�
    - `_build_candidates` 计算每个候选的 token 节省量。
    - `_select_upgrades` 贪心拣选。
 9. 统一拣选决策（`_compute_turn_plan`），写入 `turn_plan` 表。
-10. 按 plan 构建消息（`_build_messages_from_plan`）：每条 entry 的 `target_level` 决定从 turn_cache 按需读取的文本级别（L2→展开 l2_text JSON，L1/L0→单行摘要 `[~/N]` 标记）。
-11. 若启用去重，执行 `_deduplicate_messages`（保留最后出现，原位插 `(同[~/N])` 标记）。
+10. 按 plan 构建消息（`_build_messages_from_plan`）：每条 entry 的 `target_level` 决定从 turn_cache 按需读取的文本级别（L2→展开 l2_text JSON，L1/L0→单行摘要 `[~/N/0]` / `[~/N/M]` 标记）。
+11. 若启用去重，执行 `_deduplicate_messages`（保留最先出现，原位插 `(同[~/N/0])`/`(同[~/N/m])` 标记）。
 12. `stats.finalize` 汇总阶段统计。
 
 **阶段计时覆盖**：`get_snapshot` / `layers` / `embed_query` / `retrieval` / `plan` / `build` / `dedup`。
 
-> 旧路径（`_build_final_messages_v4` + `_compute_and_store_turn_plan`）保留为 deprecated，通过 `CA_PLAN_BUILD_ENABLED=0` 回退。
+**v4.5.1 变更**：已移除自动头区（`HEAD_AUTO_L1_COUNT`）和旧 v4 回退路径（`CA_PLAN_BUILD_ENABLED`）。plan-based 为唯一路径。
 
 ### 5.2 对话轮与工具轮尾区分离（v4.4.1）
 
@@ -295,19 +297,19 @@ A‑stage 由 `ContextAssembler.assemble` 实现，包含完整的阶段统计�
 | 维度 | 对话轮 | 工具轮 |
 |------|--------|--------|
 | 尾区保护 | `_compute_tail_start`：反向累计**仅对话消息**（跳过 `role=tool`），10K tokens（`//2` 估算后 ≈ 20K chars） | `TOOL_TAIL_TURN_COUNT=2`：最近 N 个**对话轮**的工具原文保留 |
-| Head | 最后 3 个有效 L1 → L1 JSON 摘要 | 预升级（`_pre_upgrade_tools`）→ L1 JSON 摘要 |
+| 升级策略 | 检索升级（Retriever.retrieve）→ L1 JSON 摘要；未升级→ L0 一行 | 预升级（`_pre_upgrade_tools`）→ L1 JSON 摘要；检索升级→ L1/L0 |
 | Middle | → L0 一行（或检索升级→L1） | → L0 一行（与对话 Middle 一致） |
 
 **工具尾区按对话轮判定而非消息索引**：工具是否在尾区取决于其所属对话轮是否在最后 N 轮，与工具组在消息列表中的物理位置无关。
 
 ### 5.3 分层计算
 
-`_compute_layers_v2` 分别计算对话轮和工具轮的 Head、Middle 和 Tail：
+对话轮统一走 tail/middle 拣选，已移除自动头区：
 
-- **对话轮 Head**：最新 `HEAD_AUTO_L1_COUNT`（默认 3）个有效 L1 摘要的轮次索引。
-- **工具轮 Head**：C‑stage 预选产生的 `_pre_upgraded_tool_turns` 集合。
-- **Middle**：所有非 Head 的对话轮和工具轮。
-- **Tail**：`_compute_tail_start` 从尾部反向累计**仅对话消息**的 token，达到 `PROTECT_TAIL_TOKENS`（10000）时停止。
+- **Tail**：`_compute_tail_start` 从尾部反向累计**仅对话消息**的 token，达到 `PROTECT_TAIL_TOKENS`（10000）时停止。Tail 中的对话轮保留原文（L2）。
+- **Middle**：Tail 之前的对话轮。默认降级为 L0 一行摘要；若被检索升级为 L1，则展为 L1 JSON 摘要。
+- **工具轮 Head**：C‑stage 预选产生的 `_pre_upgraded_tool_turns` 集合，不在 Middle 中。
+- **工具轮 Tail**：最后 `TOOL_TAIL_TURN_COUNT` 个对话轮的工具原文保护集。
 
 ### 5.4 检索与拣选
 
@@ -318,9 +320,10 @@ A‑stage 由 `ContextAssembler.assemble` 实现，包含完整的阶段统计�
 **预算闸门**（`_available_budget`）精确计算：
 
 1. **系统消息 Token**：累加所有 `role: system` 消息。
-2. **Head Token**：对话轮 Head 中的消息 + 工具轮 Head 中的工具组。
-3. **Tail Token**：对话消息 >= `tail_start` 的 + 工具组所属对话轮在 `tool_tail_turns` 中的。Head 优先于 Tail（`elif` 避免重复计数）。
+2. **工具预升级 Token**：C‑stage 预选工具轮中的工具组（`tool_head`），计原文 token。
+3. **Tail Token**：对话消息 >= `tail_start` 的 + 工具组所属对话轮在 `tool_tail_turns` 中的。
 4. **公式**：`budget = context_length × 0.95 - system_tokens - head_tokens - tail_tokens - system_overhead`。≤0 时跳过检索。
+   > 注：`head_tokens` 名称保留但仅用于工具预升级，对话轮无自动头区。
 
 **系统提示词开销**（`system_overhead`）：
 1. **默认 20000**：首次运行时预估 Hermes 系统提示词占用 ≈ 20K tokens。
@@ -337,9 +340,9 @@ A‑stage 由 `ContextAssembler.assemble` 实现，包含完整的阶段统计�
 2. 同类型内按 token 节省量降序。
 3. 在预算范围内贪心升级。
 
-### 5.5 消息组装（`_build_messages_from_plan` / `_compute_turn_plan` — v4.5.0）
+### 5.5 消息组装（`_build_messages_from_plan` / `_compute_turn_plan` — v4.5.1）
 
-v4.5.0 将 turn_plan 从调试记录升级为**消息组装的直接输入**。所有拣选决策统一在 `_compute_turn_plan` 中计算，写入 `turn_plan` 表，再由 `_build_messages_from_plan` 按 plan 读取构建。
+v4.5.0 将 turn_plan 从调试记录升级为**消息组装的直接输入**。v4.5.1 移除旧回退路径，plan-based 为唯一路径。所有拣选决策统一在 `_compute_turn_plan` 中计算，写入 `turn_plan` 表，再由 `_build_messages_from_plan` 按 plan 读取构建。
 
 **决策规则（`_compute_turn_plan`）：**
 
@@ -371,7 +374,7 @@ v4.5.0 将 turn_plan 从调试记录升级为**消息组装的直接输入**。�
 对于每条 plan entry，从 `store.read_turn_texts()` 按需读取文本：
 
 - `target_level=L2` → 从 `l2_text`（JSON 消息数组）展开全部消息
-- `target_level=L1/L0` → 生成单条 `[~/N]` 或 `[~/N/M]` 摘要消息
+- `target_level=L1/L0` → 生成单条 `[~/N/0]` 或 `[~/N/M]` 摘要消息（对话轮格式 `[~/N/0]`，工具轮 `[~/N/m]`）
 - L1 优先用 l1_text，降级到 l0_text；L0 相反
 - plan 未覆盖的消息（当前轮用户消息等）自动追加到末尾
 
@@ -380,7 +383,7 @@ v4.5.0 将 turn_plan 从调试记录升级为**消息组装的直接输入**。�
 2. **消除工具尾区泄漏**：旧 v4 中 role=tool 的响应消息通过"普通消息"分支被对话 tail 保护捕获。plan 按 turn 级判断，工具组不会独立泄漏。
 3. **决策即存储**：`_compute_turn_plan` 同时产出 plan 列表和写库，不重复遍历。
 
-> 旧路径 `_build_final_messages_v4` + `_compute_and_store_turn_plan` 保留为 deprecated，通过 `CA_PLAN_BUILD_ENABLED=0` 回退。
+> 旧路径 `_build_final_messages_v4` + `_compute_and_store_turn_plan` 已在 v4.5.1 中删除。plan-based 为唯一路径。
 
 **硬截断兜底**：系统消息无条件保留。工具组整体保留或移除。从尾部反向填充，超出预算时停止。插入提示消息 `[工具调用结果因上下文截断已被省略]`。
 
@@ -419,12 +422,12 @@ deepseek-v4-flash: 1M × 0.50 = **500K tokens**。
 
 ## 6. 全指纹去重设计
 
-- **标签剥离**：指纹计算前用 `_CA_TAG_RE` 正则剥离 `[~/N]` / `[~/N/M]` 前缀标签，使跨轮相同摘要（同名工具同结果、同 core_change 对话轮等）可命中同一指纹。
-- **最后出现保留**：两遍扫描算法——第一遍建指纹→最后出现索引，第二遍仅保留最后出现的那条。更靠近 tail 保护区且 LLM 更关心。
+- **标签剥离**：指纹计算前用 `_CA_TAG_RE` 正则剥离 `[~/N/0]` / `[~/N/M]` 前缀标签，使跨轮相同摘要（同名工具同结果、同 core_change 对话轮等）可命中同一指纹。
+- **最先出现保留**：两遍扫描算法——第一遍建指纹→最先出现索引，第二遍保留最先出现的那条，后续重复在原位替换为指向标记 `(同[~/N/0])`/`(同[~/N/m])`。首次出现位置永远不动 → 缓存前缀稳定。
 - **深度规范化**：递归排序 dict 键、列表保持顺序、解析字符串化 JSON、`None` → `""`、深度限制 10。
 - **包含 role 字段**：避免跨角色相同内容误杀。
 - **系统消息豁免**：无条件保留，不参与 fingerprint→index 映射。
-- **去重逻辑**：在 `assemble` 末尾执行，处理 `_build_final_messages_v4` 输出的消息列表。由 `_deduplicate_messages`（两遍扫描）+ `_msg_fingerprint`（标签剥离+归一化+SHA256）组成。
+- **去重逻辑**：在 `assemble` 末尾执行，处理 `_build_messages_from_plan` 输出的消息列表。由 `_deduplicate_messages`（两遍扫描）+ `_msg_fingerprint`（标签剥离+归一化+SHA256）组成。
 - **Fail‑Safe**：`CA_DEDUP_ENABLED` 非法值时**强制启用**去重（故障导向安全），记录 WARNING。
 
 ---
@@ -501,14 +504,12 @@ deepseek-v4-flash: 1M × 0.50 = **500K tokens**。
 || `CA_CONTEXT_LENGTH` | 50000 | 上下文总 Token 窗口上限 |
 | `CA_PROTECT_TAIL_TOKENS` | 10000 | 对话尾区 token 预算（`//2` 后 ≈ 20K chars） |
 | `CA_TOOL_TAIL_TURN_COUNT` | 2 | 工具尾区保护最近 N 个对话轮 |
-| `CA_HEAD_AUTO_L1_COUNT` | 3 | 对话轮 Head 自动 L1 数量 |
 | `CA_COMPRESSION_THRESHOLD` | 0.50 | 压缩警戒比值，乘 model_window 得预算上限 |
 | `CA_TOOL_PRE_UPGRADE_COUNT` | 3 | C‑stage 预选工具轮数量 |
 | `CA_TOOL_MAX_UPGRADE_K` | 3 | A‑stage 最大升级工具轮数 |
 | `CA_TOOL_PRE_UPGRADE_WINDOW` | 50 | 预选检索窗口（最近 N 轮） |
 | `CA_TOPIC_BOUNDARY_DISTANCE` | 0.50 | 话题边界余弦距离阈值 |
 | `CA_DEDUP_ENABLED` | True | 全指纹去重开关 |
-| `CA_PLAN_BUILD_ENABLED` | True | turn_plan 驱动消息组装（false 回退旧 v4 路径） |
 | `CA_LLM_NUM_PREDICT` | 24768 | LLM 生成 token 上限 |
 | `CA_BACKFILL_DIALOGUE_RATE` | 2 | 对话轮补全速率 |
 | `CA_BACKFILL_TOOL_RATE` | 5 | 工具轮补全速率 |
@@ -597,22 +598,22 @@ C-stage 末尾执行：
 
 ---
 
-## 16. turn_plan 拣选决策记录（v4.4.1 → v4.5.0 升级为组装驱动源）
+## 16. turn_plan 拣选决策记录（v4.4.1 → v4.5.0 升级为组装驱动源 → v4.5.1 唯一路径）
 
-v4.4.1 引入 turn_plan 表记录拣选决策，用途仅为调试比对。v4.5.0 将 turn_plan 升级为**A-stage 消息组装的直接输入**：
+v4.4.1 引入 turn_plan 表记录拣选决策，用途仅为调试比对。v4.5.0 将 turn_plan 升级为**A-stage 消息组装的直接输入**，v4.5.1 移除旧 v4 回退路径，plan-based 为唯一路径：
 
-**旧流程**（v4.4.1 及之前）：
+**v4.4.1 及之前（旧流程，已删除）**：
 ```
 _compute_layers_v2 → _build_final_messages_v4(组装) → _compute_and_store_turn_plan(写库)
                                                                     ↓
                                                               仅调试使用
 ```
 
-**新流程**（v4.5.0）：
+**v4.5.0+ 新流程**：
 ```
-_compute_layers_v2 → _compute_turn_plan(统一决策) → write_turn_plan(持久化)
-                                                          ↓
-                                              _build_messages_from_plan(按plan构建)
+_compute_turn_plan(统一决策) → write_turn_plan(持久化)
+                                     ↓
+                         _build_messages_from_plan(按plan构建)
 ```
 
 `TurnPlanEntry` 结构维持不变：
@@ -623,7 +624,7 @@ _compute_layers_v2 → _compute_turn_plan(统一决策) → write_turn_plan(持�
 | `turn_type` | `dialogue` 或 `tool` |
 | `tool_sub_index` | 工具组序号（对话轮恒为 0） |
 | `target_level` | L2（原文）/ L1（摘要）/ L0（一行） |
-| `decision_reason` | `head` / `tail` / `retrieved` / `tool_head` / `middle` |
+| `decision_reason` | `tail` / `retrieved` / `tool_head` / `middle` |
 | `tokens_saved` | 相比保留 L2 节省的 token 数 |
 | `topic_group` | 话题分组 ID |
 
@@ -679,7 +680,7 @@ plan 按 `(turn_index, type_priority, tool_sub_index)` 排序，保证对话轮�
 | REQ-TOOL-C006       | 存储与索引                         | 3.1, 3.3    | `store.write_turn`, `AssemblyCache` 工具轮字典  |
 | REQ-TOOL-C007       | 无条件摘要生成                     | 4.1         | C‑stage 必定生成                                   |
 | REQ-TOOL-C008       | 规则引擎容错                       | 12          | 降级摘要生成                                        |
-| REQ-FUNC-ASTAGE-001 | Head/Middle/Tail 分层              | 5.2, 5.3    | `_compute_layers_v2`, `_compute_tail_start`     |
+| REQ-FUNC-ASTAGE-001 | Head/Middle/Tail 分层              | 5.2, 5.3    | `_compute_tail_start`（自动头区已移除）              |
 | REQ-FUNC-ASTAGE-002 | 双路检索与 RRF 融合                | 5.4         | `Retriever.retrieve/retrieve_tools`               |
 | REQ-FUNC-ASTAGE-003 | 动态预算闸门（含系统、Head、Tail） | 5.4         | `_available_budget`                               |
 | REQ-FUNC-ASTAGE-004 | 预算耗尽短路                       | 5.4         | `budget > 0` 检查                                 |
@@ -689,7 +690,7 @@ plan 按 `(turn_index, type_priority, tool_sub_index)` 排序，保证对话轮�
 | REQ-FUNC-ASTAGE-008 | 工具组完整性保护                   | 5.5         | `_hard_truncation` 分组逻辑                       |
 | REQ-FUNC-ASTAGE-009 | 截断提示消息                       | 5.5         | `_hard_truncation` 插入提示                       |
 | REQ-TOOL-P001       | C‑stage 预选                      | 4.4         | `_pre_upgrade_tools`                              |
-| REQ-TOOL-P002       | A‑stage Tail 保护（工具轮）       | 5.2, 5.5    | `_build_final_messages_v4` 中 tool_tail_turns 判断 |
+| REQ-TOOL-P002       | A‑stage Tail 保护（工具轮）       | 5.2, 5.5    | `_build_messages_from_plan` 中 tool_tail_turns 判断 |
 | REQ-TOOL-P003       | 兜底保障                           | 5.5         | 预选工具轮强制 L1                                   |
 | REQ-TOOL-P004       | 确定性降级                         | 5.4         | `_select_upgrades` 排序                           |
 | REQ-TOOL-P005       | 同类型内确定性排序                 | 5.4         | 按 RRF 得分排序                                     |

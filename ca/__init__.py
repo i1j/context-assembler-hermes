@@ -744,7 +744,7 @@ class ContextAssembler:
             remaining -= c["saving"]
         return selected
 
-    # ── Plan-based 消息组装（v4.5.0）──
+    # ── Plan-based 消息组装（v4.5.1）──
 
     def _compute_turn_plan(self, messages, l1_texts, l0_texts,
                            tool_l1_texts, tool_l0_texts,
