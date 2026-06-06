@@ -328,6 +328,107 @@ print(f"{ca_count} CA summaries in assembled context")
 
 **无标签消息**（如 tail 区原始 tool_calls 消息，content 为空）不受影响——`ref_tag` 为空时不做标记，静默去重。
 
+## 测试接口清单
+
+### Fixtures（`tests/conftest.py`）
+
+| Fixture | Scope | 签名 | 说明 |
+|---------|-------|------|------|
+| `hardware_info` | session | `() -> dict` | CPU/内存信息，用于测试报告 |
+| `fd_checker` | function | `() -> FdWatcher` | 文件描述符泄漏检测，`.assert_no_leak(max_delta=10)` |
+| `ca_engine` | function | `(tmp_path) -> ContextAssembler` | 标准引擎实例，自动 mock embedding+LLM，teardown 执行 `.destroy()` |
+| `engine` | function | `(ca_engine) -> ContextAssembler` | `ca_engine` 别名，向后兼容 |
+| `_mock_embed` | function (autouse) | `(ca_engine) -> None` | 自动 mock `EmbeddingClient.embed` → `[0.1]*768` |
+| `_mock_llm` | function (autouse) | `() -> None` | 自动 mock `_call_llm_for_l1` → 固定 L1 文本 |
+
+### 测试文件与测试类
+
+| 文件 | 测试类 | 测试数 | 范围 |
+|------|--------|--------|------|
+| `test_c.py` | （函数级） | 14 | 对话轮 C‑stage：摘要生成、OODA 解析、状态标记 |
+| `test_a.py` | （函数级） | 17 | 对话轮 A‑stage：分层、检索、升级、尾部保护 |
+| `test_v440.py` | `TestToolTurnCStage` | 12 | 工具轮 C‑stage：多工具调用、字段优先级、L0 截断、预升级 |
+| | `TestToolTurnAStage` | 8 | 工具轮 A‑stage：尾部保护、预升级 L1、升级过滤、预算 |
+| | `TestLStageBackfill` | 7 | L‑stage：对话轮/工具轮补全、永久失败、周期扫描、超时 |
+| | `TestConfigAndOthers` | 11 | 配置热重载、去重非法值、Store 新列、并发销毁、快照隔离、性能 |
+| `test_store.py` | （函数级） | 10 | Store 层：读写 turn、turn_plan、BM25 tokens、分区清理 |
+| `test_config.py` | （函数级） | 6 | Config：环境变量解析、默认值、非法值回退 |
+| `test_embedding.py` | （函数级） | 5 | Embedding：向量计算、归一化、缓存 |
+| `test_circuit.py` | （函数级） | 7 | 断路器：失败计数、冷却恢复、状态持久化 |
+| `test_health.py` | （函数级） | 5 | 健康检查：引擎状态、DB 连接、缓存快照 |
+| `test_lifecycle.py` | （函数级） | 7 | 生命周期：reset、destroy、并发安全、接口完整性 |
+| `test_degradation.py` | （函数级） | 2 | 降级：LLM 失败后的规则摘要 |
+| `test_quality.py` | （函数级） | 7 | 质量评估（全部 stub/skip，需人工评审） |
+| `test_system.py` | （函数级） | 3 | 端到端（全部 skip，需 Ollama 环境） |
+| `tests/legacy/test_dedup.py` | `TestSystemMessageExemption` | 2 | 去重：system 消息豁免 |
+| | `TestNonSystemDedup` | 6 | 去重：全指纹、角色含、字典 content、不同角色保留 |
+| | `TestOrderPreservation` | 3 | 去重：时序保持、多重复组、system 交错 |
+| | `TestConfigurableDedup` | 9 | 去重：环境变量启停、非法值、禁用时跳过 |
+| | `TestDedupPerformance` | 1 | 去重：200 条 < 2ms 性能 |
+| | `TestDebugLogging` | 1 | 去重：CA_DEBUG 日志输出 |
+| | `TestEdgeCases` | 4 | 去重：空列表、单条、全唯一、全重复 |
+
+### 测试用例数据源（`tests/testcases/`）
+
+| 文件 | 格式 | 用途 |
+|------|------|------|
+| `ContextAssembler_testcases_v4.3.4.json` | `[{id, req, title, preconditions, steps, expected, ...}]` | 主测试用例定义，`generate_tests.py` 的输入源 |
+| `ContextAssembler_testcases_v1.2.json` | 同上 | 旧版 v1.2 用例集 |
+| `ContextAssembler_testcases_v1.3.json` | 同上 | 旧版 v1.3 用例集 |
+
+### 测试生成器（`tests/generate_tests.py`）
+
+| 入口 | 说明 |
+|------|------|
+| `main()` | CLI：`python generate_tests.py --json <path> --output-dir <dir>` |
+| `get_batch(tc_id)` | 按测试用例 ID 路由到对应测试批次的生成函数 |
+| `_gen_c_stage_body` | C‑stage 测试主体生成 |
+| `_gen_a_stage_body` | A‑stage 测试主体生成 |
+| `_gen_store_body` | Store 层测试主体生成 |
+| `_gen_embedding_body` | Embedding 测试主体生成 |
+| `_gen_config_body` | Config 测试主体生成 |
+| `_gen_health_body` | 健康检查测试主体生成 |
+| `_gen_circuit_body` | 断路器测试主体生成 |
+| `_gen_lifecycle_body` | 生命周期测试主体生成 |
+| `_gen_quality_body` | 质量评估测试主体生成 |
+
+### 测试数据目录
+
+| 路径 | 内容 |
+|------|------|
+| `tests/data/dialogues/short_dialogues.json` | 短对话 3 条 |
+| `tests/data/dialogues/medium_dialogues.json` | 中长度对话 |
+| `tests/data/dialogues/long_dialogues.json` | 长对话（A‑stage 爬坡测试） |
+| `tests/data/malformed_json/` | 120 个畸形 JSON 文件（容错测试） |
+| `tests/data/reference_summaries/` | L1 摘要参考标准（质量评估） |
+
+### 测试报告
+
+| 文件 | 内容 |
+|------|------|
+| `tests/test_execution_report_v4.3.4.json` | v4.3.4 执行记录：通过/失败/跳过统计，失败用例根因分析 |
+| `tests/docs/testplan.md` | 完整测试计划文档（67 KB），含需求追溯矩阵 |
+
+### 运行方式
+
+```bash
+# 运行全部测试（需 ca_assembler 目录为 cwd）
+cd /home/i1j/.hermes/profiles/tester/plugins/ca_assembler
+python -m pytest tests/ -v
+
+# 按文件
+python -m pytest tests/legacy/test_dedup.py -v
+
+# 按类/函数
+python -m pytest tests/legacy/test_dedup.py -v -k 'TestOrderPreservation'
+
+# 排除已知环境依赖失败的测试
+python -m pytest tests/ -v --ignore=tests/test_system.py
+
+# 生成测试文件（从 JSON 用例定义）
+python tests/generate_tests.py --json tests/testcases/ContextAssembler_testcases_v4.3.4.json --output-dir tests/
+```
+
 ## 预算实测结论（2026-06-14）
 
 18 轮对话实测：
