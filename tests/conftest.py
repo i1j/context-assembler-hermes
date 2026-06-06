@@ -77,7 +77,7 @@ def engine(ca_engine):
 @pytest.fixture(autouse=True)
 def _mock_embed(ca_engine):
     """防止测试挂死在 Ollama 连接"""
-    with patch('ca.embedding.EmbeddingClient.embed', return_value=[0.1] * 768):
+    with patch('ca.embedding.EmbeddingClient.embed', side_effect=lambda *a, **kw: [0.1] * 768):
         yield
 
 @pytest.fixture(autouse=True)

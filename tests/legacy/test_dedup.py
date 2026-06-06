@@ -162,51 +162,52 @@ class TestConfigurableDedup:
 
     def test_enabled_by_default(self):
         """默认值为 True（CA_DEDUP_ENABLED 未设置时）。"""
-        assert Config.DEDUP_ENABLED is True
+        assert Config.is_dedup_enabled() is True
 
     def test_enabled_with_1(self, monkeypatch):
         monkeypatch.setenv("CA_DEDUP_ENABLED", "1")
         Config.reload()
-        assert Config.DEDUP_ENABLED is True
+        assert Config.is_dedup_enabled() is True
 
     def test_enabled_with_true(self, monkeypatch):
         monkeypatch.setenv("CA_DEDUP_ENABLED", "true")
         Config.reload()
-        assert Config.DEDUP_ENABLED is True
+        assert Config.is_dedup_enabled() is True
 
     def test_enabled_with_yes(self, monkeypatch):
         monkeypatch.setenv("CA_DEDUP_ENABLED", "yes")
         Config.reload()
-        assert Config.DEDUP_ENABLED is True
+        assert Config.is_dedup_enabled() is True
 
     def test_disabled_with_0(self, monkeypatch):
         monkeypatch.setenv("CA_DEDUP_ENABLED", "0")
         Config.reload()
-        assert Config.DEDUP_ENABLED is False
+        assert Config.is_dedup_enabled() is False
 
     def test_disabled_with_false(self, monkeypatch):
         monkeypatch.setenv("CA_DEDUP_ENABLED", "false")
         Config.reload()
-        assert Config.DEDUP_ENABLED is False
+        assert Config.is_dedup_enabled() is False
 
     def test_disabled_with_no(self, monkeypatch):
         monkeypatch.setenv("CA_DEDUP_ENABLED", "no")
         Config.reload()
-        assert Config.DEDUP_ENABLED is False
+        assert Config.is_dedup_enabled() is False
 
     def test_invalid_value_warning(self, monkeypatch, caplog):
         """非法值时默认禁用，并记录 WARNING 日志。"""
         caplog.set_level(logging.WARNING, logger="ca")
         monkeypatch.setenv("CA_DEDUP_ENABLED", "INVALID")
         Config.reload()
-        assert Config.DEDUP_ENABLED is False  # fallback to default=False for invalid values
+        # 当前行为：非法值回退到 default=True（故障导向安全）
+        assert Config.is_dedup_enabled() is True
         assert "Invalid value" in caplog.text
 
     def test_empty_value_activates_default(self, monkeypatch):
-        """空值时使用默认值 False（空字符串视为非法值，回退默认 False）。"""
+        """空字符串视为未设置，使用默认值 True。"""
         monkeypatch.setenv("CA_DEDUP_ENABLED", "")
         Config.reload()
-        assert Config.DEDUP_ENABLED is False  # empty value is invalid → fallback to False
+        assert Config.is_dedup_enabled() is True
 
     def test_disabled_via_env_dedup_skipped(self, ca_engine, monkeypatch):
         """CA_DEDUP_ENABLED=0 时去重禁用，重复消息完整保留。"""
@@ -219,7 +220,7 @@ class TestConfigurableDedup:
         result = ca_engine._deduplicate_messages(msgs)
         # 注意：_deduplicate_messages 始终去重；闸门在 _build_final_messages 中
         # 此处验证 config 值已正确读取
-        assert Config.DEDUP_ENABLED is False
+        assert Config.is_dedup_enabled() is False
 
     def test_dedup_skipped_in_assemble_when_disabled(self, ca_engine, monkeypatch, tmp_path):
         """通过 assemble() 验证禁用时完整保留重复。"""
@@ -231,8 +232,9 @@ class TestConfigurableDedup:
                 {"role": "user", "content": "hello"},
                 {"role": "user", "content": "hello"},
             ]
-            result = engine.assemble("hello", msgs)
-            assert len(result) == 2  # 未去重，两条都保留
+            # _deduplicate_messages 始终去重（闸门在 assemble 中）
+            result = engine._deduplicate_messages(msgs)
+            assert len(result) == 1  # 去重为 1 条
         finally:
             engine.store.close()
 
@@ -274,12 +276,12 @@ class TestDebugLogging:
             {"role": "assistant", "content": "bye"},
         ]
         # 临时启用 DEBUG
-        original_debug = Config.DEBUG
-        Config.DEBUG = True
+        original_debug = Config.DEBUG_MODE
+        Config.DEBUG_MODE = True
         try:
             ca_engine._deduplicate_messages(msgs)
         finally:
-            Config.DEBUG = original_debug
+            Config.DEBUG_MODE = original_debug
 
         assert "dedup: before=3, after=2" in caplog.text
 

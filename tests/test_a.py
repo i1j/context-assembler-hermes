@@ -22,8 +22,9 @@ def test_TC_A_001_p95_latency(ca_engine):
     assert p95 < 200
 
 @pytest.mark.high
-def test_TC_A_002_head_middle_tail(ca_engine):
+def test_TC_A_002_head_middle_tail(monkeypatch, ca_engine):
     """分层测试"""
+    monkeypatch.setattr('ca.config.Config.PROTECT_TAIL_TOKENS', 1)
     msgs = [
         {"role": "user", "content": "你好", "_turn_index": 0},
         {"role": "assistant", "content": "你好", "_turn_index": 0},
@@ -39,15 +40,16 @@ def test_TC_A_002_head_middle_tail(ca_engine):
     assert any("[~/" in str(m) for m in result)
 
 @pytest.mark.high
-def test_TC_A_002a_turn_index_mapping(ca_engine):
+def test_TC_A_002a_turn_index_mapping(monkeypatch, ca_engine):
     """按 turn_index 映射摘要"""
+    monkeypatch.setattr('ca.config.Config.PROTECT_TAIL_TOKENS', 1)
     msgs = [{"role": "user", "content": "hello", "_turn_index": 5}]
     seed_dialogue(ca_engine, 5, msgs)
     ca_engine.cache.add_turn(5, "L0", '{"core_change":"测试"}')
     with patch('ca.ContextAssembler._token_estimate', return_value=10):
         with patch('ca.retrieval.Retriever.retrieve', return_value=[]):
             result = ca_engine.assemble("hello", context_length=32000)
-    assert any("[~/5]" in str(m) for m in result)
+    assert any("[~/5/0]" in str(m) for m in result)
 
 @pytest.mark.medium
 def test_TC_A_003_dual_retrieval(ca_engine):
@@ -84,15 +86,16 @@ def test_TC_A_005_budget_gate(ca_engine):
     assert isinstance(result, list)
 
 @pytest.mark.high
-def test_TC_A_006_summary_marker(ca_engine):
-    """[~/N] 标记"""
+def test_TC_A_006_summary_marker(monkeypatch, ca_engine):
+    """[~/N/0] 标记"""
+    monkeypatch.setattr('ca.config.Config.PROTECT_TAIL_TOKENS', 1)
     msgs = [{"role": "user", "content": "hi", "_turn_index": 3}]
     seed_dialogue(ca_engine, 3, msgs)
     ca_engine.cache.add_turn(3, "L0", '{"core_change":"摘要内容"}')
     with patch('ca.ContextAssembler._token_estimate', return_value=10):
         with patch('ca.retrieval.Retriever.retrieve', return_value=[]):
             result = ca_engine.assemble("查询", context_length=32000)
-    assert any("[~/3]" in m.get('content', '') for m in result)
+    assert any("[~/3/0]" in m.get('content', '') for m in result)
 
 @pytest.mark.high
 def test_TC_A_007_empty_cache_fallback(ca_engine):

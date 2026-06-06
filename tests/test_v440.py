@@ -30,7 +30,7 @@ def _mock_embed(monkeypatch, request):
     """将所有 C‑stage/L‑stage 测试中的 embed 调用替换为快速 fallback 向量。"""
     if 'ca_engine' in request.fixturenames or 'engine' in request.fixturenames:
         fake_vec = [0.1] * 768
-        def fake_embed(text):
+        def fake_embed(*args, **kwargs):
             return fake_vec
         monkeypatch.setattr('ca.embedding.EmbeddingClient.embed', fake_embed)
 
@@ -129,7 +129,7 @@ class TestToolTurnCStage:
         tool_responses = [{"role": "tool", "content": '{"result":"成功","summary":"简要"}'}]
         l1, _ = summarizer.summarize(tool_call, tool_responses)
         assert l1['tool_name'] == 'test_tool'
-        assert l1['tool_args'] == '{"a":1}'
+        assert l1['tool_args'] == {"a": 1}
         assert l1['thought_process'] == ''
         assert l1['result_summary'] != ''
         assert l1['error'] is None
