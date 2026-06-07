@@ -234,7 +234,7 @@ def test_tc_c_013(engine):
 @pytest.mark.high
 def test_tc_c_014(engine):
     """LLM 返回超长字符串（1MB）时缓冲区保护与日志截断
-    Steps: patch _call_llm_for_l1 返回超长字符串; 触发 C-stage; 检查日志中无完整 1MB 内容（被截断）; 验证 DB 写入降级摘要 '无有效增量'"""
+    Steps: patch _call_llm_for_l1 返回超长字符串; 触发 C-stage; 检查日志中无完整 1MB 内容（被截断）; 验证 DB 写入降级摘要 '本轮无新内容'"""
     with patch.object(engine, '_call_llm_for_l1', return_value='核心摘要：长消息测试'):
         engine.process_turn_async("第一轮消息", "回复")
         engine.wait_for_pending(10)

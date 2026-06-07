@@ -659,6 +659,7 @@ plan 按 `(turn_index, type_priority, tool_sub_index)` 排序，保证对话轮�
 | **turn_plan 表**                         | 记录每次拣选决策，当前用于调试，下一步支持 turn 级拣选组装                                                                                                                  |
 | **turn_plan 驱动组装**                   | v4.5.0：turn_plan 从调试记录升级为 A-stage 消息组装的直接输入。`_compute_turn_plan` 统一决策，`_build_messages_from_plan` 按 plan 读取文本                                                                                                                     |
 | **原位去重标记**                          | `(同[~/N])` 标记替换静默删除——LLM 在时间线上看到"这事又在 N 轮发生了"，而非被删项凭空消失。标注在删位而非幸存者上，幸存者内容纯净                                                                                          |
+| **Token 水位查询接口**                   | `debug_token_budget()` 纯只读查询当前 token 使用量 vs 预算上限。`store.get_max_token_offset()` + `Config.CONTEXT_LENGTH` 计算，零副作用。|
 
 ---
 

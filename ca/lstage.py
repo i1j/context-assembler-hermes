@@ -86,7 +86,7 @@ class BackfillThread(threading.Thread):
         robust, _ = robust_json_parse(json.dumps(parsed, ensure_ascii=False))
         cleaned = clean_increment(robust)
         if "core_change" not in cleaned:
-            cleaned["core_change"] = "无有效增量"
+            cleaned["core_change"] = "本轮无新内容"
         l1_str = json.dumps(cleaned, ensure_ascii=False)
         l0 = cleaned.get("core_change", "")[:100]
         try:
@@ -199,7 +199,7 @@ class BackfillThread(threading.Thread):
         new_attempts = rec.get("backfill_attempts", 0) + 1
         if new_attempts >= 3:
             if turn_type == "dialogue":
-                error_l1 = '{"core_change":"无有效增量","_assemble_status":2,"_l_error":true}'
+                error_l1 = '{"core_change":"本轮无新内容","_assemble_status":2,"_l_error":true}'
             else:
                 error_l1 = '{"error":"补全失败","result_summary":"无法生成摘要","_assemble_status":2,"_l_error":true}'
             self.engine.store.write_turn(
@@ -221,7 +221,7 @@ class BackfillThread(threading.Thread):
         if rec and rec.get("l1_text"):
             try:
                 data = json.loads(rec["l1_text"])
-                if data.get("core_change") != "无有效增量":
+                if data.get("core_change") != "本轮无新内容":
                     return data
             except Exception:
                 pass

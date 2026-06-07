@@ -42,7 +42,7 @@ class OODAParser:
 
     def parse(self, ooda_text: str, previous_summary: Optional[Dict] = None) -> Dict:
         extracted, meta = self._extract_sections(ooda_text)
-        if previous_summary and previous_summary.get("core_change") != "无有效增量":
+        if previous_summary and previous_summary.get("core_change") != "本轮无新内容":
             extracted = self._vector_dedup(extracted, previous_summary)
         return self._build_result(extracted, meta)
 
@@ -205,13 +205,13 @@ class OODAParser:
 
     def _build_result(self, extracted, meta):
         core = extracted.get("core_change", "").strip()
-        if core == "无有效增量":
-            return {"core_change": "无有效增量", "_parse_meta": meta}
+        if core == "本轮无新内容":
+            return {"core_change": "本轮无新内容", "_parse_meta": meta}
         result = {"_parse_meta": meta}
         for field in self.TITLE_ALIASES:
             if field in meta["sections_found"]:
                 result[field] = extracted[field]
         has_content = any(result.get(f) for f in self.TITLE_ALIASES if f != "core_change" or result.get("core_change"))
         if not has_content:
-            return {"core_change": "无有效增量", "_parse_meta": meta}
+            return {"core_change": "本轮无新内容", "_parse_meta": meta}
         return result

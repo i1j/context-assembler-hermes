@@ -324,6 +324,15 @@ class ToolSummarizer:
                 total_lines = len(lines)
                 break
             elif isinstance(c, str):
+                # 优先从 JSON 响应中提取 total_lines 字段（read_file 标准格式）
+                try:
+                    parsed = json.loads(c)
+                    if isinstance(parsed, dict) and "total_lines" in parsed:
+                        total_lines = parsed["total_lines"]
+                        break
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                # fallback: 纯文本行数分割（JSON 解码失败时）
                 lines = [l for l in c.split("\n") if l.strip()]
                 if lines:
                     total_lines = len(lines)

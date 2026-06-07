@@ -16,7 +16,7 @@ _CORE_CHANGE_RE = re.compile(r"核心摘要[：:]\s*(.{1,200})", re.DOTALL)
 
 def robust_json_parse(raw: str, max_repair_attempts: int = 3) -> Tuple[Dict[str, Any], str]:
     if not raw or not raw.strip():
-        return {"core_change": "无有效增量"}, "empty"
+        return {"core_change": "本轮无新内容"}, "empty"
     try:
         return json.loads(raw), "direct"
     except json.JSONDecodeError:
@@ -32,15 +32,15 @@ def robust_json_parse(raw: str, max_repair_attempts: int = 3) -> Tuple[Dict[str,
     match = _CORE_CHANGE_RE.search(raw)
     if match:
         return {"core_change": match.group(1).strip()}, "regex_fallback"
-    return {"core_change": "无有效增量"}, "regex_fallback"
+    return {"core_change": "本轮无新内容"}, "regex_fallback"
 
 
 def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
     if data.get("_truncated"):
-        return {"core_change": "无有效增量"}
+        return {"core_change": "本轮无新内容"}
     cleaned: Dict[str, Any] = {}
     core = data.get("core_change", "").strip()
-    if core and core not in ("无", "无有效增量"):
+    if core and core not in ("无", "本轮无新内容"):
         cleaned["core_change"] = core
     for field in ["new_materials", "objective_facts", "consensus", "todo"]:
         items = data.get(field, [])
@@ -50,5 +50,5 @@ def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
         if items:
             cleaned[field] = items
     if not cleaned:
-        cleaned["core_change"] = "无有效增量"
+        cleaned["core_change"] = "本轮无新内容"
     return cleaned

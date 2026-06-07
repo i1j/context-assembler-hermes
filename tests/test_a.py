@@ -154,19 +154,19 @@ def test_TC_A_011_invalid_summary_filter(ca_engine):
     """无效摘要过滤"""
     msgs = [{"role": "user", "content": "hi", "_turn_index": 0}]
     seed_dialogue(ca_engine, 0, msgs)
-    ca_engine.cache.add_turn(0, "L0", '{"core_change":"无有效增量"}')
+    ca_engine.cache.add_turn(0, "L0", '{"core_change":"本轮无新内容"}')
     with patch('ca.ContextAssembler._token_estimate', return_value=10):
         with patch('ca.retrieval.Retriever.retrieve', return_value=[]):
             result = ca_engine.assemble("查询", context_length=32000)
     # 无效摘要不应出现在最终输出中
-    assert not any("无有效增量" in m.get('content', '') for m in result)
+    assert not any("本轮无新内容" in m.get('content', '') for m in result)
 
 @pytest.mark.high
 def test_TC_A_012_invalid_summary_fallback(ca_engine):
     """无效摘要递补（Head 回退）"""
     msgs = [{"role": "user", "content": "hi", "_turn_index": 0}]
     seed_dialogue(ca_engine, 0, msgs)
-    ca_engine.cache.add_turn(0, "L0", '{"core_change":"无有效增量"}')
+    ca_engine.cache.add_turn(0, "L0", '{"core_change":"本轮无新内容"}')
     with patch('ca.ContextAssembler._token_estimate', return_value=10):
         result = ca_engine.assemble("查询", context_length=32000)
     # 应该回退到原始消息或 L0

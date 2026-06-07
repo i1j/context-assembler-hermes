@@ -241,4 +241,16 @@ tool_upgrades = retriever.retrieve_tools(...) if budget > 0 else []
 | 改进项 | 修复 | 状态 |
 |--------|------|------|
 | **去重方向** | `_deduplicate_messages()` 改为留最先+原位指向标记。首次出现保留不动，后续重复替换为 `(同[~/N/0])`/`(同[~/N/m])`，指向首次出现位置。首次出现位置永远不变 → 前缀稳定。 | ✅ 已修复 |
-| **Head 区移除** | 移除 `HEAD_AUTO_L1_COUNT` 和 `dialogue_head` 机制。所有对话轮平等走拣选（tail→L2 / upgrades+L1→L1 / middle→L0）。无固定 Head/Middle 边界，不会因边界翻转破坏缓存。 | ✅ 已修复 |
+|| **Head 区移除** | 移除 `HEAD_AUTO_L1_COUNT` 和 `dialogue_head` 机制。所有对话轮平等走拣选（tail→L2 / upgrades+L1→L1 / middle→L0）。无固定 Head/Middle 边界，不会因边界翻转破坏缓存。 | ✅ 已修复 |
+
+---
+
+### 2026-07-01 快照：read_file 行数、措辞优化、水位接口
+
+| 改进项 | 修复 | 状态 |
+|--------|------|------|
+| **read_file L0 行数取 JSON total_lines** | `json.dumps` 转义 `\n` 为 `\\n` 导致 split 永远 1。修复：`json.loads(c)["total_lines"]` | ✅ 已修复（磁盘，进程重启后生效） |
+| **"无有效增量" → "本轮无新内容"** | 内部术语改为自然语言，同步 Prompt + 测试 + 文档 5 文件 | ✅ 已修复 |
+| **CA_CONTEXT_LENGTH 升至 100K** | `.env` 环境变量覆盖，代码默认 50K 不变 | ✅ 已部署 |
+| **debug_token_budget()** | 纯只读 Token 水位查询，`store.get_max_token_offset()` + `engine.debug_token_budget()` | ✅ 已部署 |
+| **`_build_messages_from_plan` 用 `if l1:` 而非 `_is_valid_summary(l1)`** | 设计意图——退化摘要透传给 LLM 比吞掉更高效，非 bug | ✅ 设计确认 |

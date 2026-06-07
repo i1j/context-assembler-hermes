@@ -627,3 +627,13 @@ class SQLiteStore:
             (session_id, turn_index, turn_type, tool_sub_index, topic_id),
         )
         self.conn.commit()
+
+    # ── Token 水位查询（v4.6.0）──
+
+    def get_max_token_offset(self, session_id: str) -> Optional[int]:
+        """查询该会话的当前累计 token 偏移（SELECT MAX，纯只读）。"""
+        cur = self.conn.execute(
+            "SELECT MAX(token_offset) FROM turn_cache WHERE session_id=?", (session_id,)
+        )
+        row = cur.fetchone()
+        return row[0] if row and row[0] is not None else None

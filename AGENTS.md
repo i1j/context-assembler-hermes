@@ -113,79 +113,11 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 行为：异步调 `engine.process_turn_async(user_message, assistant_response, history_copy)`
 `conversation_history` 传副本（列表拷贝），避免竞态。
 
-## 已知修复与改进（相对于源项目）
+## 变更历史
 
-### 初始部署修复（2026-06-04）
-
-| 修复                                            | 说明                                                                                                                                             |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `_state_file_path()` 用 `get_hermes_home()` | 原代码写死 `Path.home() / ".hermes"`，已改为 profile 感知。断路器状态文件写入 `~/.hermes/profiles/tester/`                                   |
-| `sys.path` 保障本地 `ca/` 优先              | 插件目录加入 `sys.path.insert(0, ...)`，确保导入走本地 `ca/` 子目录                                                                          |
-| 添加 `register(ctx)` 函数                     | 原插件无 `register()` 函数，所有 hook 回调永不注册                                                                                             |
-| Hook 签名适配                                   | 所有 hook 回调改为 `**kwargs: Any` 模式。`on_session_start` 移除对 `kwargs["hermes_home"]` 的依赖。`pre_llm_call` 返回 `Optional[str]` |
-| 模块级引擎注册表                                | `_engines: Dict[session_id → CAContextAssemblerPlugin]` + 锁，支持多 session 并发                                                             |
-
-### Bug 修复（2026-06-05）
-
-| 修复                           | 说明                                                                                                                                                                        | 代码位置                           |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| C-stage Executor shutdown 竞态 | `_shutdown_cache_executor()` 没设 `_destroyed`。修复：`destroy()` 和 `reset()` 改用 `cache.destroy()`（同时设 `_destroyed` + cancel retry + shutdown executor） | `ca/__init__.py` 第 245, 1148 行 |
-| Head 保护区方向错误            | `_compute_layers_v2()` 取 `sorted(...)[-HEAD_AUTO_L1_COUNT:]` 取了末尾 3 轮。修复：`[-N:]` → `[:N]`                                                                | `ca/__init__.py` 第 662 行       |
-
-### ToolSummarizer 结构化摘要 10 handlers（2026-06-06）
-
-`ca/tool_summarizer.py` 内按工具名分派 handler，替代通用字段提取。
-
-| #  | Handler                     | 行号 | L0 摘要示例                                                                                                   |
-| -- | --------------------------- | ---- | ------------------------------------------------------------------------------------------------------------- |
-| #  | Handler                     | 行号 | L0 摘要示例                                                                                                   |
-| -- | --------------------------- | ---- | ------------------------------------------------------------------------------------------------------------- |
-| 1  | `_summarize_terminal`     | 129  | `t:grep -i "CA plugin" → 1 lines`（关键输出行内联），失败→ `[ERROR] t:cmd → Traceback...`；内建 pytest 检测 → `pytest: 8 passed, 2 skipped — 0.44s` |
-| 2  | `_summarize_execute_code` | 228  | `exc:from hermes_tools... → import os`（关键输出行内联），带 `tool_label="exc"` 参数              |
-| 3  | `_summarize_write_file`   | 235  | `write_file: /home/i1j/test.txt`（只保留文件路径）                                                          |
-| 4  | `_summarize_patch`        | 266  | `patch: /home/i1j/tool_summarizer.py` + replace_all 标记                                                    |
-| 5  | `_summarize_read_file`    | 302  | `read_file: …/ca_assembler/test.txt (42 lines)`（路径前缀压缩 + 行数）                                  |
-| 6  | `_summarize_search_files` | 342  | `search_files: *.py → 0 hits` 或 `66 matches [ca:30, tests:25, docs:11]`                                 |
-| 7  | `_summarize_skills_list`  | 404  | `skills_list: 3 skills (tester-workflow, ...)`                                                              |
-| 8  | `_summarize_skill_view`   | 444  | `skill_view: tester-workflow — 12 lines`                                                                   |
-| 9  | `_summarize_skill_manage` | 496  | `skill_manage: patch tester-workflow (error)`（提取 action/name/file_path）                                 |
-| 10 | `_summarize_memory`       | 547  | `memory: replace memory (error)`（action/target/old_text + content 80 字符预览）                            |
-
-分发机制：`summarize()` → `getattr(self, f"_summarize_{sanitized}", None)` → handler。工具名中 `.`/`-` 自动映射为 `_`。handler 失败时 `try/except` 回退到通用字段提取。
-
-通用增强：
-
-- **terminal 错误标记**：`_ERROR_RE` 正则（Traceback/Error:/Exception/...）扫描输出，匹配时前缀 `[ERROR]`
-- **terminal/exec L0 行内联**：有输出时优先展示首个关键行，格式 `t:cmd_part → key_line`
-- **search_files 目录分组**：total_count > 3 时 `Counter` 按父目录名聚合，取前 4 组
-
-### Bug 修复（2026-06-06）
-
-| 修复 | 说明 | 代码位置 |
-|------|------|---------|
-| **arguments JSON string → dict 适配** | reduce 所有 10 个 structured handler 因 `args.get()` 在 JSON string 上调用时全部崩溃回退到通用逻辑。根因：OpenAI API 标准中 `function.arguments` 是 JSON string，但 handler 假设已是 parsed dict。修复：在 `summarize()` 入口（L603-615）做一次 JSON parse，全部 handler 同时生效 | `ca/tool_summarizer.py:603-615` |
-| **旧数据全量回填** | 部署至今所有 DB 中 6,762 条工具轮 L0 存的是 raw JSON 格式（`{"total_count": N}`）。`scripts/backfill_tool_summaries.py` 离线重跑 summarizer，已全部升级为结构化摘要 | 共修复 174 个 DB |
-
-### Bug 修复（2026-07-01）
-
-| 修复 | 说明 | 代码位置 |
-|------|------|---------|
-| **断路器 stale 文件清理** | `_state_file_path()` 每次 `_write_state()` 前清理不再运行的 PID 残留状态文件，防止无限堆积。添加 `re.compile` 模式匹配 + `/proc/{pid}` POSIX 检查 + 跳过当前 PID。 | `ca/__init__.py` → `_cleanup_stale_state_files()` + `_pid_exists()` |
-| **terminal/exec L0 信息密度** | terminal handler 从 `cmd_short[:60] (N lines)` 改为 `t:cmd_part[:30] → key_lines[0][:50]`，有输出时优先展示首个关键行。execute_code 带 `tool_label="exc"`，取代旧 `l0.replace()`。 | `ca/tool_summarizer.py` L225-238 |
-| **read_file L0 路径压缩** | 从纯路径改为 `…{parent}/{fname} (N lines)`，压缩路径前缀、添加行数。 | `ca/tool_summarizer.py` L344-348 |
-
-**验证日志**：日志中有 ~50 条 `WARNING` 记录（`Tool-specific summarizer for 'search_files' failed: 'str' object has no attribute 'get', falling back`），所有 handler 命中。修复后 DB 中 0 条此格式 WARNING。
-
-### 遗留问题状态（2026-07-01）
-
-| 问题 | 说明 | 优先级 |
-|------|------|--------|
-| **空摘要 BM25 排除** | `result_summary="无返回数据"` 的工具轮仍进入 BM25 检索/升级候选。**但 DB 实测 0 条工具轮走 `retrieved` 路径**，当前运行负载下无实际风险 | 低 |
-| **系统消息降级**（非 background_review 路径） | 仅 `background_review` ContextVar 修复了。其他系统触发消息仍可能被 LLM 误判降级。DB 实测 1411 行全部 status=0，未实际触发 | 低 |
-| **去重标注缺少计数** | `(同[~/N])` 只标注引用目标，不显示该模式跨轮出现了几次（如「连续15轮 read_file: 无返回数据」无法通过标记知道重复次数） | 低 |
+变更历史统一记录在 `docs/changelog.md`（项目根目录）。调试/修复详情见 `docs/ca-debug-report-fix-verification.md`。
 
 ## 存储结构
-
 ### DB 路径
 
 ```
@@ -230,8 +162,9 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 | `CA_EMBED_ENDPOINT` | `http://localhost:11439` | 嵌入服务端点    |
 | `CA_LLM_MODEL`      | `qwen3-4b-instruct`      | L1 摘要生成模型 |
 | `CA_LLM_ENDPOINT`   | `http://localhost:11440` | LLM 服务端点    |
-| `CA_EMBED_TIMEOUT`  | 30                         | 嵌入超时（秒）  |
-| `CA_LLM_TIMEOUT`    | 180                        | LLM 超时（秒）  |
+|| `CA_EMBED_TIMEOUT`  | 30                         | 嵌入超时（秒）  |
+|| `CA_LLM_TIMEOUT`    | 180                        | LLM 超时（秒）  |
+|| `CA_CONTEXT_LENGTH` | 100000                     | 上下文 Token 预算上限（原 50000） |
 
 ### 话题拣选配置（v4.6.0）
 
@@ -283,95 +216,31 @@ db_path = Path.home() / '.hermes/profiles/tester/ca_cache/{session_id}.db'
 engine = session_manager.get(session_id, str(db_path))
 result = engine.assemble("测试", 32000)
 ca_count = sum(1 for m in result
-    if isinstance(m.get("content",""), str) and m["content"].startswith("[~/"))
+    if isinstance(m.get("content",""), str) and m["content"].startswith("[~/")):
 print(f"{ca_count} CA summaries in assembled context")
 ```
 
-### Plan-based 消息组装（v4.5.0 → v4.5.1）
+### Token 水位查询（v4.6.0）
 
-| 改进 | 说明 | 代码位置 |
-|------|------|---------|
-| `_compute_turn_plan()` | 统一决策逻辑，返回 `List[TurnPlanEntry]` | `ca/__init__.py` |
-| `_build_messages_from_plan()` | 按 plan entry 的 `target_level` 从 `store.read_turn_texts()` 读取对应 level 文本构建消息列表 | `ca/__init__.py` |
-| `store.read_turn_texts()` | 返回 `(l2_text, l1_text, l0_text)` 三元组 | `ca/store.py` |
-
-**核心改进**：
-- **决策统一**：head/tail/middle/upgrades 判断逻辑只有一处（`_compute_turn_plan`），不再分散在两个方法中
-- **对话轮级决策**：plan 以 turn 为单位做决策，消除旧 v4 的 per-message 不一致
-- **plan 未覆盖消息处理**：当前轮用户消息等非缓存消息自动追加以保持完整性
-- **v4.5.1 变更**：
-  - 移除旧 `CA_PLAN_BUILD_ENABLED` 回退开关，plan-based 为唯一路径
-  - 删除 `_build_final_messages_v4`、`_compute_and_store_turn_plan`、`_compute_layers_v2` 方法（净减 ~220 行）
-  - 移除 head 自动提升机制（`HEAD_AUTO_L1_COUNT`），全部走拣选
-  - 对话轮标签统一为 `[~/N/0]` 两位格式
-  - 去重改为留最先+原位 `(同[~/N/0])`/`(同[~/N/m])` 标记
-
-### 话题拣选重构（v4.5.1 → v4.6.0）
-
-| 改进 | 说明 | 代码位置 |
-|------|------|---------|
-| `_compute_topic_groups()` | 话题分割：R1 (BG字段检测) + R2 (Jaccard + todo链) | `ca/__init__.py` |
-| `_grade_topics_by_radius()` | 按半径 r 三级定级：内球 L2、外球 L1、远距离 L0 | `ca/__init__.py` |
-| `TopicRetriever` | per-topic 双路检索器 (BM25 + vector + RRF) | `ca/retrieval.py` |
-| `_compute_turn_plan_v2()` | 话题级 plan + 工具轮绑定 (topic_boost) | `ca/__init__.py` |
-
-**核心变更**：
-- **检索对象升级**：BM25/vector 从 per-turn 改为 per-topic（topic_agg_text / topic_centroid）
-- **决策粒度提升**：从 per-turn 独立决策升级为 per-topic 统一决策，同话题轮次输出稳定
-- **工具轮基线降低**：非检索命中的工具轮默认 L0（含原 head 区），节省预算给核心话题
-- **topic_boost**：父 topic 整体 L2 时工具轮升 L1，精准保留核心话题的工具信息
-- **实时计算**：话题分割和形心计算在 assemble() 中实时完成，不依赖外部服务和缓存
-
-## 当前遗留状态（2026-06-06）
-
-| 问题                                  | 说明                                                                         | 优先级 |
-| ------------------------------------- | ---------------------------------------------------------------------------- | ------ |
-| `_shutdown_cache_executor()` 死代码 | `ca/__init__.py` 第 254-262 行，全项目无调用方。低风险                     | 低     |
-| 空摘要 BM25 排除                      | `result_summary="无返回数据"` 的工具轮仍进入检索/升级候选                  | 低     |
-| 系统消息降级                          | `background_review` ContextVar 路径已修。其他系统触发消息仍可能被 LLM 误判 | 低     |
-| bare `except:` 吞异常               | 在 `tests/conftest.py`，不影响被测代码                                     | 低     |
-| 第二层压缩（topic 摘要 + 递归）       | 设计已完成（topic_summary 表设计），空闲线程未实现                          | 中     |
-| 自适应参数环路                        | 仅设计草案，未讨论实现路径                                                 | 低     |
-
-**v4.6.0 话题拣选重构**：
-
-| 变更 | 说明 |
-|------|------|
-| 话题分割 | 新增 `_compute_topic_groups()`（R1 BG检测 + R2 Jaccard 链合并），仅依赖 L1 JSON 5 字段，无额外 LLM/embedding 开销 |
-| 三级定级 | 新增 `_grade_topics_by_radius()`，topic 半径 r = min(max_intra, nearest/WEIGHT)，内球→L2 外球→L1 远距离→L0 |
-| TopicRetriever | `retrieval.py` 新增独立类，per-topic BM25 + vector + RRF 融合 |
-| 工具轮 topic_boost | 父对话 topic 整体 L2 时，该 topic 下工具轮自动升 L1，不依赖检索预算 |
-| 工具轮基线 | 非 tail 非 retrieved 工具轮默认 L0（含原 head），取代旧 pre_upgrade 机制 |
-| pre_upgrade 移除 | 删除 `_pre_upgrade_tools`、`_pre_upgraded_tool_turns`、`_topic_lock` 等 3 方法 + 5 字段 |
-| C-stage 话题检测移除 | 话题边界由 assemble() 统一实时计算，C-stage 不再写入 topic_group |
-| query_embedding | turn_cache schema v3→v4，新增 query_embedding BLOB 列，assemble() 时自动写入 |
-| 配置项 | 新增 5 个 TOPIC_* 环境变量（JACCARD_ENTRY/CHAIN/RADIUS_WEIGHT/MAX_UPGRADE/BG_LEVEL） |
-
-### 指纹去重标注（v4.5.1 — 留最先+原位指向标记）
-
-| 改进 | 说明 |
-|------|------|
-| `_deduplicate_messages` 增强 | 去重策略改为 **留最先，原位指向标记**。同一指纹的去重组保留**首次出现**的完整消息，后续重复在原位替换为轻量指向标记 `(同[~/N/0])` / `(同[~/N/m])`。对话轮摘要标签统一为 `[~/N/0]` 两位格式。 |
-| **缓存稳定性** | 首次出现位置永远不动 → 前缀不断裂。标记原位替入不影响已缓存前缀（重复位置本就要变化） |
-
-**5 个历史 DB 实测（plan-based 路径）**：
-| DB | 标记数 | 标记 token | 总 token | 占比 |
-|----|--------|-----------|---------|------|
-| 30 轮 | — | — | — | — |
-| 15 轮 | — | — | — | — |
-| 16 轮 | — | — | — | — |
-| 44 轮 | — | — | — | — |
-| 21 轮 | 1,150 | 10,247 | 471,089 | 2% |
-
-**输出示例**：
-```
-[  1] (同[~/19/0])                          ← 指向首次出现的对话轮
-[  2] (同[~/19/0])                           ← 同上
-  ...
-[1088] [~/19/0] 搜索: 失败                     ← 首次出现，完整内容
+```python
+from ca import session_manager
+from pathlib import Path
+db_path = Path.home() / '.hermes/profiles/tester/ca_cache/{session_id}.db'
+engine = session_manager.get(session_id, str(db_path))
+water = engine.debug_token_budget()
+print(water)
 ```
 
-**无标签消息**（如 tail 区原始 tool_calls 消息，content 为空）不受影响——`ref_tag` 为空时不做标记，静默去重。
+**方法**：`engine.debug_token_budget(session_id="")` — 纯只读，不修改任何状态。
+**返回字段**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `context_length` | int | 总 Token 窗口上限（`CA_CONTEXT_LENGTH`） |
+| `budget_max` | int | 可用预算上限（`context_length × 0.95`） |
+| `used_tokens` | int | 当前累计 token 偏移 |
+| `remaining` | int | 剩余可用预算 |
+| `usage_pct` | float | 使用率百分比 |
 
 ## 测试接口清单
 

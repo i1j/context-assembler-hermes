@@ -210,7 +210,7 @@ class TestToolTurnCStage:
         assert not hasattr(ca_engine, '_pre_upgrade_tools')
 
     @patch('ca.ContextAssembler._call_llm_for_l1',
-           return_value='核心摘要：无有效增量\n资源与观察：\n- 无')
+           return_value='核心摘要：本轮无新内容\n资源与观察：\n- 无')
     def test_TC_C_023_assemble_status_1(self, mock_llm, ca_engine):
         """LLM 降级时对话轮 _assemble_status 置为 1"""
         tidx = max(ca_engine._turn_counter, 0) + 1
@@ -470,10 +470,10 @@ class TestLStageBackfill:
             "INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, "
             "l2_text, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?)",
             (TEST_SESSION, tidx, "dialogue", 0, "User: hi\nAssistant: hello", 1,
-             json.dumps({"core_change": "无有效增量"}))
+             json.dumps({"core_change": "本轮无新内容"}))
         )
         ca_engine.store.conn.commit()
-        ca_engine.cache.add_turn(tidx, "", json.dumps({"core_change": "无有效增量"}), None, None)
+        ca_engine.cache.add_turn(tidx, "", json.dumps({"core_change": "本轮无新内容"}), None, None)
         thread = ca_engine._dialogue_backfill
         if not thread.is_alive():
             thread.start()
@@ -513,7 +513,7 @@ class TestLStageBackfill:
             "INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, "
             "l2_text, _assemble_status, backfill_attempts, l1_text) VALUES (?,?,?,?,?,?,?,?)",
             (TEST_SESSION, tidx, "dialogue", 0, "User: hi", 1, 2,
-             json.dumps({"core_change": "无有效增量"}))
+             json.dumps({"core_change": "本轮无新内容"}))
         )
         ca_engine.store.conn.commit()
         thread = ca_engine._dialogue_backfill
@@ -542,7 +542,7 @@ class TestLStageBackfill:
             "INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, "
             "l2_text, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?)",
             (TEST_SESSION, tidx, "dialogue", 0, "User: hi", 1,
-             json.dumps({"core_change": "无有效增量"}))
+             json.dumps({"core_change": "本轮无新内容"}))
         )
         ca_engine.store.conn.commit()
         thread = ca_engine._dialogue_backfill
@@ -607,10 +607,10 @@ class TestLStageBackfill:
             "INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, "
             "l2_text, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?)",
             (TEST_SESSION, tidx, "dialogue", 0, l2, 1,
-             json.dumps({"core_change": "无有效增量"}))
+             json.dumps({"core_change": "本轮无新内容"}))
         )
         ca_engine.store.conn.commit()
-        ca_engine.cache.add_turn(tidx, "", json.dumps({"core_change": "无有效增量"}), None, None)
+        ca_engine.cache.add_turn(tidx, "", json.dumps({"core_change": "本轮无新内容"}), None, None)
         thread = ca_engine._dialogue_backfill
         if not thread.is_alive():
             thread.start()

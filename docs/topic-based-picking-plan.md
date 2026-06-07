@@ -313,21 +313,6 @@ assemble() 进入：
 | Tail 保护                    | 不变                       |
 | 存储层 core schema           | topic_group 已有；新增 query_embedding 列 |
 
-## 新增变更（实际实现）
+---
 
-| 文件                | 变更                                                                                     |
-| ------------------- | ---------------------------------------------------------------------------------------- |
-| `ca/__init__.py`  | 新增 `_compute_topic_groups()`、`_grade_topics_by_radius()`、`_compute_turn_plan_v2()`；修改 `assemble()` 管线；移除 `_pre_upgrade_tools` 等 3 个方法 + 5 个字段 |
-| `ca/retrieval.py` | 新增 `TopicRetriever` 类（per-topic BM25+vector+RRF）                                     |
-| `ca/store.py`     | schema v3→v4（query_embedding 列）；新增 `read_turn_l1_fields()`、`read_topic_l1_texts()` 等 5 个辅助方法 |
-| `ca/config.py`    | 新增 5 个话题配置项（TOPIC_JACCARD_ENTRY/CHAIN/RADIUS_WEIGHT/MAX_UPGRADE/BG_LEVEL）       |
-| `ca/stats.py`     | 新增 `topic_count` / `topic_retrieved_count` 统计字段                                     |
-| `tests/`          | conftest.py psutil 可选导入；test_v440.py pre_upgrade 测试→pre_upgrade_removed + topic_boost 测试 |
-
-## 验证方法
-
-1. **话题分割** — 2 个历史 DB 回归（18轮+1轮），BG/实义边界正确，Jaccard 合并未触发（预期）
-2. **检索迁移** — `TopicRetriever` 单元测试通过
-3. **三级定级** — 历史会话实测：首轮自查询 d≈0 → L2；末轮查询 d>r → L0；单轮 topic max_intra=0.0 + 最小半径保护
-4. **topic_boost** — 单元测试验证父 topic L2 时工具轮升 L1
-5. **缓存命中** — 同话题在多次 assemble() 中输出相同 target_level（通过 turn_plan 可观测）
+*本方案设计内容完结。变更历史已统一记录至 `docs/changelog.md`。*

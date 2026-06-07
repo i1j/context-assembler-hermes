@@ -147,8 +147,8 @@ def _gen_c_stage_body(tc: dict) -> str:
         lines.append('assert isinstance(turn_index, int), f"turn_index should be int, got {type(turn_index)}"')
         return '\n    '.join(lines)
 
-    # LLM 降级（TC-C-006/012/013/014）— 检查无有效增量 / 降级摘要（必须在 core_change 前）
-    if _has_expected(expected, '无有效增量', '降级摘要') or _has_step(steps, '异常', 'connectionerror', 'timeout'):
+    # LLM 降级（TC-C-006/012/013/014）— 检查本轮无新内容 / 降级摘要（必须在 core_change 前）
+    if _has_expected(expected, '本轮无新内容', '降级摘要') or _has_step(steps, '异常', 'connectionerror', 'timeout'):
         if _has_step(steps, '异常', 'connectionerror', 'timeout'):
             lines.append('with patch.object(engine, "_call_llm_for_l1", side_effect=ConnectionError("mock LLM down")):')
             lines.append('    turn_index = engine.process_turn_async("测试", "回复")')
@@ -157,7 +157,7 @@ def _gen_c_stage_body(tc: dict) -> str:
             lines.append('    if rec:')
             lines.append('        l1 = json.loads(rec["l1_text"])')
             lines.append('        core = l1.get("core_change", "")')
-            lines.append('        assert "无有效增量" in core or not core, f"Unexpected core: {core}"')
+            lines.append('        assert "本轮无新内容" in core or not core, f"Unexpected core: {core}"')
             lines.append('    else:')
             lines.append('        assert turn_index >= 0, "turn_index should be valid"')
         elif _has_step(steps, '空字符串', '空') or _has_step(steps, '返回空'):
@@ -460,7 +460,7 @@ def _gen_a_stage_body(tc: dict) -> str:
     # TC-A-011: 无效摘要过滤
     if _has_expected(expected, '无效摘要', '过滤') and '无效' in precond:
         lines.append('for i in range(3):')
-        lines.append('    core = "无有效增量" if i < 2 else "有效变更内容"')
+        lines.append('    core = "本轮无新内容" if i < 2 else "有效变更内容"')
         lines.append('    engine.cache.add_turn(i+1, f"L0 {i+1}", f\'{{"core_change":"{core}","new_materials":[],"objective_facts":[],"consensus":[],"todo":[]}}\', None, None)')
         lines.append('messages = [{"role":"user","content":f"msg {i}"} for i in range(5)]')
         lines.append('result = engine.assemble("查询", messages)')
@@ -471,7 +471,7 @@ def _gen_a_stage_body(tc: dict) -> str:
     # TC-A-012: 无效摘要递补
     if _has_expected(expected, '递补', '回退') and _has_step(steps, '全无效'):
         lines.append('for i in range(3):')
-        lines.append('    engine.cache.add_turn(i+1, f"L0 {i+1}", f\'{{"core_change":"无有效增量","new_materials":[],"objective_facts":[],"consensus":[],"todo":[]}}\', None, None)')
+        lines.append('    engine.cache.add_turn(i+1, f"L0 {i+1}", f\'{{"core_change":"本轮无新内容","new_materials":[],"objective_facts":[],"consensus":[],"todo":[]}}\', None, None)')
         lines.append('original = [{"role":"user","content":f"原始消息 {i}"} for i in range(5)]')
         lines.append('result = engine.assemble("查询", original)')
         lines.append('l1_markers = [m for m in result if "[~/" in m.get("content","")]')

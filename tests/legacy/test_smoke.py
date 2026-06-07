@@ -113,13 +113,13 @@ def test_parse_full(parser):
     assert result["consensus"] == [] or result["consensus"] == ['：']
 
 def test_parse_empty_increment(parser):
-    text = """核心摘要：无有效增量
+    text = """核心摘要：本轮无新内容
 资源与观察：无
 事实与约束：无
 决策与结论：无
 后续行动：无"""
     result = parser.parse(text)
-    assert result["core_change"].endswith("无有效增量")
+    assert result["core_change"].endswith("本轮无新内容")
 
 def test_parse_missing_sections(parser):
     text = """核心摘要：Only core

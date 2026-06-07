@@ -43,7 +43,7 @@ def test_incremental_no_new_info_yields_fallback(ca_engine):
         ca_engine.wait_for_pending(timeout=10)
     records = ca_engine.store.read_session("test")
     l1 = json.loads(records[-1]["l1_text"])
-    assert l1["core_change"] == "无有效增量"
+    assert l1["core_change"] == "本轮无新内容"
 
 
 def test_dedup_high_similarity_removed(ca_engine):
@@ -98,7 +98,7 @@ def test_llm_exception_triggers_fallback(ca_engine):
         ca_engine.wait_for_pending(timeout=10)
     records = ca_engine.store.read_session("test")
     l1 = json.loads(records[-1]["l1_text"])
-    assert l1["core_change"] == "无有效增量"
+    assert l1["core_change"] == "本轮无新内容"
 
 
 def test_llm_timeout_fallback_after_retries(ca_engine):
@@ -107,7 +107,7 @@ def test_llm_timeout_fallback_after_retries(ca_engine):
         ca_engine.wait_for_pending(timeout=10)
     records = ca_engine.store.read_session("test")
     l1 = json.loads(records[-1]["l1_text"])
-    assert l1["core_change"] == "无有效增量"
+    assert l1["core_change"] == "本轮无新内容"
 
 
 def test_turn_index_recovery_on_restart(tmp_path):
@@ -131,7 +131,7 @@ def test_turn_index_recovery_on_restart(tmp_path):
 
 # ---------- 新增用例（补齐缺口，已去重）----------
 def test_no_increment_on_duplicate(ca_engine):
-    """TC-C-002: 连续两轮相同 L2 → core_change == '无有效增量'"""
+    """TC-C-002: 连续两轮相同 L2 → core_change == '本轮无新内容'"""
     with patch.object(ca_engine, "_call_llm_for_l1", side_effect=Exception("LLM failed")):
         ca_engine.process_turn_async("重复问题", "重复回答")
         ca_engine.wait_for_pending(timeout=10)
@@ -139,7 +139,7 @@ def test_no_increment_on_duplicate(ca_engine):
         ca_engine.wait_for_pending(timeout=10)
     records = ca_engine.store.read_session("test")
     l1 = json.loads(records[-1]["l1_text"])
-    assert l1["core_change"] == "无有效增量"
+    assert l1["core_change"] == "本轮无新内容"
 
 
 def test_dedup_identical_text_removed(ca_engine):
@@ -169,7 +169,7 @@ def test_llm_connection_refused_fallback(ca_engine):
         ca_engine.wait_for_pending(timeout=10)
     records = ca_engine.store.read_session("test")
     l1 = json.loads(records[-1]["l1_text"])
-    assert l1["core_change"] == "无有效增量"
+    assert l1["core_change"] == "本轮无新内容"
 
 
 def test_llm_timeout_fallback(ca_engine):
@@ -179,4 +179,4 @@ def test_llm_timeout_fallback(ca_engine):
         ca_engine.wait_for_pending(timeout=10)
     records = ca_engine.store.read_session("test")
     l1 = json.loads(records[-1]["l1_text"])
-    assert l1["core_change"] == "无有效增量"
+    assert l1["core_change"] == "本轮无新内容"

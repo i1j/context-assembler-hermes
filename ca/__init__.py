@@ -313,7 +313,7 @@ class ContextAssembler:
                 parsed = self.ooda_parser.parse(ooda_text, previous_summary=prev_l1)
                 robust, _ = robust_json_parse(json.dumps(parsed, ensure_ascii=False))
                 cleaned = clean_increment(robust)
-                is_llm_fallback = ooda_text.startswith("核心摘要：无有效增量") and "资源与观察：\n- 无" in ooda_text
+                is_llm_fallback = ooda_text.startswith("核心摘要：本轮无新内容") and "资源与观察：\n- 无" in ooda_text
                 cleaned["_assemble_status"] = 1 if is_llm_fallback else 0
                 if not is_llm_fallback:
                     dialogue_ok = True
@@ -375,14 +375,14 @@ class ContextAssembler:
         except Exception as e:
             logger.error("C‑stage crash turn %d: %s", turn_index, e, exc_info=True)
             fallback = json.dumps({
-                "core_change": "无有效增量",
+                "core_change": "本轮无新内容",
                 "_assemble_status": 1,
                 "new_materials": [], "objective_facts": [],
                 "consensus": [], "todo": []
             }, ensure_ascii=False)
             self.store.write_turn(
                 session_id, turn_index,
-                l0_text="无有效增量",
+                l0_text="本轮无新内容",
                 l1_text=fallback,
                 l0_embedding=None,
                 l1_embedding=None,
@@ -394,7 +394,7 @@ class ContextAssembler:
                 ], ensure_ascii=False),
                 _assemble_status=1,
             )
-            self.cache.add_turn(turn_index, "无有效增量", fallback, None, None)
+            self.cache.add_turn(turn_index, "本轮无新内容", fallback, None, None)
         finally:
             with self._task_lock:
                 self._pending_tasks.pop(turn_index, None)
@@ -1214,7 +1214,7 @@ class ContextAssembler:
         try:
             data = json.loads(l1_text)
             core = data.get("core_change", "")
-            return bool(core and core != "无有效增量")
+            return bool(core and core != "本轮无新内容")
         except (json.JSONDecodeError, TypeError, AttributeError):
             return False
 
@@ -1395,7 +1395,7 @@ class ContextAssembler:
             except Exception as e:
                 logger.warning("LLM attempt %d failed: %s", attempt + 1, e)
                 time.sleep(2 ** attempt)
-        return ("核心摘要：无有效增量\n资源与观察：\n- 无\n事实与约束：\n- 无\n决策与结论：\n- 无\n后续行动：\n- 无")
+        return ("核心摘要：本轮无新内容\n资源与观察：\n- 无\n事实与约束：\n- 无\n决策与结论：\n- 无\n后续行动：\n- 无")
 
     def _extract_l0(self, l1_dict):
         core = l1_dict.get("core_change", "")
@@ -1413,7 +1413,7 @@ class ContextAssembler:
         if prev_idx in self.cache.l1_texts:
             try:
                 data = json.loads(self.cache.l1_texts[prev_idx])
-                if data.get("core_change") != "无有效增量":
+                if data.get("core_change") != "本轮无新内容":
                     return data
             except Exception:
                 pass
@@ -1444,3 +1444,29 @@ class ContextAssembler:
             if remaining <= 0:
                 break
             t.join(timeout=max(0.1, remaining))
+
+    # ── Token 水位查询（v4.6.0）──
+
+    def debug_token_budget(self, session_id: str = "") -> dict:
+        """查询当前会话的 Token 水位。纯只读，不修改任何状态。
+
+        Returns:
+            dict: {
+                "context_length": int,    # 总窗口上限
+                "budget_max": int,        # 可用预算上限（95%）
+                "used_tokens": int,       # 当前累计 token 偏移
+                "remaining": int,         # 剩余预算
+                "usage_pct": float,       # 使用率百分比
+            }
+        """
+        if not session_id:
+            session_id = self._session_id
+        max_offset = self.store.get_max_token_offset(session_id) or 0
+        budget_max = int(Config.CONTEXT_LENGTH * 0.95)
+        return {
+            "context_length": Config.CONTEXT_LENGTH,
+            "budget_max": budget_max,
+            "used_tokens": max_offset,
+            "remaining": max(0, budget_max - max_offset),
+            "usage_pct": round(max_offset / Config.CONTEXT_LENGTH * 100, 1),
+        }
