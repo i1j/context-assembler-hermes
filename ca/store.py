@@ -27,7 +27,7 @@ from .config import Config
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 INITIAL_BACKFILL_ATTEMPTS = 0
 
 _SCHEMA_SQL = f"""
@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS turn_cache (
     tool_sub_index INTEGER NOT NULL DEFAULT 0,
     l2_text       TEXT,
     _assemble_status INTEGER NOT NULL DEFAULT 0,
+    query_embedding BLOB,
     PRIMARY KEY (session_id, turn_index, turn_type, tool_sub_index)
 );
 
@@ -170,12 +171,19 @@ class SQLiteStore:
         conn = self.conn
         try:
             row = conn.execute("SELECT value FROM _meta WHERE key='schema_version'").fetchone()
-            if row and int(row[0]) != _SCHEMA_VERSION:
-                logger.warning("Schema version mismatch, rebuilding.")
-                self._rebuild()
+            if row:
+                current_ver = int(row[0])
+                if current_ver < _SCHEMA_VERSION:
+                    self._migrate(current_ver)
+                elif current_ver > _SCHEMA_VERSION:
+                    logger.warning("Schema version %d > expected %d, rebuilding.", current_ver, _SCHEMA_VERSION)
+                    self._rebuild()
+                    return
+            else:
+                logger.warning("No schema version found, assuming fresh DB.")
                 return
-        except sqlite3.Error:
-            logger.warning("Schema version check failed, assuming fresh DB.")
+        except (sqlite3.Error, ValueError) as exc:
+            logger.warning("Schema version check failed: %s", exc)
             return
 
         try:
@@ -186,6 +194,22 @@ class SQLiteStore:
                 self._rebuild()
         except sqlite3.Error:
             pass
+
+    def _migrate(self, from_version: int) -> None:
+        """增量迁移：从旧版本升级到最新版本，不丢数据。"""
+        conn = self.conn
+        if from_version <= 3:
+            try:
+                conn.execute("ALTER TABLE turn_cache ADD COLUMN query_embedding BLOB")
+                logger.info("Schema migrated v3→v4: added query_embedding column")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" in str(exc):
+                    logger.debug("query_embedding column already exists, skipping")
+                else:
+                    raise
+        conn.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?)", (str(_SCHEMA_VERSION),))
+        conn.commit()
+        logger.info("Schema migrated from v%d to v%d", from_version, _SCHEMA_VERSION)
 
     def _rebuild(self) -> None:
         conn = self.conn
@@ -503,6 +527,93 @@ class SQLiteStore:
     def delete_turn_plan(self, session_id: str) -> None:
         self.conn.execute("DELETE FROM turn_plan WHERE session_id=?", (session_id,))
         self.conn.commit()
+
+    # ── query_embedding 读写（v4.6.0）──
+
+    def write_query_embedding(self, session_id: str, turn_index: int,
+                               embedding: List[float]) -> bool:
+        """写入当前对话轮的 query_embedding（用户消息的嵌入向量）。"""
+        try:
+            self.conn.execute(
+                """UPDATE turn_cache SET query_embedding=?
+                   WHERE session_id=? AND turn_index=? AND turn_type='dialogue' AND tool_sub_index=0""",
+                (_pack_f32(embedding), session_id, turn_index),
+            )
+            self.conn.commit()
+            return True
+        except sqlite3.Error as exc:
+            logger.error("write_query_embedding failed: %s", exc)
+            return False
+
+    def read_query_embedding(self, session_id: str, turn_index: int) -> Optional[List[float]]:
+        """读取指定对话轮的 query_embedding。"""
+        cur = self.conn.execute(
+            "SELECT query_embedding FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue'",
+            (session_id, turn_index),
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            return _unpack_f32(row[0])
+        return None
+
+    # ── 话题辅助方法（v4.6.0）──
+
+    def read_turn_l1_fields(self, session_id: str, turn_index: int) -> Optional[Dict[str, Any]]:
+        """读取该对话轮的 L1 JSON 字段，用于话题分割判断。"""
+        cur = self.conn.execute(
+            "SELECT l1_text FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue'",
+            (session_id, turn_index),
+        )
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            return json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    def read_topic_turn_indices(self, session_id: str, topic_group: int) -> List[int]:
+        """读取指定 topic_group 下所有对话轮索引。"""
+        cur = self.conn.execute(
+            """SELECT DISTINCT turn_index FROM turn_plan
+               WHERE session_id=? AND topic_group=? AND turn_type='dialogue'
+               ORDER BY turn_index""",
+            (session_id, topic_group),
+        )
+        return [row[0] for row in cur]
+
+    def read_topic_l1_texts(self, session_id: str, topic_group: int) -> List[str]:
+        """读取 topic 内所有对话轮的 L1 文本（5字段拼接），用于 BM25 检索。"""
+        indices = self.read_topic_turn_indices(session_id, topic_group)
+        texts = []
+        for idx in indices:
+            fields = self.read_turn_l1_fields(session_id, idx)
+            if fields:
+                parts = []
+                for key in ("core_change", "new_materials", "objective_facts", "consensus", "todo"):
+                    val = fields.get(key)
+                    if isinstance(val, list):
+                        parts.append(" ".join(str(v) for v in val))
+                    elif val:
+                        parts.append(str(val))
+                texts.append(" | ".join(parts))
+        return texts
+
+    def read_topic_l1_embeddings(self, session_id: str, topic_group: int) -> List[List[float]]:
+        """读取 topic 内所有对话轮的 L1 embedding。"""
+        indices = self.read_topic_turn_indices(session_id, topic_group)
+        embeddings = []
+        for idx in indices:
+            cur = self.conn.execute(
+                "SELECT l1_embedding FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue'",
+                (session_id, idx),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                emb = _unpack_f32(row[0])
+                if emb:
+                    embeddings.append(emb)
+        return embeddings
 
     def upsert_turn_plan_topic(self, session_id: str, turn_index: int,
                                turn_type: str, tool_sub_index: int,

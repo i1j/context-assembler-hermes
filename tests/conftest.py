@@ -1,4 +1,8 @@
-import pytest, platform, os, psutil, json, sys
+import pytest, platform, os, json, sys
+try:
+    import psutil
+except ImportError:
+    psutil = None
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,11 +34,17 @@ def _get_cpu_brand():
     return platform.processor() or "unknown"
 
 def get_hardware_info():
+    memory_gb = 0
+    if psutil:
+        try:
+            memory_gb = psutil.virtual_memory().total / (1024**3)
+        except Exception:
+            pass
     return {
         "platform": platform.platform(),
         "cpu_brand": _get_cpu_brand(),
         "cpu_count": os.cpu_count() or 1,
-        "memory_gb": psutil.virtual_memory().total / (1024**3)
+        "memory_gb": memory_gb
     }
 
 @pytest.fixture(scope="session")
@@ -42,10 +52,11 @@ def hardware_info():
     return get_hardware_info()
 
 def get_fd_count():
-    try: return psutil.Process().num_fds()
-    except:
-        try: return len(os.listdir('/proc/self/fd'))
-        except: return -1
+    if psutil:
+        try: return psutil.Process().num_fds()
+        except: pass
+    try: return len(os.listdir('/proc/self/fd'))
+    except: return -1
 
 @pytest.fixture
 def fd_checker():

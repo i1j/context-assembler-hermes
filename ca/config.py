@@ -82,6 +82,19 @@ class Config:
     # 低于此阈值 → 新话题。范围 [0, 1]，默认 0.50。
     TOPIC_BOUNDARY_DISTANCE: ClassVar[float] = float(os.getenv("CA_TOPIC_BOUNDARY_DISTANCE", "0.50"))
 
+    # ── 话题拣选（v4.6.0）──
+
+    # 话题分割 Jaccard 阈值：首次合并入口（双实义轮）
+    TOPIC_JACCARD_ENTRY: ClassVar[float] = float(os.getenv("CA_TOPIC_JACCARD_ENTRY", "0.03"))
+    # 话题分割 Jaccard 阈值：链内扩展
+    TOPIC_JACCARD_CHAIN: ClassVar[float] = float(os.getenv("CA_TOPIC_JACCARD_CHAIN", "0.04"))
+    # 话题半径公式：最近邻形心距离的权重系数（r = min(max_intra, nearest/weight)）
+    TOPIC_RADIUS_WEIGHT: ClassVar[float] = float(os.getenv("CA_TOPIC_RADIUS_WEIGHT", "2.0"))
+    # 话题检索升级最大数
+    TOPIC_MAX_UPGRADE: ClassVar[int] = int(os.getenv("CA_TOPIC_MAX_UPGRADE", "10"))
+    # BG 类话题固定级别
+    TOPIC_BG_LEVEL: ClassVar[str] = os.getenv("CA_TOPIC_BG_LEVEL", "L0")
+
     # 已知模型上下文窗口（Hermes hook 不传 context_length，需自行查表）
     _MODEL_CONTEXT_WINDOW: ClassVar[Dict[str, int]] = {
         "deepseek-v4-flash": 1_000_000,
@@ -207,6 +220,12 @@ class Config:
         pos_int("TOOL_PRE_UPGRADE_WAIT_TIMEOUT", cls.TOOL_PRE_UPGRADE_WAIT_TIMEOUT, min_v=5, max_v=120)
         pos_int("SHUTDOWN_TIMEOUT", cls.SHUTDOWN_TIMEOUT, min_v=1, max_v=30)
         pos_int("BM25_HIT_THRESHOLD", cls.BM25_HIT_THRESHOLD, min_v=1, max_v=20)
+        pos_float("TOPIC_JACCARD_ENTRY", cls.TOPIC_JACCARD_ENTRY, min_v=0.01)
+        pos_float("TOPIC_JACCARD_CHAIN", cls.TOPIC_JACCARD_CHAIN, min_v=0.01)
+        pos_float("TOPIC_RADIUS_WEIGHT", cls.TOPIC_RADIUS_WEIGHT, min_v=1.0)
+        pos_int("TOPIC_MAX_UPGRADE", cls.TOPIC_MAX_UPGRADE, max_v=20)
+        if cls.TOPIC_BG_LEVEL not in ("L0", "L1", "L2"):
+            errors.append(f"TOPIC_BG_LEVEL must be L0/L1/L2 (got {cls.TOPIC_BG_LEVEL})")
 
         if errors:
             raise ValueError("Configuration validation failed:\n" + "\n".join(errors))
@@ -252,6 +271,11 @@ class Config:
             cls.TOOL_FIELD_PRIORITY_PROFILE = os.getenv("CA_TOOL_FIELD_PRIORITY_PROFILE", cls.TOOL_FIELD_PRIORITY_PROFILE)
             cls.SHUTDOWN_TIMEOUT = int(os.getenv("CA_SHUTDOWN_TIMEOUT", str(cls.SHUTDOWN_TIMEOUT)))
             cls.BM25_HIT_THRESHOLD = int(os.getenv("CA_BM25_HIT_THRESHOLD", str(cls.BM25_HIT_THRESHOLD)))
+            cls.TOPIC_JACCARD_ENTRY = float(os.getenv("CA_TOPIC_JACCARD_ENTRY", str(cls.TOPIC_JACCARD_ENTRY)))
+            cls.TOPIC_JACCARD_CHAIN = float(os.getenv("CA_TOPIC_JACCARD_CHAIN", str(cls.TOPIC_JACCARD_CHAIN)))
+            cls.TOPIC_RADIUS_WEIGHT = float(os.getenv("CA_TOPIC_RADIUS_WEIGHT", str(cls.TOPIC_RADIUS_WEIGHT)))
+            cls.TOPIC_MAX_UPGRADE = int(os.getenv("CA_TOPIC_MAX_UPGRADE", str(cls.TOPIC_MAX_UPGRADE)))
+            cls.TOPIC_BG_LEVEL = os.getenv("CA_TOPIC_BG_LEVEL", cls.TOPIC_BG_LEVEL)
 
             cls.validate()
             logger.info("Configuration reloaded and validated.")

@@ -204,18 +204,10 @@ class TestToolTurnCStage:
         assert l1['error'] != ''
 
     @patch('ca.ContextAssembler._call_llm_for_l1', return_value='核心摘要：查询天气情况')
-    def test_TC_C_022_pre_upgrade(self, mock_llm, ca_engine):
-        """C-stage 预选：以对话 L1 为 Query 在工具轮索引中 BM25 检索"""
-        ca_engine._pre_upgraded_tool_turns.clear()
-        tidx = max(ca_engine._turn_counter, 0) + 1
-        ca_engine.cache.add_tool_turn(tidx, 1, "天气L0",
-            json.dumps({"tool_name": "weather", "result_summary": "天气预报晴"}, ensure_ascii=False), None, None)
-        ca_engine.cache.add_tool_turn(tidx, 2, "新闻L0",
-            json.dumps({"tool_name": "news"}, ensure_ascii=False), None, None)
-        ca_engine.cache.rebuild_bm25_snapshot()
-        ca_engine._run_c_stage(TEST_SESSION, tidx + 1, {}, "User: hi\nAssistant: hello", 0)
-        assert len(ca_engine._pre_upgraded_tool_turns) > 0
-        assert len(ca_engine._pre_upgraded_tool_turns) <= 3
+    def test_TC_C_022_pre_upgrade_removed(self, mock_llm, ca_engine):
+        """C-stage 不再有预升级机制（v4.6.0 移除）"""
+        assert not hasattr(ca_engine, '_pre_upgraded_tool_turns')
+        assert not hasattr(ca_engine, '_pre_upgrade_tools')
 
     @patch('ca.ContextAssembler._call_llm_for_l1',
            return_value='核心摘要：无有效增量\n资源与观察：\n- 无')
@@ -295,42 +287,62 @@ class TestToolTurnAStage:
         assert len(tool_msgs) == 1
         assert tool_msgs[0]['content'] == 'result_data'
 
-    @patch('ca.ContextAssembler._call_llm_for_l1', return_value='核心摘要：对话')
-    def test_TC_A_021_pre_upgrade_l1_fallback(self, mock_llm, ca_engine, monkeypatch):
-        """预选工具轮在 Head/Middle 区域至少以 L1 替换（兜底保障）"""
-        # tail_start 由非 tool 消息内容决定；设小阈值并在消息尾部放置
-        # 足够填充 tail 的消息，使工具组落在 tail 之外的 middle 区域
+    @patch('ca.ContextAssembler._call_llm_for_l1', return_value='核心摘要：对话内容')
+    def test_TC_A_021_topic_boost_tools(self, mock_llm, ca_engine, monkeypatch):
+        """L2 话题中的工具轮升为 L1（topic_boost）"""
         monkeypatch.setattr('ca.config.Config.PROTECT_TAIL_TOKENS', 1)
+        monkeypatch.setattr('ca.config.Config.TOOL_TAIL_TURN_COUNT', 0)
         tidx = max(ca_engine._turn_counter, 0) + 1
-        ca_engine._pre_upgraded_tool_turns = {(tidx, 1)}
-        ca_engine.cache.add_tool_turn(tidx, 1, "L0", json.dumps({
+        valid_emb = [0.1] * 768
+
+        # 种子测试轮（含工具调用）
+        ca_engine.cache.add_turn(tidx, "对话L0", json.dumps({
+            "core_change": "重要讨论", "new_materials": ["数据"]
+        }), valid_emb, valid_emb)
+        ca_engine.cache.add_tool_turn(tidx, 1, "工具L0", json.dumps({
             "tool_name": "t", "result_summary": "ok",
-            "tool_args": {}, "thought_process": "", "error": None,
-            "implicit_knowledge": [], "next_action_hint": ""
         }), None, None)
+
+        # 种子尾轮（吸收 tail）
+        tail_turn = tidx + 1
+        tail_emb = [0.2] * 768
+        ca_engine.cache.add_turn(tail_turn, "尾轮L0", json.dumps({
+            "core_change": "结尾"
+        }), tail_emb, tail_emb)
+
         ca_engine.cache.rebuild_bm25_snapshot()
-        # 工具组 + 尾部用户/助手消息填充 tail_start 使其 > 工具组索引
+
         msgs = [
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "", "tool_calls": [
                 {"id": "t1", "function": {"name": "t", "arguments": "{}"}}
             ]},
             {"role": "tool", "tool_call_id": "t1", "content": "ok"},
-            {"role": "user", "content": "filler text"},
-            {"role": "assistant", "content": "done"},
         ]
         ca_engine.store.write_turn(
-            TEST_SESSION, tidx, l0_text="", l1_text="{}",
+            TEST_SESSION, tidx, l0_text="", l1_text=json.dumps({"core_change": "重要讨论", "new_materials": ["数据"]}),
             turn_type="dialogue", tool_sub_index=0,
             l2_text=json.dumps(msgs, ensure_ascii=False),
+            _assemble_status=0,
+        )
+        ca_engine.store.write_turn(
+            TEST_SESSION, tail_turn, l0_text="尾轮L0", l1_text=json.dumps({"core_change": "结尾"}),
+            turn_type="dialogue", tool_sub_index=0,
+            l2_text=json.dumps([{"role": "user", "content": "done"}], ensure_ascii=False),
             _assemble_status=0,
         )
 
         def _zero_budget(*args, **kwargs):
             return 0
         with patch.object(ca_engine, '_available_budget', _zero_budget):
-            result = ca_engine.assemble("", context_length=1000)
-        assert any(f"[~/{tidx}/1]" in m.get('content', '') for m in result)
+            ca_engine.assemble("", context_length=1000)
+        # 验证 turn_plan：工具轮应为 topic_boost L1
+        plans = ca_engine.store.read_turn_plan(TEST_SESSION)
+        tool_entries = [p for p in plans if p["turn_index"] == tidx and p["turn_type"] == "tool"]
+        assert len(tool_entries) == 1, f"Expected 1 tool entry, got {len(tool_entries)}"
+        te = tool_entries[0]
+        assert te["target_level"] == "L1", f"Tool should be L1 (topic_boost), got {te['target_level']}"
+        assert te["decision_reason"] == "topic_boost", f"Reason should be topic_boost, got {te['decision_reason']}"
 
     @patch('ca.ContextAssembler._call_llm_for_l1', return_value='核心摘要：对话')
     def test_TC_A_022_downgrade_order(self, mock_llm, ca_engine):
@@ -346,7 +358,6 @@ class TestToolTurnAStage:
         ca_engine.cache.add_turn(tidx, "对话L0", json.dumps({"core_change": "对话内容"}), None, None)
         ca_engine.cache.add_tool_turn(tidx, 1, "工具L0", json.dumps({"tool_name": "t"}), None, None)
         ca_engine.cache.rebuild_bm25_snapshot()
-        ca_engine._pre_upgraded_tool_turns = {(tidx, 1)}
 
         msgs = [
             {"role": "system", "content": "sys"},
@@ -542,9 +553,8 @@ class TestLStageBackfill:
         if status < 0:
             pytest.skip(f"Backfill thread not ready (status={status})")
 
-    def test_TC_L_005_pre_upgrade_timeout(self, ca_engine, monkeypatch):
-        """预选等待超时后放弃工具轮预选"""
-        monkeypatch.setattr('ca.config.Config.TOOL_PRE_UPGRADE_WAIT_TIMEOUT', 2)
+    def test_TC_L_005_pre_upgrade_removed(self, ca_engine):
+        """预升级机制已移除，C-stage 完成后引擎正常运行"""
         tidx = max(ca_engine._turn_counter, 0) + 1
         ca_engine.store.conn.execute(
             "INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, "
@@ -554,7 +564,12 @@ class TestLStageBackfill:
         ca_engine.store.conn.commit()
         with patch('ca.ContextAssembler._call_llm_for_l1', return_value='核心摘要：对话'):
             ca_engine._run_c_stage(TEST_SESSION, tidx + 1, {}, "User: hi\nAssistant: hello", 0)
-        assert len(ca_engine._pre_upgraded_tool_turns) == 0
+        row = ca_engine.store.conn.execute(
+            "SELECT _assemble_status FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue'",
+            (TEST_SESSION, tidx + 1)
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 0
 
     def test_TC_L_006_cache_update_after_backfill(self, ca_engine):
         """补全成功后更新 AssemblyCache 并触发快照重建"""
@@ -721,20 +736,9 @@ class TestConfigAndOthers:
                 import warnings
                 warnings.warn(UserWarning(f"Local perf: {p95}ms"))
 
-    def test_TC_PERF_003_pre_upgrade_speed(self, ca_engine):
-        """C-stage 预选检索耗时 p95 < 100ms"""
-        for i in range(50):
-            ca_engine.cache.add_tool_turn(i, 1, f"L0{i}", json.dumps({"tool_name": "t"}), None, None)
-        ca_engine.cache.rebuild_bm25_snapshot()
-        times = []
-        for _ in range(100):
-            t0 = time.perf_counter()
-            ca_engine._pre_upgrade_tools({"core_change": "测试"}, 0)
-            times.append((time.perf_counter() - t0) * 1000)
-        p95 = sorted(times)[int(len(times) * 0.95)]
-        import warnings
-        if p95 >= PERF_P95_PRE_UPGRADE_MS:
-            warnings.warn(UserWarning(f"Local perf pre-upgrade p95: {p95}ms"))
+    def test_TC_PERF_003_pre_upgrade_removed(self, ca_engine):
+        """预升级机制已移除，不做性能测试"""
+        assert not hasattr(ca_engine, '_pre_upgrade_tools')
 
     def test_TC_PERF_004_backfill_speed(self, ca_engine):
         """补全耗时验证：对话轮 < LLM 超时，工具轮 < 50ms"""

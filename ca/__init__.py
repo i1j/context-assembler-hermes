@@ -20,7 +20,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .config import Config
 from .store import SQLiteStore
@@ -199,8 +199,7 @@ class ContextAssembler:
         self._turn_counter = self._restore_turn_index()
 
         self.tool_summarizer = ToolSummarizer()
-        self._pre_upgraded_tool_turns: set = set()
-        self._pre_upgraded_lock = threading.Lock()
+        self._topic_tool_boost: Set[int] = set()
         self.stats = AssembleStats()
 
         self._dialogue_backfill = BackfillThread(self, 'dialogue', Config.BACKFILL_DIALOGUE_RATE)
@@ -209,8 +208,7 @@ class ContextAssembler:
         self._tool_backfill.start()
 
         # 话题边界追踪：从 turn_plan 恢复上次 topic_id
-        self._current_topic_id = self._restore_topic_id()
-        self._topic_lock = threading.Lock()
+
 
     def _restore_turn_index(self) -> int:
         try:
@@ -223,14 +221,6 @@ class ContextAssembler:
             logger.error("Failed to restore turn index: %s, defaulting to 0", e)
             return 0
 
-    def _restore_topic_id(self) -> int:
-        try:
-            plans = self.store.read_turn_plan(self._session_id)
-            if plans:
-                return max(p.get("topic_group", 0) or 0 for p in plans)
-        except Exception:
-            pass
-        return 1
 
     def destroy(self):
         # 1. 先等待所有 C‑stage 任务完成
@@ -354,28 +344,6 @@ class ContextAssembler:
             )
             self.cache.add_turn(turn_index, l0_text, l1_str, l0_emb, l1_emb)
 
-            # 话题边界检测：与上一对话轮的 L1 向量做余弦距离
-            # 若距离超过阈值 → 新话题，递增 topic_id
-            if l1_emb is not None and not bg_review:
-                prev_emb = self._get_previous_l1_embedding(turn_index)
-                if prev_emb is not None:
-                    sim = cosine_similarity(l1_emb, prev_emb)
-                    is_new_topic = sim < Config.TOPIC_BOUNDARY_DISTANCE
-                    with self._topic_lock:
-                        if is_new_topic:
-                            self._current_topic_id += 1
-                        topic_id = self._current_topic_id
-                    logger.info("[CA] turn %d: topic sim=%.3f topic_id=%d new=%s",
-                               turn_index, sim, topic_id, is_new_topic)
-                else:
-                    with self._topic_lock:
-                        topic_id = self._current_topic_id
-            else:
-                with self._topic_lock:
-                    topic_id = self._current_topic_id
-            self.store.upsert_turn_plan_topic(
-                session_id, turn_index, "dialogue", 0, topic_id)
-
             if messages:
                 tool_turns = self._extract_tool_calls(messages)
                 for sub_index, turn in enumerate(tool_turns, start=1):
@@ -402,9 +370,7 @@ class ContextAssembler:
                         logger.error("Tool call %d-%d failed: %s", turn_index, sub_index, e)
 
             if dialogue_ok:
-                self._pre_upgrade_tools(cleaned, turn_index)
-                with self._pre_upgraded_lock:
-                    self.stats.tool_pre_upgrade_count = len(self._pre_upgraded_tool_turns)
+                self.stats.tool_pre_upgrade_count = 0
 
         except Exception as e:
             logger.error("C‑stage crash turn %d: %s", turn_index, e, exc_info=True)
@@ -471,35 +437,6 @@ class ContextAssembler:
                 i += 1
         return tool_turns
 
-    def _pre_upgrade_tools(self, dialogue_l1: Dict, current_turn: int):
-        snapshot = self.cache.get_bm25_snapshot()
-        if not snapshot or not snapshot.tool_bm25:
-            return
-        query_text = dialogue_l1.get("core_change", "")
-        if not query_text.strip():
-            return
-        query_tokens = tokenise(query_text)
-        scores = snapshot.tool_bm25.get_scores(query_tokens)
-        k = min(Config.TOOL_PRE_UPGRADE_COUNT, len(scores))
-        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
-        top_indices = [idx for idx in top_indices if scores[idx] > 0]
-        with self._pre_upgraded_lock:
-            self._pre_upgraded_tool_turns.clear()
-            tool_names = []
-            for idx in top_indices:
-                key = snapshot.tool_bm25.get_turn_key(idx)
-                if key:
-                    self._pre_upgraded_tool_turns.add(key)
-                    l1 = self.cache.tool_l1_texts.get(key)
-                    if l1:
-                        try:
-                            name = json.loads(l1).get("tool_name", "?")
-                        except Exception:
-                            name = "?"
-                        tool_names.append(name)
-        logger.debug("Pre-upgraded %d tool turns for turn %d: %s",
-                     len(self._pre_upgraded_tool_turns), current_turn,
-                     tool_names[:3] if tool_names else "none")
 
     # ---------- A‑stage ----------
     def _rebuild_messages_from_cache(self) -> List[Dict]:
@@ -603,16 +540,16 @@ class ContextAssembler:
         idx_to_turn = {i: msg.get("_turn_index", i) for i, msg in enumerate(messages)}
         tool_key_map = self._build_tool_key_map(messages, idx_to_turn)
 
-        with stats.time_phase("layers"):
-            with self._pre_upgraded_lock:
-                tool_head_snapshot = set(self._pre_upgraded_tool_turns)
-            tail_start = self._compute_tail_start(messages)
+        # 先用 cache 中的 l1_embeddings（含对话轮 embedding）
+        l1_embeddings = snapshot.l1_embeddings
 
-            # 工具尾区保护：与对话 tail 分离，只保留最近 N 个对话轮的工具原文。
-            # 工具和对话功能不同——对话需要 ~20K token 上下文保护，
-            # 但旧工具响应对 LLM 价值递减，只需最近 2-3 轮的上下文。
+        with stats.time_phase("layers"):
+            tail_start = self._compute_tail_start(messages)
+            # 工具尾区保护
             all_turns = sorted(l1_texts.keys())
-            tool_tail_turns = set(all_turns[-Config.TOOL_TAIL_TURN_COUNT:]) if all_turns else set()
+            tool_tail_turns: Set[int] = set()
+            if Config.TOOL_TAIL_TURN_COUNT > 0 and all_turns:
+                tool_tail_turns = set(all_turns[-Config.TOOL_TAIL_TURN_COUNT:])
 
         with stats.time_phase("embed_query"):
             try:
@@ -620,26 +557,45 @@ class ContextAssembler:
             except Exception:
                 q_emb = None
 
-        with stats.time_phase("retrieval"):
-            budget = self._available_budget(context_length, messages, tool_head_snapshot, tail_start, tool_tail_turns, idx_to_turn, tool_key_map)
+        # 写入 query_embedding 到当前对话轮（用于后续回放分析）
+        current_turn = max(l1_texts.keys()) if l1_texts else 0
+        if q_emb is not None and current_turn > 0:
+            try:
+                self.store.write_query_embedding(self._session_id, current_turn, q_emb)
+            except Exception:
+                pass
+
+        # ── 话题分割（R1 + R2）──
+        with stats.time_phase("topic_seg"):
+            turn_to_topic, topic_data = self._compute_topic_groups(l1_texts, l1_embeddings)
+
+        # ── 话题检索 + 三级定级 ──
+        with stats.time_phase("topic_retrieval"):
+            from .retrieval import TopicRetriever
+            topic_retriever = TopicRetriever(snapshot, turn_to_topic, topic_data)
+            retrieved_topics = topic_retriever.retrieve(user_message, q_emb, max_k=Config.TOPIC_MAX_UPGRADE)
+            topic_grades = self._grade_topics_by_radius(
+                turn_to_topic, topic_data, l1_embeddings, q_emb, retrieved_topics)
+            stats.topic_count = len(topic_data)
+            stats.topic_retrieved_count = len(retrieved_topics)
+
+        # ── 工具轮独立检索（不变）──
+        with stats.time_phase("tool_retrieval"):
+            budget = self._available_budget(context_length, messages, tail_start, tool_tail_turns, idx_to_turn, tool_key_map)
             retriever = Retriever(snapshot)
-            dial_upgrades = retriever.retrieve(user_message, query_embedding=q_emb, upgrade_budget=budget) if budget > 0 else []
             tool_upgrades_raw = retriever.retrieve_tools(user_message, query_embedding=q_emb, max_k=Config.TOOL_MAX_UPGRADE_K) if budget > 0 else []
-
-            all_candidates = self._build_candidates(
-                dial_upgrades, tool_upgrades_raw,
-                l1_texts, l0_texts, tool_l1_texts, tool_l0_texts,
-                tool_key_map, idx_to_turn, messages
+            tool_candidates = self._build_tool_candidates(
+                tool_upgrades_raw, tool_l1_texts, tool_l0_texts, tool_key_map
             )
-            upgrades = self._select_upgrades(all_candidates, budget)
-            stats.tool_upgrade_count = sum(1 for k in upgrades if isinstance(k, tuple))
+            selected_tools = self._select_upgrades(tool_candidates, budget)
+            stats.tool_upgrade_count = len(selected_tools)
 
-        # ── plan-based 路径：决策 → 存储 → 构建 ──
+        # ── 话题级 plan（含工具轮绑定）──
         with stats.time_phase("plan"):
-            plan = self._compute_turn_plan(
+            plan = self._compute_turn_plan_v2(
                 messages, l1_texts, l0_texts, tool_l1_texts, tool_l0_texts,
-                tool_head_snapshot,
-                upgrades, tail_start, tool_tail_turns, idx_to_turn, tool_key_map, budget
+                tail_start, tool_tail_turns, idx_to_turn, tool_key_map,
+                budget, turn_to_topic, topic_grades, topic_data, retrieved_topics, selected_tools
             )
             self.store.write_turn_plan(self._session_id, [e.as_dict() for e in plan])
 
@@ -656,9 +612,8 @@ class ContextAssembler:
         return final
 
 
-    def _available_budget(self, context_length, messages, tool_head, tail_start, tool_tail_turns, idx_to_turn, tool_key_map):
+    def _available_budget(self, context_length, messages, tail_start, tool_tail_turns, idx_to_turn, tool_key_map):
         system_tokens = 0
-        head_tokens = 0
         tail_tokens = 0
 
         i = 0
@@ -674,10 +629,7 @@ class ContextAssembler:
                 if i in tool_key_map:
                     entries = tool_key_map[i]
                     for key, token_count in entries:
-                        # head 工具始终计摘要 token（非原文），优先级高于尾区
-                        if key in tool_head:
-                            head_tokens += token_count
-                        elif key[0] in tool_tail_turns:
+                        if key[0] in tool_tail_turns:
                             tail_tokens += token_count
                     group_len = len(self._extract_tool_group(messages, i)[0])
                     i += group_len
@@ -691,7 +643,7 @@ class ContextAssembler:
                 tail_tokens += token
             i += 1
 
-        used = system_tokens + head_tokens + tail_tokens
+        used = system_tokens + tail_tokens
         return max(0, int(context_length * 0.95) - used)
 
     def set_system_overhead(self, overhead: int):
@@ -700,22 +652,9 @@ class ContextAssembler:
         if overhead > 0:
             self._system_overhead = overhead
 
-    def _build_candidates(self, dial_keys, tool_keys, l1_texts, l0_texts,
-                          tool_l1_texts, tool_l0_texts, tool_key_map,
-                          idx_to_turn, messages):
+    def _build_tool_candidates(self, tool_keys, tool_l1_texts, tool_l0_texts, tool_key_map):
+        """仅工具轮候选（对话轮已由话题级决策处理）。"""
         candidates = []
-        for rank, key in enumerate(dial_keys):
-            turn = key[0] if isinstance(key, tuple) else key
-            original_tokens = sum(
-                self._token_estimate(m.get("content", ""))
-                for i, m in enumerate(messages)
-                if idx_to_turn.get(i, i) == turn and m.get("role") not in ("system", "tool")
-            )
-            summary = l1_texts.get(turn) or l0_texts.get(turn, "")
-            saving = max(0, original_tokens - self._token_estimate(summary))
-            rrf_score = 1.0 / (Config.RETRIEVAL_RRF_K + rank)
-            candidates.append({"type": "dialogue", "key": key, "saving": saving, "rrf_score": rrf_score})
-
         for rank, key in enumerate(tool_keys):
             found = False
             for entries in tool_key_map.values():
@@ -744,30 +683,322 @@ class ContextAssembler:
             remaining -= c["saving"]
         return selected
 
-    # ── Plan-based 消息组装（v4.5.1）──
+    # ── 话题分割 + 三级定级（v4.6.0）──
 
-    def _compute_turn_plan(self, messages, l1_texts, l0_texts,
-                           tool_l1_texts, tool_l0_texts,
-                           tool_head,
-                           upgrades, tail_start, tool_tail_turns, idx_to_turn, tool_key_map,
-                           budget) -> List[TurnPlanEntry]:
-        """统一计算对话轮与工具轮的拣选决策，返回 TurnPlanEntry 列表。
+    def _jaccard_tokens(self, fields_a: Dict, fields_b: Dict) -> float:
+        """计算两个对话轮 L1 5 字段的 Jaccard 相似度。
+        中文用字符二元组，英文用原词，union 全部 5 字段。
+        """
+        def _tokenize_field(val) -> set:
+            tokens = set()
+            if isinstance(val, str):
+                for ch in val:
+                    if '\u4e00' <= ch <= '\u9fff':
+                        tokens.add(ch)
+                    else:
+                        for word in ch.split():
+                            if word.strip():
+                                tokens.add(word.lower())
+            elif isinstance(val, list):
+                for item in val:
+                    if isinstance(item, str):
+                        for ch in item:
+                            if '\u4e00' <= ch <= '\u9fff':
+                                tokens.add(ch)
+                            else:
+                                for word in ch.split():
+                                    if word.strip():
+                                        tokens.add(word.lower())
+            return tokens
 
-        已移除自动头区，全部走拣选。决策规则：
+        bag_a: set = set()
+        bag_b: set = set()
+        for key in ("core_change", "new_materials", "objective_facts", "consensus", "todo"):
+            bag_a.update(_tokenize_field(fields_a.get(key)))
+            bag_b.update(_tokenize_field(fields_b.get(key)))
 
-        对话轮：
+        # 中文二元组提升（对 CJK 序列做字符二元组）
+        def _add_bigrams(s: set) -> set:
+            cjk_chars = [c for c in ''.join(s) if '\u4e00' <= c <= '\u9fff']
+            bigrams = set()
+            for i in range(len(cjk_chars) - 1):
+                bigrams.add(cjk_chars[i] + cjk_chars[i + 1])
+            return s | bigrams
+
+        bag_a = _add_bigrams(bag_a)
+        bag_b = _add_bigrams(bag_b)
+
+        union_len = len(bag_a | bag_b)
+        if union_len == 0:
+            return 0.0
+        return len(bag_a & bag_b) / union_len
+
+    def _is_bg_turn(self, l1_fields: Optional[Dict]) -> bool:
+        """R1 检测：4 个材料字段全空 → BG 轮。"""
+        if l1_fields is None:
+            return True
+        for key in ("new_materials", "objective_facts", "consensus", "todo"):
+            val = l1_fields.get(key)
+            if isinstance(val, list) and len(val) > 0:
+                return False
+            if isinstance(val, str) and val.strip():
+                return False
+        return True
+
+    def _compute_topic_groups(self, l1_texts: Dict[int, str],
+                               l1_embeddings: Dict[int, List[float]]) -> Tuple[Dict[int, int], Dict]:
+        """话题分割：R1（BG 检测）+ R2（Jaccard + todo 链）。
+        
+        Returns:
+            turn_to_topic: Dict[turn_index → topic_id]
+            topic_data: Dict[topic_id → {
+                "turn_indices": [...],
+                "agg_text": str,        # topic 内 5 字段拼接文本
+                "centroid": [...],      # topic 形心
+                "max_intra": float,     # topic 内最大形心距离
+                "is_bg": bool,
+                "nearest_centroid_dist": float,  # 最近邻异 topic 形心距离
+            }]
+        """
+        sorted_turns = sorted(l1_texts.keys())
+        if not sorted_turns:
+            return {}, {}
+
+        # 解析每个对话轮的 L1 JSON
+        turn_fields: Dict[int, Optional[Dict]] = {}
+        for t in sorted_turns:
+            try:
+                turn_fields[t] = json.loads(l1_texts[t])
+            except (json.JSONDecodeError, TypeError):
+                turn_fields[t] = None
+
+        # 首次扫描：R1 BG 分类（字段存在性）
+        turn_bg: Dict[int, bool] = {}
+        for t in sorted_turns:
+            turn_bg[t] = self._is_bg_turn(turn_fields[t])
+
+        # R1+R2 合并：逐轮扫描
+        turn_to_topic: Dict[int, int] = {}
+        topic_counter = 1
+        chain_turns: List[int] = []  # 当前链中的对话轮索引
+
+        def _start_new_topic(turn_idx: int) -> None:
+            nonlocal topic_counter, chain_turns
+            topic_counter += 1
+            chain_turns = [turn_idx]
+            turn_to_topic[turn_idx] = topic_counter
+
+        def _extends_chain(turn_idx: int) -> None:
+            chain_turns.append(turn_idx)
+            turn_to_topic[turn_idx] = topic_counter
+
+        # 第 0 轮
+        if sorted_turns:
+            chain_turns = [sorted_turns[0]]
+            turn_to_topic[sorted_turns[0]] = topic_counter
+
+        for i in range(1, len(sorted_turns)):
+            turn = sorted_turns[i]
+            prev = sorted_turns[i - 1]
+            prev_bg = turn_bg[prev]
+            curr_bg = turn_bg[turn]
+
+            if prev_bg and curr_bg:
+                # 连续 BG → 合并
+                _extends_chain(turn)
+            elif prev_bg and not curr_bg:
+                # BG → 实义 → 分裂
+                _start_new_topic(turn)
+            elif not prev_bg and curr_bg:
+                # 实义 → BG → 分裂
+                _start_new_topic(turn)
+            else:
+                # 双实义：R2 Jaccard + todo 链
+                prev_fields = turn_fields[prev]
+                curr_fields = turn_fields[turn]
+                
+                j = self._jaccard_tokens(prev_fields or {}, curr_fields or {})
+                
+                # todo 重叠检测
+                prev_todo = set()
+                if prev_fields:
+                    todo_val = prev_fields.get("todo", [])
+                    if isinstance(todo_val, list):
+                        prev_todo = set(str(v) for v in todo_val)
+                    elif isinstance(todo_val, str):
+                        prev_todo = {todo_val}
+                
+                curr_core = set()
+                if curr_fields:
+                    core = curr_fields.get("core_change", "")
+                    if isinstance(core, str):
+                        curr_core.add(core)
+                    new_mat = curr_fields.get("new_materials", [])
+                    if isinstance(new_mat, list):
+                        curr_core.update(str(v) for v in new_mat)
+                
+                todo_overlap = prev_todo & curr_core
+                has_todo_overlap = len(todo_overlap) >= 1
+
+                # 在链中判断
+                is_in_chain = len(chain_turns) > 1
+                
+                if has_todo_overlap and j >= Config.TOPIC_JACCARD_CHAIN and is_in_chain:
+                    _extends_chain(turn)
+                elif has_todo_overlap and j >= Config.TOPIC_JACCARD_ENTRY:
+                    _extends_chain(turn)
+                else:
+                    _start_new_topic(turn)
+
+        # 构建 topic_data
+        topic_data: Dict[int, Dict] = {}
+        for t_idx, topic_id in turn_to_topic.items():
+            if topic_id not in topic_data:
+                topic_data[topic_id] = {
+                    "turn_indices": [],
+                    "agg_text": "",
+                    "centroid": None,
+                    "max_intra": 0.0,
+                    "is_bg": True,
+                    "nearest_centroid_dist": 0.0,
+                }
+            td = topic_data[topic_id]
+            td["turn_indices"].append(t_idx)
+            if not turn_bg[t_idx]:
+                td["is_bg"] = False
+            # 累加 agg_text
+            fields = turn_fields.get(t_idx)
+            if fields:
+                parts = []
+                for key in ("core_change", "new_materials", "objective_facts", "consensus", "todo"):
+                    val = fields.get(key)
+                    if isinstance(val, list):
+                        parts.append(" ".join(str(v) for v in val))
+                    elif val:
+                        parts.append(str(val))
+                if td["agg_text"]:
+                    td["agg_text"] += " | "
+                td["agg_text"] += " ".join(parts)
+
+        # 计算 topic 形心
+        for topic_id, td in topic_data.items():
+            if not td["is_bg"]:
+                emb_list = []
+                for t_idx in td["turn_indices"]:
+                    if t_idx in l1_embeddings:
+                        emb = l1_embeddings[t_idx]
+                        if emb:
+                            emb_list.append(emb)
+                if emb_list:
+                    n = len(emb_list)
+                    centroid = [sum(emb[i] for emb in emb_list) / n for i in range(len(emb_list[0]))]
+                    td["centroid"] = centroid
+                    if n == 1:
+                        # 单轮话题：自身到形心的距离精确为 0
+                        td["max_intra"] = 0.0
+                    else:
+                        max_dist = 0.0
+                        for emb in emb_list:
+                            d = 1.0 - cosine_similarity(emb, centroid)
+                            max_dist = max(max_dist, d)
+                        td["max_intra"] = max_dist
+
+        # 计算最近邻形心距离
+        centroids = {tid: td["centroid"] for tid, td in topic_data.items()
+                     if td["centroid"] is not None}
+        from .retrieval import cosine_similarity
+        for topic_id, td in topic_data.items():
+            if td["centroid"] is None:
+                continue
+            min_dist = float("inf")
+            for other_id, other_centroid in centroids.items():
+                if other_id == topic_id:
+                    continue
+                d = 1.0 - cosine_similarity(td["centroid"], other_centroid)
+                min_dist = min(min_dist, d)
+            td["nearest_centroid_dist"] = min_dist if min_dist != float("inf") else 0.0
+
+        logger.info("[CA] topic segmentation: %d topics from %d dialogue turns (BG=%d)",
+                     len(topic_data), len(sorted_turns),
+                     sum(1 for td in topic_data.values() if td["is_bg"]))
+        return turn_to_topic, topic_data
+
+    def _grade_topics_by_radius(self, turn_to_topic: Dict[int, int],
+                                 topic_data: Dict,
+                                 l1_embeddings: Dict[int, List[float]],
+                                 q_emb: Optional[List[float]],
+                                 retrieved_topics: set) -> Dict[int, str]:
+        """按半径 r 对话题三级定级。
+        
+        Returns:
+            topic_grades: Dict[topic_id → "L0"|"L1"|"L2"]
+        """
+        topic_grades: Dict[int, str] = {}
+
+        if q_emb is None:
+            # 无 query embedding 时：所有非 BG 话题 L1，BG L0
+            for tid, td in topic_data.items():
+                topic_grades[tid] = Config.TOPIC_BG_LEVEL if td["is_bg"] else "L1"
+            return topic_grades
+
+        for topic_id, td in topic_data.items():
+            if td["is_bg"]:
+                topic_grades[topic_id] = Config.TOPIC_BG_LEVEL
+                continue
+            if td["centroid"] is None:
+                topic_grades[topic_id] = "L1"
+                continue
+
+            # 计算 query 到 topic 形心的距离（余弦距离）
+            from .retrieval import cosine_similarity
+            sim = cosine_similarity(q_emb, td["centroid"])
+            d = 1.0 - sim
+
+            # 半径 r = min(max_intra, nearest_centroid / TOPIC_RADIUS_WEIGHT)
+            r = td["max_intra"]
+            if td["nearest_centroid_dist"] > 0:
+                r = min(r, td["nearest_centroid_dist"] / Config.TOPIC_RADIUS_WEIGHT) if r > 0 else td["nearest_centroid_dist"] / Config.TOPIC_RADIUS_WEIGHT
+            if r <= 0:
+                r = 0.05  # 最小半径保护
+
+            # 定级
+            if d <= r / 2.0:
+                topic_grades[topic_id] = "L2"
+            elif d <= r:
+                topic_grades[topic_id] = "L1"
+            elif topic_id in retrieved_topics:
+                topic_grades[topic_id] = "L1"
+            else:
+                topic_grades[topic_id] = "L0"
+
+            if Config.DEBUG_MODE:
+                logger.debug("topic %d: d=%.4f r=%.4f → %s (retrieved=%s)",
+                             topic_id, d, r, topic_grades[topic_id], topic_id in retrieved_topics)
+
+        return topic_grades
+
+    # ── 话题级 Plan 计算（v4.6.0）──
+
+    def _compute_turn_plan_v2(self, messages, l1_texts, l0_texts,
+                               tool_l1_texts, tool_l0_texts,
+                               tail_start, tool_tail_turns, idx_to_turn, tool_key_map,
+                               budget, turn_to_topic, topic_grades, topic_data,
+                               retrieved_topics, selected_tools) -> List[TurnPlanEntry]:
+        """话题级拣选决策 + 工具轮绑定。
+
+        对话轮决策规则：
           tail           → L2 (tail)
-          upgrades + L1  → L1 (retrieved)
-          middle + L0    → L0 (middle)
-          fallback       → L2
+          BG topic       → TOPIC_BG_LEVEL (default L0)
+          L2 grade       → L2 (topic_core)
+          L1 grade       → L1 (topic_baseline)
+          L0 grade       → L0 (topic_degraded)
 
-        工具轮：
-          tool_head + !upgrades + L1 → L1 (tool_head)
-          tool_tail                  → L2 (tail)
-          upgrades + L1              → L1 (retrieved)
-          upgrades + L0              → L0 (retrieved)
-          middle + L0                → L0 (middle)
-          fallback                   → L2
+        工具轮决策规则：
+          tool_tail                       → L2 (tail)
+          parent dialogue in L2 topic     → L1 (topic_boost)
+          retrieved + L1                  → L1 (retrieved)
+          retrieved + L0                  → L0 (retrieved)
+          else                            → L0 (middle)
         """
         entries: List[TurnPlanEntry] = []
 
@@ -789,34 +1020,42 @@ class ContextAssembler:
                        and "tool_calls" not in m)
             sum_tk = self._token_estimate(l1) if l1_valid else self._token_estimate(l0 or "")
 
+            topic_id = turn_to_topic.get(turn)
+            topic_grade = topic_grades.get(topic_id, "L0") if topic_id is not None else "L0"
+            td = topic_data.get(topic_id, {}) if topic_id is not None else {}
+
             entry = TurnPlanEntry(turn_index=turn, turn_type="dialogue",
                                   l2_tokens=l2_tk, summary_tokens=sum_tk,
                                   tokens_saved=max(0, l2_tk - sum_tk),
-                                  budget_remaining=budget)
+                                  budget_remaining=budget,
+                                  topic_group=topic_id)
 
             if in_tail:
                 entry.target_level = "L2"
                 entry.decision_reason = "tail"
-            elif turn in upgrades:
-                if l1_valid:
-                    entry.target_level = "L1"
-                    entry.decision_reason = "retrieved"
-                else:
-                    # 升级了但 L1 无效 → 保留原文（与旧 v4 一致）
-                    entry.target_level = "L2"
-                    entry.decision_reason = "retrieved"
-            elif l0:
-                entry.target_level = "L0"
-                entry.decision_reason = "middle"
-            else:
+            elif topic_id is not None and td.get("is_bg"):
+                entry.target_level = Config.TOPIC_BG_LEVEL
+                entry.decision_reason = "topic_bg"
+            elif topic_grade == "L2":
                 entry.target_level = "L2"
-                entry.decision_reason = "middle"
+                entry.decision_reason = "topic_core"
+            elif topic_grade == "L1":
+                entry.target_level = "L1"
+                entry.decision_reason = "topic_baseline"
+            else:  # L0
+                entry.target_level = "L0"
+                entry.decision_reason = "topic_degraded"
             entries.append(entry)
 
         # ── 工具轮 ──
         for key, l1 in sorted(tool_l1_texts.items(), key=lambda x: (x[0][0], x[0][1])):
             l0 = tool_l0_texts.get(key) or ""
-            in_tail = key[0] in tool_tail_turns
+            turn_idx = key[0]
+            in_tail = turn_idx in tool_tail_turns
+
+            # 父对话轮所属 topic 是否 L2 级
+            parent_topic_id = turn_to_topic.get(turn_idx)
+            parent_topic_grade = topic_grades.get(parent_topic_id, "L0") if parent_topic_id is not None else "L0"
 
             l2_tk = 0
             for msg_idx, entries_map in tool_key_map.items():
@@ -829,23 +1068,28 @@ class ContextAssembler:
 
             sum_tk = self._token_estimate(l1) or self._token_estimate(l0 or "")
 
-            entry = TurnPlanEntry(turn_index=key[0], turn_type="tool",
+            entry = TurnPlanEntry(turn_index=turn_idx, turn_type="tool",
                                   tool_sub_index=key[1],
                                   l2_tokens=l2_tk, summary_tokens=sum_tk,
                                   tokens_saved=max(0, l2_tk - sum_tk),
-                                  budget_remaining=budget)
+                                  budget_remaining=budget,
+                                  topic_group=parent_topic_id)
 
-            if key in tool_head and key not in upgrades:
-                if l1:
-                    entry.target_level = "L1"
-                    entry.decision_reason = "tool_head"
-                else:
-                    entry.target_level = "L2"
-                    entry.decision_reason = "tool_head"
-            elif in_tail:
+            if in_tail:
                 entry.target_level = "L2"
                 entry.decision_reason = "tail"
-            elif key in upgrades:
+            elif parent_topic_grade == "L2":
+                # 父 topic 整体 L2 → 工具轮升 L1
+                if l1:
+                    entry.target_level = "L1"
+                    entry.decision_reason = "topic_boost"
+                elif l0:
+                    entry.target_level = "L0"
+                    entry.decision_reason = "topic_boost"
+                else:
+                    entry.target_level = "L2"
+                    entry.decision_reason = "topic_boost"
+            elif key in selected_tools:
                 summary = l1 or l0
                 if summary:
                     entry.target_level = "L1" if l1 else "L0"
@@ -861,8 +1105,7 @@ class ContextAssembler:
                 entry.decision_reason = "middle"
             entries.append(entry)
 
-        # 按对话原始顺序排序：(turn_index, type_prio, tool_sub_index)
-        # dialogue priority=0, tool priority=1 — 与 store.read_turn_plan 一致
+        # 按对话原始顺序排序
         entries.sort(key=lambda e: (e.turn_index, 0 if e.turn_type == "dialogue" else 1, e.tool_sub_index))
         return entries
 
@@ -1184,23 +1427,6 @@ class ContextAssembler:
                 pass
         return None
 
-    def _get_previous_l1_embedding(self, current_turn: int) -> Optional[List[float]]:
-        """读上一对话轮的 L1 向量，供话题边界检测。
-        走 DB 而非 cache，避免 C-stage 异步乱序时读到未写入的旧缓存。
-        """
-        if current_turn <= 1:
-            return None
-        prev_idx = current_turn - 1
-        # 先查 cache（更快），失败再查 DB
-        if prev_idx in self.cache.l1_embeddings:
-            emb = self.cache.l1_embeddings[prev_idx]
-            if emb and len(emb) > 0:
-                return emb
-        rec = self.store.read_turn(self._session_id, prev_idx)
-        if rec and rec.get("l1_embedding") and len(rec["l1_embedding"]) > 0:
-            return rec["l1_embedding"]
-        return None
-
     def reset(self):
         self.wait_for_pending(5.0)
         self.cache.destroy()
@@ -1208,8 +1434,6 @@ class ContextAssembler:
         self.cache = builder.build(self._session_id)
         with self._task_lock:
             self._pending_tasks.clear()
-        with self._pre_upgraded_lock:
-            self._pre_upgraded_tool_turns.clear()
         self.stats = AssembleStats()
         self._turn_counter = self._restore_turn_index()
 

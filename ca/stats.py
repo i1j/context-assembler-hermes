@@ -29,6 +29,9 @@ class AssembleStats:
         self.tool_pre_upgrade_count: int = 0
         self.tool_backfill_success: int = 0
         self.tool_backfill_failure: int = 0
+        # 话题统计（v4.6.0）
+        self.topic_count: int = 0
+        self.topic_retrieved_count: int = 0
 
     def time_phase(self, name: str):
         class _PhaseTimer:
@@ -89,6 +92,10 @@ class AssembleStats:
             parts.append(f"tool_pre={self.tool_pre_upgrade_count}")
         if self.tool_backfill_success or self.tool_backfill_failure:
             parts.append(f"backfill_ok={self.tool_backfill_success}/fail={self.tool_backfill_failure}")
+        if self.topic_count:
+            parts.append(f"topics={self.topic_count}")
+        if self.topic_retrieved_count:
+            parts.append(f"topic_ret={self.topic_retrieved_count}")
         if self.error_counts:
             parts.append(f"errors={list(self.error_counts.keys())}")
         return " | ".join(parts)

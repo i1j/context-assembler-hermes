@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import math
 import logging
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 
-from .cache import BM25Snapshot, tokenise
+from .cache import BM25Snapshot, BM25Okapi, tokenise
 from .config import Config
 
 logger = logging.getLogger(__name__)
@@ -199,3 +199,74 @@ def _rrf_fuse(ranked_lists: List, k: int = 60) -> List[TurnKey]:
                 doc_id = item
             scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
     return sorted(scores.keys(), key=lambda d: scores[d], reverse=True)
+
+
+class TopicRetriever:
+    """Per-topic 双路检索器（v4.6.0）
+
+    在 assemble() 中话题分割完成后，对 topic 级做 BM25 + Vector 双路检索。
+    - BM25：用 topic 聚合文本（5字段拼接）作为语料
+    - Vector：用 topic 形心（均值向量）计算余弦相似度
+    - RRF 融合 → 返回检索命中的 topic_id 集合
+    """
+
+    def __init__(self, snapshot: BM25Snapshot,
+                 turn_to_topic: Dict[int, int],
+                 topic_data: Dict[int, Dict]):
+        self._snapshot = snapshot
+        self._turn_to_topic = turn_to_topic
+        self._topic_data = topic_data
+
+    def retrieve(self, user_input: str,
+                 query_embedding: Optional[List[float]] = None,
+                 max_k: int = 10) -> Set[int]:
+        """返回检索命中的 topic_id 集合。"""
+        if max_k <= 0:
+            return set()
+
+        # 筛选非 BG topic（BG 不参与检索）
+        active_topics = {tid for tid, td in self._topic_data.items()
+                         if not td["is_bg"] and td.get("agg_text", "").strip()}
+        if not active_topics:
+            return set()
+
+        # ── BM25 per-topic ──
+        topic_list: List[int] = sorted(active_topics)
+        topic_corpus = [(tid, self._topic_data[tid]["agg_text"]) for tid in topic_list
+                        if self._topic_data[tid].get("agg_text", "").strip()]
+        if not topic_corpus:
+            return set()
+
+        bm25 = BM25Okapi(topic_corpus)
+        query_tokens = tokenise(user_input)
+        scores = bm25.get_scores(query_tokens)
+
+        bm25_ranked: List[Tuple[int, float]] = []
+        bm25_hits = 0
+        for doc_id, score in enumerate(scores):
+            tid = bm25.get_turn_key(doc_id)
+            if tid is not None and score > 0:
+                bm25_ranked.append((tid, score))
+                bm25_hits += 1
+        bm25_ranked.sort(key=lambda x: x[1], reverse=True)
+
+        # ── Vector per-topic ──
+        vec_ranked: List[Tuple[int, float]] = []
+        vec_hits = 0
+        if query_embedding is not None:
+            centroids = {}
+            for tid in topic_list:
+                cent = self._topic_data[tid].get("centroid")
+                if cent and len(cent) == len(query_embedding):
+                    centroids[tid] = cent
+            if centroids:
+                vec_results = cosine_similarity_batch(query_embedding, centroids)
+                vec_ranked = [(k, s) for k, s in vec_results]
+                vec_hits = len(vec_ranked)
+
+        # ── 动态分配 + RRF ──
+        actual_k = min(max_k, len(topic_list))
+        bm25_k, vec_k = _dynamic_allocation(bm25_hits, vec_hits, actual_k)
+
+        fused = _rrf_fuse([bm25_ranked[:bm25_k], vec_ranked[:vec_k]], k=Config.RETRIEVAL_RRF_K)
+        return set(fused[:actual_k])
