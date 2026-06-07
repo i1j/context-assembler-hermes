@@ -164,7 +164,10 @@ def _read_state() -> Dict:
 
 
 def _write_state(state: Dict) -> None:
-    _cleanup_stale_state_files()
+    try:
+        _cleanup_stale_state_files()
+    except OSError:
+        pass
     _state_file_path().parent.mkdir(parents=True, exist_ok=True)
     with open(_state_file_path(), 'w') as f:
         json.dump(state, f)
