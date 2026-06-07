@@ -4,7 +4,7 @@
 
 | 项       | 值                                                                        |
 | -------- | ------------------------------------------------------------------------- |
-| 版本     | v4.7.0 |
+| 版本     | v4.7.1 |
 | 部署方式 | 自包含独立副本                                                            |
 | 插件路径 | `~/.hermes/profiles/tester/plugins/ca_assembler/`                       |
 | 核心引擎 | `ca/` 子目录（入口 `ca/__init__.py` → `ContextAssembler`）         |
@@ -132,6 +132,19 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 
 **设计哲学**：PDD (Prompt-Driven Development) — 模型负责语义理解和 Markdown 续写，Python 代码负责截断检测、格式清洗、边界校验、新旧数据兼容。截断检测（`finish_reason=='length'` + `endswith('</core_change>')`）下沉至 `_run_c_stage` 调用层，使 mock 路径可覆盖。
 
+### v4.7.1 — L1 状态感知链路集成（2026-06-16）
+
+基于 v1.5.1 Final 文档（`docs/ca-l1-whitepaper-v1.5.1-final.md`），新增状态前缀提取与结构化透传，对抗小模型"完成时态"幻觉：
+
+- **ca/post_process.py**：新增 `ItemState` 枚举（DONE/PLANNED/DISCUSSING/UNKNOWN）+ `STATE_PREFIX_REGEX`（含模块级 fail-fast assert）+ `_normalize_state()`（作用域隔离归一化）+ `parse_core_change_state()`（结构化透传）；标题统一"决策与共识"→"决策与方案"；`parse_v1_markdown_xml` 返回三元组 `(l1_dict, l0_text, core_state)`
+- **ca/prompts.py**：标题统一 + `<core_change>` 增加 `【已实施】/【计划】/【探讨】` 状态前缀引导
+- **ca/ooda_parser.py**：`TITLE_ALIASES` 增加"决策与方案"
+- **ca/store.py**：新增 `_infer_legacy_state()`（文本自检推断历史状态）+ `format_previous_summary_for_prompt` 适配
+- **ca/__init__.py**：适配新签名；状态注入 `l1_dict["_state"]`，零 schema 变更
+- **所有测试文件**：标题统一 + 状态前缀场景
+
+**设计哲学**：状态前缀使用 `【】` 中文直角引号避免 Markdown/JSON/XML 语法冲突；结构化字段 `_state` 仅存枚举值（`"done"`/`"planned"`/`"discussing"`），供下游代码层消费。
+
 ## 存储结构
 ### DB 路径
 
@@ -179,7 +192,7 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 | `CA_LLM_ENDPOINT`   | `http://localhost:11440` | LLM 服务端点    |
 || `CA_EMBED_TIMEOUT`  | 30                         | 嵌入超时（秒）  |
 || `CA_LLM_TIMEOUT`    | 180                        | LLM 超时（秒）  |
-|| `CA_CONTEXT_LENGTH` | 100000                     | 上下文 Token 预算上限（原 50000） |
+|| `CA_CONTEXT_LENGTH` | 200000                     | 上下文 Token 预算上限（原 50000） |
 
 ### L1 摘要生成配置（v4.7.0）
 
@@ -198,7 +211,7 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 | `CA_TOPIC_MAX_UPGRADE`   | 10       | 检索升级最大 topic 数         |
 | `CA_TOPIC_BG_LEVEL`      | `L0`   | BG 话题固定级别               |
 
-## L1 摘要生成架构（v4.7.0）
+## L1 摘要生成架构（v4.7.0 / v4.7.1）
 
 ### 新增模块
 
@@ -228,9 +241,9 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 format_previous_summary_for_prompt()    parse_v1_markdown_xml()
     │                                      │
     ├─ None/"无" → "无"                    ├─ 物理截断尾随噪音
-    ├─ JSON → _json_to_v1_markdown         ├─ 提取 <core_change>
+    ├─ JSON → _json_to_v1_markdown         ├─ 提取 <core_change>（含状态前缀）
     │        → 4类 Markdown                ├─ 提取 OODA 4 类列表（通过 TITLE_ALIASES 映射）
-    └─ 纯文本 → 原样返回                   └─ 语义短路 → (l1_dict, l0_text)
+    └─ 纯文本 → 原样返回                   └─ 语义短路 + 状态提取 → (l1_dict, l0_text, core_state)
            │                                      │
            ▼                                      ▼
     ┌──────────────────────────────────────────────┘
@@ -339,12 +352,12 @@ print(water)
 | | `TestLStageBackfill` | 9 | L‑stage：对话轮/工具轮补全、永久失败、周期扫描、**截断路径（v4.7.0）** |
 | | `TestConfigAndOthers` | 11 | 配置热重载、去重非法值、Store 新列、并发销毁、快照隔离、性能 |
 | `test_config.py` | （函数级） | 11 | Config：环境变量解析、默认值、非法值回退、**L1_TEMPERATURE/L1_MAX_TOKENS（v4.7.0）** |
-| `test_parse_v1.py` | `TestParseV1MarkdownXml` | 16 | **新增（v4.7.0）**：`parse_v1_markdown_xml` 全场景测试（正常/截断/空/语义短路/别名兼容） |
+| `test_parse_v1.py` | `TestParseV1MarkdownXml` | 27 | **新增（v4.7.0/v4.7.1）**：`parse_v1_markdown_xml` 全场景测试 + 状态提取测试 |
 | | `TestL1GenerationPrompt` | 2 | **新增（v4.7.0）**：REQ-1 prompt 内容验证（含新旧特征检测） |
 | | `TestL1TruncatedException` | 1 | **新增（v4.7.0）**：异常类继承链和属性验证 |
 | | `TestJsonToV1Markdown` | 3 | **新增（v4.7.0）**：格式转换、缺失 key、特殊字符 |
 | | `TestSafeTruncateBoundary` | 5 | **新增（v4.7.0）**：边界值测试（0/1/全标点/全空格/负值） |
-| `test_store_adapter.py` | `TestFormatPreviousSummary` | 10 | **新增（v4.7.0）**：`format_previous_summary_for_prompt` 全场景（None/空/旧JSON/纯文本/大JSON） |
+| `test_store_adapter.py` | `TestFormatPreviousSummary` | 11 | **新增（v4.7.0/v4.7.1）**：`format_previous_summary_for_prompt` 全场景 + 历史状态推断 |
 | `test_store.py` | （函数级） | 10 | Store 层：读写 turn、turn_plan、BM25 tokens、分区清理 |
 | `test_circuit.py` | （函数级） | 7 | 断路器：失败计数、冷却恢复、状态持久化 |
 | `test_health.py` | （函数级） | 5 | 健康检查：引擎状态、DB 连接、缓存快照 |
