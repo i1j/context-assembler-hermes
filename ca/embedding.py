@@ -34,7 +34,7 @@ except ImportError:
 
 class EmbeddingClient:
     _OLLAMA_TIMEOUT = float(os.getenv("CA_EMBED_TIMEOUT", "10"))
-    _OLLAMA_MAX_RETRIES = int(os.getenv("CA_EMBED_MAX_RETRIES", "2"))
+    _OLLAMA_MAX_RETRIES = int(os.getenv("CA_EMBED_MAX_RETRIES", "0"))
     _BATCH_PARALLEL_TIMEOUT = float(os.getenv("CA_EMBED_BATCH_TIMEOUT", "15"))
 
     def __init__(self, backend="", model="", url=""):
