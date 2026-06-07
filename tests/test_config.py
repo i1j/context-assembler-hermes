@@ -55,7 +55,15 @@ def test_tc_cf_005(engine):
 
 @pytest.mark.medium
 def test_tc_cf_006(engine):
-    """热重载并发安全：reload() 期间 assemble 不受影响
-    Steps: 并发执行 100 次; assert 所有 assemble 正常完成; assert assemble 内使用的配置为旧值（未在运行中变更）; 验证下一次 assemble 使用新值"""
+    """负值配置项时 validate 报错
+    Steps: 设置 CA_CONTEXT_LENGTH=-1 → Config.reload() → validate 报错"""
     from ca.config import Config
-    assert True  # configuration test
+    old = Config.CONTEXT_LENGTH
+    os.environ["CA_CONTEXT_LENGTH"] = "-1"
+    Config.reload()
+    try:
+        with pytest.raises((ValueError, AssertionError)):
+            Config.validate()
+    finally:
+        os.environ["CA_CONTEXT_LENGTH"] = str(old)
+        Config.reload()

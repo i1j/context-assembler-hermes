@@ -27,11 +27,16 @@ def test_tc_m_002(engine):
 
 @pytest.mark.medium
 def test_tc_m_003(engine):
-    """阶段统计
-    Steps: 获取 CompressStats; 验证各阶段耗时和升级计数"""
-    from ca.stats import AssembleStats as StatsClass
-    stats = StatsClass()
-    assert True  # stats created
+    """阶段统计（AssembleStats）
+    Steps: 获取 AssembleStats → time_phase 计时 → 阶段记录包含时间"""
+    from ca.stats import AssembleStats
+    stats = AssembleStats()
+    with stats.time_phase("test_phase"):
+        pass
+    stats.finalize(tokens_before=1000, tokens_after=500)
+    report = str(stats)
+    assert "test_phase" in report, f"Missing test_phase stage in {report}"
+    assert "1000" in report, f"Missing token count in {report}"
 
 
 @pytest.mark.medium

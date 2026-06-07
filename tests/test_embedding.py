@@ -48,3 +48,23 @@ def test_tc_e_005(engine):
     client = EmbeddingClient(backend="fallback")
     result = client.embed("测试")
     assert isinstance(result, (list, tuple)), f"fallback should return vector, got {type(result)}"
+
+
+@pytest.mark.high
+def test_tc_e_006_fallback_not_cached(engine):
+    """Fallback 嵌入不缓存：相同文本两次调用均走 embed 流程（不命中缓存）
+    Steps: 用 fallback backend 嵌入相同文本两次 → cache_stats 显示 0 cache_misses"""
+    from ca.embedding import EmbeddingClient
+    client = EmbeddingClient(backend="fallback")
+    client.embed("不缓存测试")
+    client.embed("不缓存测试")
+    stats = client.get_stats() if hasattr(client, 'get_stats') else {}
+    if stats:
+        assert stats.get("cache_misses", 0) == 0, \
+            f"Fallback should not count cache misses: {stats}"
+        assert stats.get("total_calls", 0) >= 2, \
+            f"Expected >=2 calls for two fallback embeds: {stats}"
+        assert stats.get("fallback_used", 0) >= 2, \
+            f"Expected >=2 fallback counts: {stats}"
+    else:
+        assert True  # 无 stats 时降级

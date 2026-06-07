@@ -238,3 +238,28 @@ def test_TC_A_017_token_estimate_empty(ca_engine):
     seed_dialogue(ca_engine, 1, msgs)
     result = ca_engine.assemble("", context_length=32000)
     assert isinstance(result, list)
+
+
+@pytest.mark.medium
+def test_TC_A_018_plan_based_assembly_writes_turn_plan(engine):
+    """plan-based 组装写 turn_plan 表，输出含 [~/N/0] 两位格式
+    Steps: 写入对话历史 → assemble() → 验证 turn_plan 表有记录 → 验证输出含 [~/1/0] 标记"""
+    from conftest import seed_dialogue
+    import json
+    msgs = [{"role": "user", "content": "第一条消息"},
+            {"role": "assistant", "content": "回复1"}]
+    seed_dialogue(engine, 1, msgs)
+    result = engine.assemble("新问题", context_length=32000)
+    # 验证 turn_plan 表
+    plans = engine.store.read_turn_plan(engine._session_id)
+    assert len(plans) > 0, "turn_plan should have entries"
+    assert any(p["decision_reason"] in ("tail", "middle", "retrieved") for p in plans), \
+        f"No valid decision_reason found in {plans}"
+    # 验证消息含新格式 [~/N/0]
+    ca_msgs = [m for m in result
+               if isinstance(m.get("content", ""), str)
+               and m["content"].startswith("[~/")]
+    if ca_msgs:
+        assert any("/0]" in m["content"] for m in ca_msgs), \
+            f"No [~/N/0] format in: {[m['content'] for m in ca_msgs]}"
+

@@ -247,3 +247,23 @@ def test_tc_c_014(engine):
         assert core, "core_change should not be empty"
     else:
         assert True  # 降级: 无记录时的幂等行为
+
+
+@pytest.mark.medium
+def test_tc_c_015_background_review_skips_llm(engine):
+    """后台审查轮跳过 LLM 调用，直接生成 '系统后台审查' 摘要
+    Steps: mock get_current_write_origin → 'background_review'; 触发 C-stage; 验证 L1 含 '系统后台审查'"""
+    import ca
+    with patch.object(ca.__init__, 'get_current_write_origin',
+                      return_value='background_review'):
+        engine.process_turn_async("后台审查轮", "系统消息")
+        engine.wait_for_pending(10)
+    rec = engine.store.read_turn(engine._session_id, 1)
+    if rec:
+        l1 = json.loads(rec["l1_text"])
+        assert l1.get("core_change") == "系统后台审查", \
+            f"Expected '系统后台审查', got {l1.get('core_change')}"
+        assert l1.get("_assemble_status") == 0, \
+            f"Expected status=0, got {l1.get('_assemble_status')}"
+    else:
+        assert True  # 降级

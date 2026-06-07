@@ -211,3 +211,21 @@ def test_tc_s_010(engine):
     rec = engine.store.read_turn("retry_test2", 0)
     assert rec is not None, "Write should succeed after retries"
     assert rec["l0_text"] == "l0"
+
+
+@pytest.mark.high
+def test_tc_s_012_wal_mode_validated(tmp_path):
+    """Store 启动时验证 WAL 模式，不做任何写入也不报错
+    Steps: 创建 SQLiteStore → 检查 WAL 模式启用 → 正常读写"""
+    from ca.store import SQLiteStore
+    db = tmp_path / "test_wal.db"
+    store = SQLiteStore(db_path=str(db))
+    store.write_turn("test_wal", 1, l0_text="wal_test")
+    rec = store.read_turn("test_wal", 1)
+    assert rec is not None and rec["l0_text"] == "wal_test"
+    # 验证数据库确实是 WAL 模式
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    conn.close()
+    assert mode == "wal", f"Expected WAL mode, got {mode}"
