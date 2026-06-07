@@ -76,6 +76,118 @@ class TestIsAvailable:
         assert is_available() is True
 
 
+# ============================================================================
+# 断路器状态文件清理：_pid_exists / _cleanup_stale_state_files / _write_state
+# ============================================================================
+
+
+class TestBreakerStateCleanup:
+    """_cleanup_stale_state_files() 与 _pid_exists() 的单元测试。"""
+
+    # ── _pid_exists ──
+
+    def test_pid_self_exists(self):
+        """当前进程 PID 应存在。"""
+        assert _ca_plugin._pid_exists(os.getpid()) is True
+
+    def test_pid_zero_does_not_exist(self):
+        """PID 0 不应存在。"""
+        assert _ca_plugin._pid_exists(0) is False
+
+    @pytest.mark.skipif(os.name != 'posix', reason='requires /proc')
+    def test_pid_init_exists(self):
+        """PID 1 (init/systemd) 应存在。"""
+        assert _ca_plugin._pid_exists(1) is True
+
+    @pytest.mark.skipif(os.name != 'posix', reason='requires /proc')
+    def test_pid_huge_does_not_exist(self):
+        """超大 PID 应返回 False。"""
+        assert _ca_plugin._pid_exists(999999999) is False
+
+    # ── _cleanup_stale_state_files ──
+
+    def test_cleanup_removes_dead_pids_leaves_current(self, tmp_path):
+        """清理死 PID 文件，保留当前 PID 文件。"""
+        current_pid = os.getpid()
+        (tmp_path / f".ca_assembler_state_{current_pid}.json").write_text("{}")
+        (tmp_path / ".ca_assembler_state_9999999.json").write_text("{}")
+        (tmp_path / ".ca_assembler_state_9999998.json").write_text("{}")
+
+        _ca_plugin._cleanup_stale_state_files()
+
+        remaining = [p.name for p in tmp_path.iterdir()]
+        assert f".ca_assembler_state_{current_pid}.json" in remaining
+        assert ".ca_assembler_state_9999999.json" not in remaining
+        assert ".ca_assembler_state_9999998.json" not in remaining
+
+    def test_cleanup_ignores_non_state_files(self, tmp_path):
+        """不匹配状态文件模式的文件不受影响。"""
+        pid = os.getpid()
+        (tmp_path / f".ca_assembler_state_{pid}.json").write_text("{}")
+        (tmp_path / "random.txt").write_text("hello")
+        (tmp_path / ".other_prefix_state_123.json").write_text("{}")
+
+        _ca_plugin._cleanup_stale_state_files()
+
+        remaining = [p.name for p in tmp_path.iterdir()]
+        assert "random.txt" in remaining
+        assert ".other_prefix_state_123.json" in remaining
+        assert f".ca_assembler_state_{pid}.json" in remaining
+        assert len(remaining) == 3
+
+    def test_cleanup_empty_dir_no_error(self, tmp_path):
+        """空目录不报错。"""
+        _ca_plugin._cleanup_stale_state_files()  # 无异常即通过
+
+    def test_cleanup_nonexistent_dir_no_error(self, tmp_path, monkeypatch):
+        """状态目录不存在时不报错。"""
+        nonexistent = tmp_path / "nope"
+        orig = _ca_plugin._state_file_path
+        _ca_plugin._state_file_path = lambda: nonexistent / "state.json"
+        _ca_plugin._cleanup_stale_state_files()  # 无异常即通过
+        _ca_plugin._state_file_path = orig
+
+    # ── _write_state 集成 ──
+
+    def test_write_state_also_cleans_stale_files(self, tmp_path):
+        """_write_state 在写入前清理 stale 文件。"""
+        (tmp_path / ".ca_assembler_state_9999999.json").write_text(
+            json.dumps({"failures": 3, "retry_after": None})
+        )
+
+        _ca_plugin._write_state({"failures": 0, "retry_after": None})
+
+        remaining = [p.name for p in tmp_path.iterdir()]
+        assert not any("9999999" in n for n in remaining), "死 PID 文件应被清理"
+
+        # 当前状态文件应存在（尽管 fixture 改名为 .test_breaker.json）
+        state_file_found = any(".json" in n for n in remaining)
+        assert state_file_found, "状态文件应被写入"
+
+    def test_write_state_survives_cleanup_error(self, tmp_path, monkeypatch):
+        """清理抛异常时不影响写入（try/except OSError 保护）。"""
+        # 让 _cleanup_stale_state_files 抛异常
+        orig = _ca_plugin._state_file_path
+        _ca_plugin._state_file_path = lambda: tmp_path / "state.json"
+        
+        orig_cleanup = _ca_plugin._cleanup_stale_state_files
+        def _broken_cleanup():
+            raise OSError(13, "Permission denied")
+        _ca_plugin._cleanup_stale_state_files = _broken_cleanup
+
+        # 不应抛异常
+        _ca_plugin._write_state({"failures": 0, "retry_after": None})
+
+        # 状态文件写成了
+        state_file = tmp_path / "state.json"
+        assert state_file.exists()
+        data = json.loads(state_file.read_text())
+        assert data["failures"] == 0
+
+        _ca_plugin._cleanup_stale_state_files = orig_cleanup
+        _ca_plugin._state_file_path = orig
+
+
 @pytest.fixture(autouse=True)
 def _plugin_state_dir(tmp_path):
     """所有插件测试默认用临时状态文件（~/.hermes 只读）。"""
