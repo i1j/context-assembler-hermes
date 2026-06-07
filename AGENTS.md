@@ -138,11 +138,13 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 
 | #  | Handler                     | 行号 | L0 摘要示例                                                                                                   |
 | -- | --------------------------- | ---- | ------------------------------------------------------------------------------------------------------------- |
-| 1  | `_summarize_terminal`     | 129  | `terminal: find /home -name "*.py" (4 lines)`，内建 pytest 检测 → `pytest: 8 passed, 2 skipped — 0.44s` |
-| 2  | `_summarize_execute_code` | 228  | 代理到 terminal handler，替换 tool_name                                                                       |
+| #  | Handler                     | 行号 | L0 摘要示例                                                                                                   |
+| -- | --------------------------- | ---- | ------------------------------------------------------------------------------------------------------------- |
+| 1  | `_summarize_terminal`     | 129  | `t:grep -i "CA plugin" → 1 lines`（关键输出行内联），失败→ `[ERROR] t:cmd → Traceback...`；内建 pytest 检测 → `pytest: 8 passed, 2 skipped — 0.44s` |
+| 2  | `_summarize_execute_code` | 228  | `exc:from hermes_tools... → import os`（关键输出行内联），带 `tool_label="exc"` 参数              |
 | 3  | `_summarize_write_file`   | 235  | `write_file: /home/i1j/test.txt`（只保留文件路径）                                                          |
 | 4  | `_summarize_patch`        | 266  | `patch: /home/i1j/tool_summarizer.py` + replace_all 标记                                                    |
-| 5  | `_summarize_read_file`    | 302  | `read_file: /tmp/test.py`（文件名 + 行数范围）                                                              |
+| 5  | `_summarize_read_file`    | 302  | `read_file: …/ca_assembler/test.txt (42 lines)`（路径前缀压缩 + 行数）                                  |
 | 6  | `_summarize_search_files` | 342  | `search_files: *.py → 0 hits` 或 `66 matches [ca:30, tests:25, docs:11]`                                 |
 | 7  | `_summarize_skills_list`  | 404  | `skills_list: 3 skills (tester-workflow, ...)`                                                              |
 | 8  | `_summarize_skill_view`   | 444  | `skill_view: tester-workflow — 12 lines`                                                                   |
@@ -154,6 +156,7 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 通用增强：
 
 - **terminal 错误标记**：`_ERROR_RE` 正则（Traceback/Error:/Exception/...）扫描输出，匹配时前缀 `[ERROR]`
+- **terminal/exec L0 行内联**：有输出时优先展示首个关键行，格式 `t:cmd_part → key_line`
 - **search_files 目录分组**：total_count > 3 时 `Counter` 按父目录名聚合，取前 4 组
 
 ### Bug 修复（2026-06-06）
@@ -163,9 +166,17 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 | **arguments JSON string → dict 适配** | reduce 所有 10 个 structured handler 因 `args.get()` 在 JSON string 上调用时全部崩溃回退到通用逻辑。根因：OpenAI API 标准中 `function.arguments` 是 JSON string，但 handler 假设已是 parsed dict。修复：在 `summarize()` 入口（L603-615）做一次 JSON parse，全部 handler 同时生效 | `ca/tool_summarizer.py:603-615` |
 | **旧数据全量回填** | 部署至今所有 DB 中 6,762 条工具轮 L0 存的是 raw JSON 格式（`{"total_count": N}`）。`scripts/backfill_tool_summaries.py` 离线重跑 summarizer，已全部升级为结构化摘要 | 共修复 174 个 DB |
 
+### Bug 修复（2026-07-01）
+
+| 修复 | 说明 | 代码位置 |
+|------|------|---------|
+| **断路器 stale 文件清理** | `_state_file_path()` 每次 `_write_state()` 前清理不再运行的 PID 残留状态文件，防止无限堆积。添加 `re.compile` 模式匹配 + `/proc/{pid}` POSIX 检查 + 跳过当前 PID。 | `ca/__init__.py` → `_cleanup_stale_state_files()` + `_pid_exists()` |
+| **terminal/exec L0 信息密度** | terminal handler 从 `cmd_short[:60] (N lines)` 改为 `t:cmd_part[:30] → key_lines[0][:50]`，有输出时优先展示首个关键行。execute_code 带 `tool_label="exc"`，取代旧 `l0.replace()`。 | `ca/tool_summarizer.py` L225-238 |
+| **read_file L0 路径压缩** | 从纯路径改为 `…{parent}/{fname} (N lines)`，压缩路径前缀、添加行数。 | `ca/tool_summarizer.py` L344-348 |
+
 **验证日志**：日志中有 ~50 条 `WARNING` 记录（`Tool-specific summarizer for 'search_files' failed: 'str' object has no attribute 'get', falling back`），所有 handler 命中。修复后 DB 中 0 条此格式 WARNING。
 
-### 遗留问题状态（2026-06-06）
+### 遗留问题状态（2026-07-01）
 
 | 问题 | 说明 | 优先级 |
 |------|------|--------|

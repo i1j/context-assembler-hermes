@@ -126,7 +126,7 @@ class ToolSummarizer:
             logger.info("No specific config for tool '%s', using default", normalized)
         return self.priority.get("default", DEFAULT_PRIORITY)
 
-    def _summarize_terminal(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
+    def _summarize_terminal(self, tool_call_msg: Dict, tool_responses: List[Dict], tool_label: str = "t") -> Tuple[Dict, str]:
         """terminal 结构化摘要：保留命令摘要 + 关键行。检测 pytest 等结构输出"""
         args = tool_call_msg.get("function", {}).get("arguments", {})
         command = args.get("command", "")
@@ -190,7 +190,7 @@ class ToolSummarizer:
         has_error = any(_ERROR_RE.search(line) for line in non_empty)
         error_flag = "[ERROR] " if has_error else ""
 
-        # 通用终端摘要
+        # 通用终端摘要 — L0 输出内容优先
         seen = set()
         key_lines = []
         for line in non_empty:
@@ -222,14 +222,19 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        l0 = f"{error_flag}terminal: {cmd_short[:60]} ({total_effective} lines)"[:100]
+        # L0: 有输出内容则优先展示首个关键行，否则回退到行数
+        if key_lines and tool_label in ("t", "exc"):
+            cmd_part = cmd_short[:30].replace("\\n", " ")
+            out_part = key_lines[0][:50]
+            l0 = f"{error_flag}{tool_label}:{cmd_part} → {out_part}"[:100]
+        else:
+            l0 = f"{error_flag}{tool_label}: {cmd_short[:60]} ({total_effective} lines)"[:100]
         return l1, l0
 
     def _summarize_execute_code(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
         """execute_code 结构化摘要：代码首行摘要 + 输出关键行，同 terminal"""
-        l1, l0 = self._summarize_terminal(tool_call_msg, tool_responses)
+        l1, l0 = self._summarize_terminal(tool_call_msg, tool_responses, tool_label="exc")
         l1["tool_name"] = "execute_code"
-        l0 = l0.replace("terminal:", "execute_code:", 1)[:100]
         return l1, l0
 
     def _summarize_write_file(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
@@ -336,7 +341,10 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        l0 = f"read_file: {path_short}"[:100]
+        # L0: 文件名 + 行数，压缩路径前缀
+        fname = Path(path).name if path else "<unknown>"
+        parent = str(Path(path).parent)[-25:] if path else ""
+        l0 = f"read_file: …{parent}/{fname} ({total_lines} lines)"[:100]
         return l1, l0
 
     def _summarize_search_files(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
@@ -599,6 +607,20 @@ class ToolSummarizer:
         tool_name = (tool_call_msg.get("function", {}).get("name", "")).strip()
         if not tool_name:
             tool_name = "unknown_tool"
+
+        # 适配层：arguments 是 JSON string（OpenAI API 标准），handler 需要 parsed dict
+        func = tool_call_msg.get("function", {})
+        raw_args = func.get("arguments", {})
+        if isinstance(raw_args, str):
+            try:
+                parsed = json.loads(raw_args)
+                if isinstance(parsed, dict):
+                    tool_call_msg = {
+                        **tool_call_msg,
+                        "function": {**func, "arguments": parsed}
+                    }
+            except (json.JSONDecodeError, TypeError):
+                pass
 
         # 工具类型分发：有专用 handler 的走结构化摘要，否则走通用逻辑
         sanitized = tool_name.replace(".", "_").replace("-", "_")

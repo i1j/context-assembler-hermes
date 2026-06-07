@@ -193,11 +193,48 @@ tool_upgrades = retriever.retrieve_tools(...) if budget > 0 else []
 
 ### 2026-06-06 快照：待改进项（非 bug）
 
-以下条目不是 bug，而是基于缓存命中率的分析后识别出的结构性改进方向。
+## L0 低密度基线数据（改进前）
 
-| 改进项 | 当前行为 | 问题 | 改进方向 |
-|--------|----------|------|----------|
-### 2026-07-01 更新：已修复项
+> 以下为 2026-06-18 会话 `20260606_183116_2121f2` 的 L0 实时快照。所有工具轮摘要的信息密度问题触发了 terminal handler 改进——增加关键输出行内联。本节作为对比基线。
+
+### 改进前 L0 全量记录
+
+```
+[~/1/1] search_files: AGENTS.md → 0 hits
+[~/1/2] search_files: agents.md → 1 hits
+[~/1/3] read_file: /home/i1j/.hermes/profiles/tester/plugins/ca_assembler/AGENTS.md
+[~/2/4] terminal: grep -i 'CA plugin started for session' ~/.hermes/profiles/t (1 lines)
+[~/2/5] search_files: .ca_assembler_state_* → 1 hits
+[~/2/6] terminal: ls -lh ~/.hermes/profiles/tester/ca_cache/ 2>/dev/null | hea (1 lines)
+[~/2/7] [ERROR] terminal: grep -i 'CA\|ca_assembler\|context.assembler' ~/.hermes/prof (1 lines)
+[~/2/8] terminal: cat ~/.hermes/profiles/tester/.ca_assembler_state_12942.json (1 lines)
+[~/2/9] terminal: ls -lt ~/.hermes/profiles/tester/ca_cache/*.db 2>/dev/null | (1 lines)
+[~/2/10] terminal: grep -A5 'ca_assembler\|plugins.enabled' ~/.hermes/profiles/ (1 lines)
+[~/2/11] terminal: grep '20260606_021824_192ad7' ~/.hermes/profiles/tester/logs (1 lines)
+[~/2/12] terminal: python3 -c "\nimport sqlite3, os\ndb = '/home/i1j/.hermes/pr (1 lines)
+[~/2/13] terminal: grep -c '20260606_183116_2121f2' ~/.hermes/profiles/tester/l (1 lines)
+[~/2/14] terminal: ls -la ~/.hermes/profiles/tester/ca_cache/*.db | wc -l (1 lines)
+[~/2/15] terminal: du -sh ~/.hermes/profiles/tester/ca_cache/ (1 lines)
+[~/2/16] terminal: grep '20260606_183116_2121f2' ~/.hermes/profiles/tester/logs (1 lines)
+```
+
+### 问题统计
+
+| 指标 | 值 | 说明 |
+|------|-----|------|
+| 总工具轮数 | 19 | |
+| terminal 工具轮 | 14 | 占 74% |
+| 仅 `(1 lines)` 无内容 | 13/14 | 92% 的 terminal 摘要无输出信息 |
+| `[ERROR]` 误报 | 1 | `[~/2/7]` — grep 输出含 `[ERROR]` 字符串，非真正错误 |
+| read_file 无内容信息 | 1 | `[~/1/3]` — 只显示路径，无文件大小/行数 |
+| search_files 较好 | 2 | 格式 `pattern → N hits` 已含结果信息 |
+
+### 改进
+
+已在 `ca/tool_summarizer.py` 中修改：
+- **terminal L0**（L225-231）：从 `terminal: cmd_short[:60] (N lines)` 改为 `t:cmd_part[:30] → key_lines[0][:50]`
+- **execute_code L0**（L234-238）：加 `tool_label="exc"` 参数，不再用 `l0.replace()` 拼接
+- **read_file L0**（L344-348）：从纯路径改为 `…{parent}/{fname} (N lines)`
 
 以下两项已在 v4.5.1 中修复：
 

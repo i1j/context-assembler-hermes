@@ -10,6 +10,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -119,6 +120,9 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 
 # ── 断路器 ──
 
+_STATE_FILE_PATTERN = re.compile(r"^\.ca_assembler_state_(\d+)\.json$")
+
+
 def _state_file_path() -> Path:
     pid = os.getpid()
     try:
@@ -127,6 +131,28 @@ def _state_file_path() -> Path:
     except ImportError:
         base = Path.home() / ".hermes"
     return base / f".ca_assembler_state_{pid}.json"
+
+
+def _pid_exists(pid: int) -> bool:
+    """检查 PID 是否仍在运行（POSIX /proc）。"""
+    return os.path.isdir(f"/proc/{pid}")
+
+
+def _cleanup_stale_state_files() -> None:
+    """删除不再运行的进程留下的断路器状态文件，防止无限堆积。"""
+    base = _state_file_path().parent
+    if not base.is_dir():
+        return
+    current_pid = os.getpid()
+    for entry in base.iterdir():
+        m = _STATE_FILE_PATTERN.match(entry.name)
+        if m:
+            pid = int(m.group(1))
+            if pid != current_pid and not _pid_exists(pid):
+                try:
+                    entry.unlink()
+                except OSError:
+                    pass
 
 
 def _read_state() -> Dict:
@@ -138,6 +164,7 @@ def _read_state() -> Dict:
 
 
 def _write_state(state: Dict) -> None:
+    _cleanup_stale_state_files()
     _state_file_path().parent.mkdir(parents=True, exist_ok=True)
     with open(_state_file_path(), 'w') as f:
         json.dump(state, f)

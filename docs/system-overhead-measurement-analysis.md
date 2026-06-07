@@ -192,11 +192,11 @@ default 20K: 71250 - (8000 + 2000 + 2500 + 20000) = ~39K 正预算 ✅
 
 | 文件 | 行 | 内容 |
 |------|----|------|
-| `ca/__init__.py` | 205 | `_system_overhead` 默认值 20000（仅保留作保守缓冲区） |
-| `ca/__init__.py` | 712-713 | `_available_budget()` 消费点 |
-| `ca/__init__.py` | 715-718 | `set_system_overhead()` **已弃用**，方法保留签名以防外部调用 |
+| `ca/__init__.py` | 200-205 | `_system_overhead` 默认值 20000（构造函数附初值） |
+| `ca/__init__.py` | 659-695 | `_available_budget()` 消费点 |
+| `ca/__init__.py` | 697-700 | `set_system_overhead()` **已弃用**，方法保留签名以防外部调用 |
 | ~~`plugins/__init__.py`~~ | ~~324-332~~ | ~~测量代码~~ **已移除**（2026-06-14）|
-| `ca/__init__.py` | 630-633 | budget=0 时跳过检索升级 |
-| `ca/__init__.py` | 977 | `_hard_truncation()` — 唯一的总输出截断 |
-| `ca/config.py` | 117 | `if False:` 屏蔽 Hermes 运行时查表 |
-| `ca/config.py` | 134-136 | 未知模型走 `CONTEXT_LENGTH=150000` |
+| `ca/__init__.py` | 626-627 | budget=0 时跳过检索升级 |
+| `ca/__init__.py` | 995-1050 | `_hard_truncation()` — 唯一的总输出截断 |
+| `ca/config.py` | 116,125 | `if False:` 屏蔽 Hermes 运行时查表 |
+| `ca/config.py` | 135-136 | 未知模型走 `CONTEXT_LENGTH=150000` |

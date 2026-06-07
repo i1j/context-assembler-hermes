@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 .codegraph/
 .benchmarks/
+
+# Reasonix agent config (workspace tools/skills)
+.reasonix/
+
+# Temporary files
+.tmp-*
