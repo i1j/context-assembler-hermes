@@ -4,7 +4,7 @@
 
 | 项       | 值                                                                        |
 | -------- | ------------------------------------------------------------------------- |
-| 版本     | v4.5.1 |
+| 版本     | v4.6.0 |
 | 部署方式 | 自包含独立副本                                                            |
 | 插件路径 | `~/.hermes/profiles/tester/plugins/ca_assembler/`                       |
 | 核心引擎 | `ca/` 子目录（入口 `ca/__init__.py` → `ContextAssembler`）         |
@@ -211,6 +211,7 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 | `token_offset`      | INTEGER | 累计 Token 偏移                 |
 | `_assemble_status`  | INTEGER | 0=成功, 1=降级, 2=永久跳过      |
 | `backfill_attempts` | INTEGER | L-stage 尝试次数                |
+| `query_embedding`   | BLOB    | 用户消息嵌入向量（v4.6.0）       |
 | `created_at`        | TEXT    | 创建时间戳                      |
 
 ### 存储特性
@@ -231,6 +232,16 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 | `CA_LLM_ENDPOINT`   | `http://localhost:11440` | LLM 服务端点    |
 | `CA_EMBED_TIMEOUT`  | 30                         | 嵌入超时（秒）  |
 | `CA_LLM_TIMEOUT`    | 180                        | LLM 超时（秒）  |
+
+### 话题拣选配置（v4.6.0）
+
+| 变量                       | 默认值   | 说明                          |
+| -------------------------- | -------- | ----------------------------- |
+| `CA_TOPIC_JACCARD_ENTRY` | 0.03     | 话题分割首次合并 Jaccard 阈值 |
+| `CA_TOPIC_JACCARD_CHAIN` | 0.04     | 话题分割链内扩展 Jaccard 阈值 |
+| `CA_TOPIC_RADIUS_WEIGHT` | 2.0      | 半径公式中最近邻距离的权重系数 |
+| `CA_TOPIC_MAX_UPGRADE`   | 10       | 检索升级最大 topic 数         |
+| `CA_TOPIC_BG_LEVEL`      | `L0`   | BG 话题固定级别               |
 
 ## 断路器
 
@@ -295,6 +306,22 @@ print(f"{ca_count} CA summaries in assembled context")
   - 对话轮标签统一为 `[~/N/0]` 两位格式
   - 去重改为留最先+原位 `(同[~/N/0])`/`(同[~/N/m])` 标记
 
+### 话题拣选重构（v4.5.1 → v4.6.0）
+
+| 改进 | 说明 | 代码位置 |
+|------|------|---------|
+| `_compute_topic_groups()` | 话题分割：R1 (BG字段检测) + R2 (Jaccard + todo链) | `ca/__init__.py` |
+| `_grade_topics_by_radius()` | 按半径 r 三级定级：内球 L2、外球 L1、远距离 L0 | `ca/__init__.py` |
+| `TopicRetriever` | per-topic 双路检索器 (BM25 + vector + RRF) | `ca/retrieval.py` |
+| `_compute_turn_plan_v2()` | 话题级 plan + 工具轮绑定 (topic_boost) | `ca/__init__.py` |
+
+**核心变更**：
+- **检索对象升级**：BM25/vector 从 per-turn 改为 per-topic（topic_agg_text / topic_centroid）
+- **决策粒度提升**：从 per-turn 独立决策升级为 per-topic 统一决策，同话题轮次输出稳定
+- **工具轮基线降低**：非检索命中的工具轮默认 L0（含原 head 区），节省预算给核心话题
+- **topic_boost**：父 topic 整体 L2 时工具轮升 L1，精准保留核心话题的工具信息
+- **实时计算**：话题分割和形心计算在 assemble() 中实时完成，不依赖外部服务和缓存
+
 ## 当前遗留状态（2026-06-06）
 
 | 问题                                  | 说明                                                                         | 优先级 |
@@ -303,15 +330,22 @@ print(f"{ca_count} CA summaries in assembled context")
 | 空摘要 BM25 排除                      | `result_summary="无返回数据"` 的工具轮仍进入检索/升级候选                  | 低     |
 | 系统消息降级                          | `background_review` ContextVar 路径已修。其他系统触发消息仍可能被 LLM 误判 | 低     |
 | bare `except:` 吞异常               | 在 `tests/conftest.py`，不影响被测代码                                     | 低     |
+| 第二层压缩（topic 摘要 + 递归）       | 设计已完成（topic_summary 表设计），空闲线程未实现                          | 中     |
+| 自适应参数环路                        | 仅设计草案，未讨论实现路径                                                 | 低     |
 
-**已修复（v4.5.1）**：
+**v4.6.0 话题拣选重构**：
 
-| 问题 | 说明 |
+| 变更 | 说明 |
 |------|------|
-| 旧方法 deprecated | `_build_final_messages_v4`、`_compute_and_store_turn_plan`、`_compute_layers_v2` 已删除。plan-based 为唯一路径。净减 ~220 行。 |
-| 去重方向 | `_deduplicate_messages()` 改为留最先+原位 `(同[~/N/0])`/`(同[~/N/m])` 标记。首次出现位置不动 → 前缀稳定。 |
-| Head 区移除 | `HEAD_AUTO_L1_COUNT` 已移除。所有对话轮平等走拣选（tail→L2 / upgrades+L1→L1 / middle→L0）。 |
-| 对话轮标签格式 | `[~/N]` 改为 `[~/N/0]`，与工具轮 `[~/N/m]` 统一两位格式。 |
+| 话题分割 | 新增 `_compute_topic_groups()`（R1 BG检测 + R2 Jaccard 链合并），仅依赖 L1 JSON 5 字段，无额外 LLM/embedding 开销 |
+| 三级定级 | 新增 `_grade_topics_by_radius()`，topic 半径 r = min(max_intra, nearest/WEIGHT)，内球→L2 外球→L1 远距离→L0 |
+| TopicRetriever | `retrieval.py` 新增独立类，per-topic BM25 + vector + RRF 融合 |
+| 工具轮 topic_boost | 父对话 topic 整体 L2 时，该 topic 下工具轮自动升 L1，不依赖检索预算 |
+| 工具轮基线 | 非 tail 非 retrieved 工具轮默认 L0（含原 head），取代旧 pre_upgrade 机制 |
+| pre_upgrade 移除 | 删除 `_pre_upgrade_tools`、`_pre_upgraded_tool_turns`、`_topic_lock` 等 3 方法 + 5 字段 |
+| C-stage 话题检测移除 | 话题边界由 assemble() 统一实时计算，C-stage 不再写入 topic_group |
+| query_embedding | turn_cache schema v3→v4，新增 query_embedding BLOB 列，assemble() 时自动写入 |
+| 配置项 | 新增 5 个 TOPIC_* 环境变量（JACCARD_ENTRY/CHAIN/RADIUS_WEIGHT/MAX_UPGRADE/BG_LEVEL） |
 
 ### 指纹去重标注（v4.5.1 — 留最先+原位指向标记）
 
@@ -358,9 +392,9 @@ print(f"{ca_count} CA summaries in assembled context")
 |------|--------|--------|------|
 | `test_c.py` | （函数级） | 14 | 对话轮 C‑stage：摘要生成、OODA 解析、状态标记 |
 | `test_a.py` | （函数级） | 17 | 对话轮 A‑stage：分层、检索、升级、尾部保护 |
-| `test_v440.py` | `TestToolTurnCStage` | 12 | 工具轮 C‑stage：多工具调用、字段优先级、L0 截断、预升级 |
-| | `TestToolTurnAStage` | 8 | 工具轮 A‑stage：尾部保护、预升级 L1、升级过滤、预算 |
-| | `TestLStageBackfill` | 7 | L‑stage：对话轮/工具轮补全、永久失败、周期扫描、超时 |
+| `test_v440.py` | `TestToolTurnCStage` | 12 | 工具轮 C‑stage：多工具调用、字段优先级、L0 截断、预升级（1 个已替换为 pre_upgrade_removed） |
+| | `TestToolTurnAStage` | 8 | 工具轮 A‑stage：尾部保护、topic_boost、升级过滤、预算 |
+| | `TestLStageBackfill` | 7 | L‑stage：对话轮/工具轮补全、永久失败、周期扫描、预升级已移除验证 |
 | | `TestConfigAndOthers` | 11 | 配置热重载、去重非法值、Store 新列、并发销毁、快照隔离、性能 |
 | `test_store.py` | （函数级） | 10 | Store 层：读写 turn、turn_plan、BM25 tokens、分区清理 |
 | `test_config.py` | （函数级） | 6 | Config：环境变量解析、默认值、非法值回退 |
