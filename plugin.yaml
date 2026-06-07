@@ -1,7 +1,8 @@
 name: ca_assembler
-version: 4.4.0
+version: 4.5.1
 description: >
-  ContextAssembler v4.4.0 - 增量 L0/L1 摘要 + 工具轮摘要 + L‑stage 异步补全。
+  ContextAssembler v4.5.1 — Hermes 插件，增量 L0/L1/L2 分层摘要 + plan-based 消息组装 +
+  工具轮结构化摘要（10 个结构化 handler）+ L‑stage 异步补全 + 全指纹去重（原位标记）。
 pip_dependencies:
   - numpy
   - urllib3
@@ -14,28 +15,38 @@ hooks:
   - on_session_reset
   - pre_llm_call
   - post_llm_call
-context_engine:
-  class: ca_assembler.CAContextAssemblerPlugin
 config_schema:
-  db_path_template:
-    type: string
-    default: "{hermes_home}/ca_cache/{session_id}.db"
   embed_backend:
     type: string
     default: "ollama"
     enum: ["ollama", "sentence-transformers", "fallback"]
-  protect_tail_tokens:
-    type: integer
-    default: 20000
-  head_auto_l1_count:
-    type: integer
-    default: 3
-  llm_num_predict:
-    type: integer
-    default: 24768
+  embed_model:
+    type: string
+    default: "qwen3-embedding:0.6b"
+  embed_endpoint:
+    type: string
+    default: "http://localhost:11439"
+  llm_model:
+    type: string
+    default: "qwen3-4b-instruct"
+  llm_endpoint:
+    type: string
+    default: "http://localhost:11440"
   context_length:
     type: integer
-    default: 32000
+    default: 50000
+  protect_tail_tokens:
+    type: integer
+    default: 10000
+  tool_max_upgrade_k:
+    type: integer
+    default: 3
+  embed_timeout:
+    type: integer
+    default: 10
+  llm_timeout:
+    type: integer
+    default: 120
   debug:
     type: boolean
     default: false
