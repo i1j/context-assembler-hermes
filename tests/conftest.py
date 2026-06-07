@@ -93,9 +93,19 @@ def _mock_embed(ca_engine):
 
 @pytest.fixture(autouse=True)
 def _mock_llm():
-    """防止 C-stage 测试阻塞在真实 LLM 调用（qwen3.5:hermes-32k 生成耗时远超测试超时）"""
+    """防止 C-stage 测试阻塞在真实 LLM 调用（qwen3.5:hermes-32k 生成耗时远超测试超时）
+
+    新签名返回 Tuple[str, str]：(response_text, finish_reason)
+    """
     with patch('ca.ContextAssembler._call_llm_for_l1',
-               return_value='核心摘要：对话内容\n资源与观察：\n- 无\n事实与约束：\n- 无\n决策与结论：\n- 无\n后续行动：\n- 无'):
+               return_value=(
+                   "### 现象与问题\n- 无\n"
+                   "### 背景与约束\n- 无\n"
+                   "### 决策与共识\n- 无\n"
+                   "### 后续行动\n- 无\n"
+                   "<core_change>mock_response</core_change>",
+                   "stop"
+               )):
         yield
 
 def seed_dialogue(engine, turn_index, messages):

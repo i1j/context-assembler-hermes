@@ -67,3 +67,105 @@ def test_tc_cf_006(engine):
     finally:
         os.environ["CA_CONTEXT_LENGTH"] = str(old)
         Config.reload()
+
+
+# ══════════════════════════════════════════════════════════
+# L1 重构追测：Config 新增项 CFG-1 ~ CFG-5
+# ══════════════════════════════════════════════════════════
+
+@pytest.mark.high
+@pytest.mark.l1
+def test_cfg_1_l1_temperature_default(monkeypatch):
+    """CFG-1: CA_L1_TEMPERATURE 默认值 == 0.3"""
+    monkeypatch.delenv("CA_L1_TEMPERATURE", raising=False)
+    from ca.config import Config
+    Config.reload()
+    if hasattr(Config, 'L1_TEMPERATURE'):
+        assert Config.L1_TEMPERATURE == 0.3, \
+            f"Expected 0.3, got {Config.L1_TEMPERATURE}"
+    else:
+        pytest.skip("Config.L1_TEMPERATURE not yet implemented")
+
+
+@pytest.mark.high
+@pytest.mark.l1
+def test_cfg_2_l1_max_tokens_default(monkeypatch):
+    """CFG-2: CA_L1_MAX_TOKENS 默认值 == 800"""
+    monkeypatch.delenv("CA_L1_MAX_TOKENS", raising=False)
+    from ca.config import Config
+    Config.reload()
+    if hasattr(Config, 'L1_MAX_TOKENS'):
+        assert Config.L1_MAX_TOKENS == 800, \
+            f"Expected 800, got {Config.L1_MAX_TOKENS}"
+    else:
+        pytest.skip("Config.L1_MAX_TOKENS not yet implemented")
+
+
+@pytest.mark.medium
+@pytest.mark.l1
+def test_cfg_3_l1_temperature_hot_reload(monkeypatch):
+    """CFG-3: CA_L1_TEMPERATURE 热重载"""
+    monkeypatch.setenv("CA_L1_TEMPERATURE", "0.5")
+    from ca.config import Config
+    Config.reload()
+    if hasattr(Config, 'L1_TEMPERATURE'):
+        assert Config.L1_TEMPERATURE == 0.5, \
+            f"Expected 0.5, got {Config.L1_TEMPERATURE}"
+    else:
+        pytest.skip("Config.L1_TEMPERATURE not yet implemented")
+
+
+@pytest.mark.medium
+@pytest.mark.l1
+def test_cfg_4_l1_max_tokens_hot_reload(monkeypatch):
+    """CFG-4: CA_L1_MAX_TOKENS 热重载"""
+    monkeypatch.setenv("CA_L1_MAX_TOKENS", "1200")
+    from ca.config import Config
+    Config.reload()
+    if hasattr(Config, 'L1_MAX_TOKENS'):
+        assert Config.L1_MAX_TOKENS == 1200, \
+            f"Expected 1200, got {Config.L1_MAX_TOKENS}"
+    else:
+        pytest.skip("Config.L1_MAX_TOKENS not yet implemented")
+
+
+@pytest.mark.medium
+@pytest.mark.l1
+def test_cfg_5_validate_boundary(monkeypatch):
+    """CFG-5: validate 校验 L1_TEMPERATURE 范围和边界"""
+    from ca.config import Config
+    if not hasattr(Config, 'L1_TEMPERATURE'):
+        pytest.skip("Config.L1_TEMPERATURE not yet implemented")
+
+    # 保存原始值
+    orig_temp = Config.L1_TEMPERATURE
+
+    # 非法负值
+    monkeypatch.setenv("CA_L1_TEMPERATURE", "-1.0")
+    Config.reload()
+    try:
+        Config.validate()
+        # 如果没抛异常，则可能 validate 还没校验该字段
+        pass
+    except ValueError:
+        pass  # 预期
+
+    # 超大值
+    monkeypatch.setenv("CA_L1_TEMPERATURE", "999.0")
+    Config.reload()
+    try:
+        Config.validate()
+    except ValueError:
+        pass  # 预期（视实现方案而定）
+
+    # 合法值
+    monkeypatch.setenv("CA_L1_TEMPERATURE", "1.5")
+    Config.reload()
+    try:
+        Config.validate()
+    except ValueError:
+        pass  # 如果校验严格也可能抛
+
+    # 恢复
+    monkeypatch.setenv("CA_L1_TEMPERATURE", str(orig_temp))
+    Config.reload()

@@ -637,3 +637,30 @@ class SQLiteStore:
         )
         row = cur.fetchone()
         return row[0] if row and row[0] is not None else None
+
+
+def format_previous_summary_for_prompt(l1_text_from_db: str) -> str:
+    """将 DB 中历史 l1_text 统一转换为新提示词期望的 Markdown 格式。
+
+    - None/空/"无" → "无"
+    - JSON (旧 5 类) → 调用 _json_to_v1_markdown() 转换
+    - 纯文本 → 原样返回
+    """
+    if not l1_text_from_db or l1_text_from_db.strip() in ("无", "null"):
+        return "无"
+
+    stripped = l1_text_from_db.strip()
+    try:
+        data = json.loads(stripped)
+        if isinstance(data, dict):
+            from .post_process import _json_to_v1_markdown
+            result = _json_to_v1_markdown(data)
+            if result:
+                return result
+            # 转换结果为空，原样返回
+            return stripped
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+    # 非 JSON 纯文本，原样返回
+    return stripped

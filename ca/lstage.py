@@ -15,7 +15,8 @@ import time
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from .config import Config
-from .post_process import robust_json_parse, clean_increment
+from .post_process import robust_json_parse, clean_increment, parse_v1_markdown_xml
+from . import L1TruncatedException
 
 if TYPE_CHECKING:
     from . import ContextAssembler
@@ -81,10 +82,36 @@ class BackfillThread(threading.Thread):
 
     def _backfill_dialogue(self, rec: Dict, l2_text: str):
         prev_l1 = self._get_prev_l1(rec["turn_index"])
-        ooda_text = self.engine._call_llm_for_l1(prev_l1, l2_text)
-        parsed = self.engine.ooda_parser.parse(ooda_text, previous_summary=prev_l1)
-        robust, _ = robust_json_parse(json.dumps(parsed, ensure_ascii=False))
-        cleaned = clean_increment(robust)
+        try:
+            response_text, finish_reason = self.engine._call_llm_for_l1(prev_l1, l2_text)
+        except L1TruncatedException as e:
+            logger.warning("[CA-METRIC] ca.l1.truncated_fallback: turn=%d, finish_reason=truncated, len=%d",
+                           rec["turn_index"], len(e.response_text))
+            # 截断降级：设 _assemble_status=1 留在待补全队列
+            session_id = self.engine._session_id
+            turn_index = rec["turn_index"]
+            turn_type = rec["turn_type"]
+            sub_index = rec.get("tool_sub_index", 0)
+            self.engine.store.increment_backfill_attempts(session_id, turn_index, turn_type, sub_index)
+            new_attempts = rec.get("backfill_attempts", 0) + 1
+            if new_attempts >= 3:
+                error_l1 = '{"core_change":"本轮无新内容","_assemble_status":2,"_l_error":true}'
+                self.engine.store.write_turn(
+                    session_id, turn_index,
+                    l0_text="补全失败", l1_text=error_l1,
+                    turn_type=turn_type, tool_sub_index=sub_index,
+                    l2_text=rec.get("l2_text"), _assemble_status=2,
+                )
+                self.engine.store.conn.execute(
+                    "UPDATE turn_cache SET backfill_attempts=? WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?",
+                    (new_attempts, session_id, turn_index, turn_type, sub_index)
+                )
+                self.engine.store.conn.commit()
+                logger.warning("Permanent backfill failure for turn %d (truncated)", turn_index)
+            return
+
+        l1_dict, l0_text = parse_v1_markdown_xml(response_text)
+        cleaned = clean_increment(l1_dict)
         if "core_change" not in cleaned:
             cleaned["core_change"] = "本轮无新内容"
         l1_str = json.dumps(cleaned, ensure_ascii=False)
@@ -207,8 +234,13 @@ class BackfillThread(threading.Thread):
                 l0_text="补全失败", l1_text=error_l1,
                 turn_type=turn_type, tool_sub_index=sub_index,
                 l2_text=rec.get("l2_text"), _assemble_status=2,
-                backfill_attempts=new_attempts,
             )
+            # 同时更新 backfill_attempts 计数
+            self.engine.store.conn.execute(
+                "UPDATE turn_cache SET backfill_attempts=? WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?",
+                (new_attempts, session_id, turn_index, turn_type, sub_index)
+            )
+            self.engine.store.conn.commit()
             logger.warning("Permanent backfill failure for %s turn %d", turn_type, turn_index)
         else:
             self.engine.store.increment_backfill_attempts(session_id, turn_index, turn_type, sub_index)

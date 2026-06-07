@@ -32,6 +32,11 @@ class AssembleStats:
         # 话题统计（v4.6.0）
         self.topic_count: int = 0
         self.topic_retrieved_count: int = 0
+        # L1 统计（v2 refactor）
+        self.truncated_fallback: int = 0
+        self.parse_fallback_count: int = 0
+        self.skipped_empty: int = 0
+        self.l1_latency_ms: float = 0.0
 
     def time_phase(self, name: str):
         class _PhaseTimer:
@@ -96,6 +101,14 @@ class AssembleStats:
             parts.append(f"topics={self.topic_count}")
         if self.topic_retrieved_count:
             parts.append(f"topic_ret={self.topic_retrieved_count}")
+        if self.truncated_fallback:
+            parts.append(f"l1_trunc={self.truncated_fallback}")
+        if self.parse_fallback_count:
+            parts.append(f"l1_parse_fb={self.parse_fallback_count}")
+        if self.skipped_empty:
+            parts.append(f"l0_skip={self.skipped_empty}")
+        if self.l1_latency_ms:
+            parts.append(f"l1_lat={self.l1_latency_ms:.0f}ms")
         if self.error_counts:
             parts.append(f"errors={list(self.error_counts.keys())}")
         return " | ".join(parts)

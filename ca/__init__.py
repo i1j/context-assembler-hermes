@@ -28,9 +28,22 @@ from .cache import AssemblyCache, CacheBuilder, BM25Snapshot, tokenise
 from .retrieval import Retriever, cosine_similarity
 from .embedding import EmbeddingClient
 from .ooda_parser import OODAParser
-from .post_process import robust_json_parse, clean_increment
+from .post_process import robust_json_parse, clean_increment, parse_v1_markdown_xml, _safe_truncate
 from .prompts import L1_GENERATION_PROMPT
+from .store import format_previous_summary_for_prompt
 from .stats import AssembleStats
+
+
+class L1TruncatedException(Exception):
+    """LLM 输出被截断时抛出的异常。
+
+    携带 response_text 以便降级代码读取部分输出。
+    """
+    def __init__(self, message: str = "L1 output truncated", response_text: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.response_text = response_text
+
 
 try:
     from tools.skill_provenance import get_current_write_origin
@@ -309,14 +322,52 @@ class ContextAssembler:
                 dialogue_ok = True
             else:
                 logger.info("[CA] _run_c_stage turn %d: calling LLM", turn_index)
-                ooda_text = self._call_llm_for_l1(prev_l1, l2_text)
-                parsed = self.ooda_parser.parse(ooda_text, previous_summary=prev_l1)
-                robust, _ = robust_json_parse(json.dumps(parsed, ensure_ascii=False))
-                cleaned = clean_increment(robust)
-                is_llm_fallback = ooda_text.startswith("核心摘要：本轮无新内容") and "资源与观察：\n- 无" in ooda_text
-                cleaned["_assemble_status"] = 1 if is_llm_fallback else 0
-                if not is_llm_fallback:
-                    dialogue_ok = True
+                try:
+                    response_text, finish_reason = self._call_llm_for_l1(prev_l1, l2_text)
+                except L1TruncatedException as e:
+                    response_text = e.response_text
+                    finish_reason = "length"
+
+                # 截断检测（在 _call_llm_for_l1 返回后进行，即使被 mock 也能覆盖）
+                if finish_reason == "length" or not response_text.strip().endswith("</core_change>"):
+                    logger.warning("[CA-METRIC] ca.l1.truncated_fallback: turn=%d, finish_reason=%s, len=%d",
+                                   turn_index, finish_reason, len(response_text))
+                    self.stats.truncated_fallback += 1
+                    # 截断降级：写入待补全记录
+                    truncated_cleaned = {
+                        "core_change": "本轮无新内容",
+                        "new_materials": [],
+                        "objective_facts": [],
+                        "consensus": [],
+                        "todo": [],
+                        "_assemble_status": 1,
+                    }
+                    l1_str = json.dumps(truncated_cleaned, ensure_ascii=False)
+                    self.store.write_turn(
+                        session_id, turn_index,
+                        l0_text="", l1_text=l1_str,
+                        l0_embedding=None, l1_embedding=None,
+                        token_offset=token_offset,
+                        turn_type='dialogue', tool_sub_index=0,
+                        l2_text=json.dumps([
+                            {"role": "user", "content": user_message or ""},
+                            {"role": "assistant", "content": assistant_response or ""},
+                        ], ensure_ascii=False),
+                        _assemble_status=1,
+                    )
+                    logger.info("[CA] _run_c_stage turn %d: truncated, saved as pending backfill", turn_index)
+                    return
+
+                l1_dict, l0_text = parse_v1_markdown_xml(response_text)
+                if not l0_text:
+                    logger.warning("[CA-METRIC] ca.l0.skipped_empty: turn=%d", turn_index)
+                    self.stats.skipped_empty += 1
+                # l1_dict 已由 parse_v1_markdown_xml 完成结构化解析，
+                # 直接传给 clean_increment（跳过 ooda_parser.parse，
+                # 后者只兼容旧格式 "标题：内容" 格式，不兼容 Markdown ### 标题）
+                cleaned = clean_increment(l1_dict)
+                cleaned["_assemble_status"] = 0
+                dialogue_ok = True
 
             l1_str = json.dumps(cleaned, ensure_ascii=False)
             l0_text = self._extract_l0(cleaned)
@@ -1370,36 +1421,62 @@ class ContextAssembler:
             return obj
         return obj
 
-    def _call_llm_for_l1(self, prev_l1, l2_text) -> str:
+    def _call_llm_for_l1(self, prev_l1, l2_text) -> Tuple[str, str]:
+        """返回 (response_text, finish_reason)。
+
+        所有重试均失败时返回 ("", "error")。
+        """
         import urllib.request
+        llm_start = time.monotonic()
         prompt = L1_GENERATION_PROMPT.format(
-            previous_summary=json.dumps(prev_l1, ensure_ascii=False) if prev_l1 else "无",
+            previous_summary=format_previous_summary_for_prompt(
+                json.dumps(prev_l1, ensure_ascii=False) if prev_l1 else None
+            ),
             current_dialog=l2_text)
         req_body = {
             "model": Config.LLM_MODEL,
             "prompt": prompt, "stream": False,
-            "options": {"num_predict": Config.LLM_NUM_PREDICT, "temperature": 0.3},
+            "options": {
+                "num_predict": Config.L1_MAX_TOKENS,
+                "temperature": Config.L1_TEMPERATURE,
+            },
             "keep_alive": -1
         }
         if Config.LLM_THINK is not None:
             req_body["think"] = Config.LLM_THINK
         payload = json.dumps(req_body).encode()
+        response_text = ""
+        finish_reason = "error"
         for attempt in range(Config.LLM_MAX_RETRIES):
             try:
                 req = urllib.request.Request(f"{Config.LLM_ENDPOINT}/api/generate", data=payload,
                                              headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(req, timeout=Config.LLM_TIMEOUT) as resp:
                     data = json.loads(resp.read())
-                if data.get("response"):
-                    return data["response"]
+                response_text = data.get("response", "")
+                finish_reason = data.get("done_reason") or data.get("finish_reason", "stop")
+                break
             except Exception as e:
                 logger.warning("LLM attempt %d failed: %s", attempt + 1, e)
                 time.sleep(2 ** attempt)
-        return ("核心摘要：本轮无新内容\n资源与观察：\n- 无\n事实与约束：\n- 无\n决策与结论：\n- 无\n后续行动：\n- 无")
+
+        elapsed_ms = int((time.monotonic() - llm_start) * 1000)
+        logger.warning("[CA-METRIC] ca.l1.latency_ms: turn=%d, ms=%d", self._turn_counter, elapsed_ms)
+        self.stats.l1_latency_ms += elapsed_ms
+
+        # 所有重试均失败，返回退化输出
+        if finish_reason == "error":
+            self.stats.truncated_fallback += 1
+            return ("", "error")
+
+        return (response_text, finish_reason)
 
     def _extract_l0(self, l1_dict):
         core = l1_dict.get("core_change", "")
-        return core[:100] if core else "无"
+        if not core or core in ("无", "本轮无新内容"):
+            logger.warning("[CA-METRIC] ca.l0.skipped_empty: turn=%d", self._turn_counter)
+            return "无"
+        return _safe_truncate(core, 100)
 
     def _estimate_token_offset(self, history):
         return sum(self._token_estimate(m.get("content", "")) for m in history) if history else 0

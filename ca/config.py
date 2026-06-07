@@ -53,6 +53,8 @@ class Config:
     LLM_MAX_RETRIES: ClassVar[int] = int(os.getenv("CA_LLM_MAX_RETRIES", "2"))
     LLM_NUM_PREDICT: ClassVar[int] = int(os.getenv("CA_LLM_NUM_PREDICT", "24768"))
     LLM_THINK: ClassVar[Optional[bool]] = None
+    L1_TEMPERATURE: ClassVar[float] = float(os.getenv("CA_L1_TEMPERATURE", "0.3"))
+    L1_MAX_TOKENS: ClassVar[int] = int(os.getenv("CA_L1_MAX_TOKENS", "800"))
 
     @classmethod
     def _parse_llm_think(cls) -> Optional[bool]:
@@ -211,6 +213,10 @@ class Config:
         pos_float("LLM_TIMEOUT", cls.LLM_TIMEOUT)
         pos_int("LLM_MAX_RETRIES", cls.LLM_MAX_RETRIES, max_v=5)
         pos_int("LLM_NUM_PREDICT", cls.LLM_NUM_PREDICT, min_v=100)
+        pos_float("L1_TEMPERATURE", cls.L1_TEMPERATURE, min_v=0.0)
+        if cls.L1_TEMPERATURE > 2.0:
+            errors.append(f"L1_TEMPERATURE must be <= 2.0 (got {cls.L1_TEMPERATURE})")
+        pos_int("L1_MAX_TOKENS", cls.L1_MAX_TOKENS, min_v=50, max_v=4096)
         pos_int("CONTEXT_LENGTH", cls.CONTEXT_LENGTH, min_v=1000)
         pos_int("TOOL_PRE_UPGRADE_COUNT", cls.TOOL_PRE_UPGRADE_COUNT, max_v=10)
         pos_int("TOOL_MAX_UPGRADE_K", cls.TOOL_MAX_UPGRADE_K, max_v=10)
@@ -257,6 +263,8 @@ class Config:
             cls.LLM_MAX_RETRIES = int(os.getenv("CA_LLM_MAX_RETRIES", str(cls.LLM_MAX_RETRIES)))
             cls.LLM_NUM_PREDICT = int(os.getenv("CA_LLM_NUM_PREDICT", str(cls.LLM_NUM_PREDICT)))
             cls.LLM_THINK = cls._parse_llm_think()
+            cls.L1_TEMPERATURE = float(os.getenv("CA_L1_TEMPERATURE", str(cls.L1_TEMPERATURE)))
+            cls.L1_MAX_TOKENS = int(os.getenv("CA_L1_MAX_TOKENS", str(cls.L1_MAX_TOKENS)))
             cls.PROTECT_TAIL_TOKENS = int(os.getenv("CA_PROTECT_TAIL_TOKENS", str(cls.PROTECT_TAIL_TOKENS)))
             cls.TOOL_TAIL_TURN_COUNT = int(os.getenv("CA_TOOL_TAIL_TURN_COUNT", str(cls.TOOL_TAIL_TURN_COUNT)))
             cls.TOPIC_BOUNDARY_DISTANCE = float(os.getenv("CA_TOPIC_BOUNDARY_DISTANCE", str(cls.TOPIC_BOUNDARY_DISTANCE)))
