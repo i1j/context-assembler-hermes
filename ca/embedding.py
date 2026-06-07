@@ -139,7 +139,7 @@ class EmbeddingClient:
                 result, is_real = self._embed_fallback(text), False
         except Exception as e:
             logger.error("Embedding error: %s", e)
-            result, is_real = self._embed_fallback(text), False
+            raise  # 不返回伪向量 — 调用方 catch 后走降级（None → BM25-only）
 
         if is_real:
             with self._cache_lock:
