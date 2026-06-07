@@ -245,7 +245,6 @@ def test_TC_A_018_plan_based_assembly_writes_turn_plan(engine):
     """plan-based 组装写 turn_plan 表，输出含 [~/N/0] 两位格式
     Steps: 写入对话历史 → assemble() → 验证 turn_plan 表有记录 → 验证输出含 [~/1/0] 标记"""
     from conftest import seed_dialogue
-    import json
     msgs = [{"role": "user", "content": "第一条消息"},
             {"role": "assistant", "content": "回复1"}]
     seed_dialogue(engine, 1, msgs)

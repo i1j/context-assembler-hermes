@@ -59,14 +59,22 @@ def test_tc_intf_001(engine):
 @pytest.mark.medium
 def test_tc_intf_002(engine):
     """context_length 属性可通过 Config 热重载
-    Steps: 设置 CA_CONTEXT_LENGTH=30000 → Config.reload() → 验证 engine 感知新值"""
+    Steps: 设置 CA_CONTEXT_LENGTH=30000 → Config.reload() → 验证 engine 感知新值 → 恢复"""
     import os
     from ca.config import Config
-    os.environ["CA_CONTEXT_LENGTH"] = "30000"
-    Config.reload()
-    engine.context_length = Config.context_length_for_model("test-model")
-    assert engine.context_length >= 1000, \
-        f"context_length should be valid, got {engine.context_length}"
+    old_env = os.environ.get("CA_CONTEXT_LENGTH")
+    try:
+        os.environ["CA_CONTEXT_LENGTH"] = "30000"
+        Config.reload()
+        engine.context_length = Config.context_length_for_model("test-model")
+        assert engine.context_length >= 1000, \
+            f"context_length should be valid, got {engine.context_length}"
+    finally:
+        if old_env is not None:
+            os.environ["CA_CONTEXT_LENGTH"] = old_env
+        else:
+            os.environ.pop("CA_CONTEXT_LENGTH", None)
+        Config.reload()
 
 @pytest.mark.medium
 def test_tc_intf_003(engine):
