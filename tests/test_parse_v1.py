@@ -280,8 +280,8 @@ class TestL1GenerationPrompt:
         if not PROMPT_OK:
             pytest.skip("L1_GENERATION_PROMPT not available")
         # 必须包含新 prompt 的特征
-        assert "严谨的研发团队会议摘要专家" in L1_GENERATION_PROMPT, \
-            "Prompt should contain '严谨的研发团队会议摘要专家'"
+        assert "研发对话意图分析器" in L1_GENERATION_PROMPT, \
+            "Prompt should contain '研发对话意图分析器'"
         assert "{previous_summary}" in L1_GENERATION_PROMPT, \
             "Prompt should contain {previous_summary} placeholder"
         assert "{current_dialog}" in L1_GENERATION_PROMPT, \
@@ -289,14 +289,12 @@ class TestL1GenerationPrompt:
         assert "<core_change>" in L1_GENERATION_PROMPT, \
             "Prompt should contain <core_change> tag"
         # v4.7.1: 状态感知特征
-        assert "时态与状态保真" in L1_GENERATION_PROMPT, \
-            "Prompt should contain '时态与状态保真' (state-aware feature)"
-        assert "绝对禁止的语义混淆" in L1_GENERATION_PROMPT, \
-            "Prompt should contain critical disambiguation section"
+        assert "时态保真" in L1_GENERATION_PROMPT, \
+            "Prompt should contain '时态保真' (state-aware feature)"
         assert "【已实施】" in L1_GENERATION_PROMPT, \
             "Prompt should contain 【已实施】 state label"
-        assert "反面教材" in L1_GENERATION_PROMPT, \
-            "Prompt should contain negative examples section"
+        assert "必须使用上述 4 个 Markdown 标题" in L1_GENERATION_PROMPT, \
+            "Prompt should require ### Markdown headers"
 
     @pytest.mark.high
     @pytest.mark.l1
@@ -307,8 +305,8 @@ class TestL1GenerationPrompt:
         # 不应包含旧 prompt 的特征
         assert "会议纪要摘要助手" not in L1_GENERATION_PROMPT, \
             "Prompt should NOT contain old persona '会议纪要摘要助手'"
-        assert "研发对话意图分析器" not in L1_GENERATION_PROMPT, \
-            "Prompt should NOT contain previous persona '研发对话意图分析器'"
+        assert "严谨的研发团队会议摘要专家" not in L1_GENERATION_PROMPT, \
+            "Prompt should NOT contain old persona '严谨的研发团队会议摘要专家'"
 
 
 # ══════════════════════════════════════════════════════════

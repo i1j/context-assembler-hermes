@@ -79,6 +79,14 @@ _test_match_2 = STATE_PREFIX_REGEX.match("【计划】 拟引入Redis")
 assert _test_match_1 is not None and _test_match_1.group(1) == "已实施", "FATAL: STATE_PREFIX_REGEX 正则损坏 (Assert 1)!"
 assert _test_match_2 is not None and _test_match_2.group(1) == "计划", "FATAL: STATE_PREFIX_REGEX 正则损坏 (Assert 2)!"
 
+# 管理动作关键词：分配 Jira/拉会/创建工单等仅表示管理动作完成，不代表技术实施完成
+MANAGEMENT_ACTION_KEYWORDS = [
+    '分配', '创建了jira', '记录需求', '拉会', '开会', '确认排期',
+    '列入代办', '加入 backlog', '指派给', '分配给', '定了个会议',
+    '记录在', '同步给', '通知了', '已上报', '已报备', '知会',
+    '更新了文档', '更新了wiki', '创建了工单', '提交了工单'
+]
+
 
 def _normalize_state(prefix_text: str) -> Tuple[str, ItemState]:
     """仅对提取出的前缀文本（如'已完成'）进行归一化，绝不扫描整句。"""
@@ -91,7 +99,10 @@ def _normalize_state(prefix_text: str) -> Tuple[str, ItemState]:
 
 
 def parse_core_change_state(raw_core: str) -> Tuple[str, ItemState]:
-    """提取、归一化并重组状态前缀，返回格式化文本与结构化枚举。"""
+    """提取、归一化并重组状态前缀，返回格式化文本与结构化枚举。
+
+    若前缀判定为已实施但正文包含管理动作关键词，降级为计划。
+    """
     raw_core = raw_core.strip()
     state_match = STATE_PREFIX_REGEX.match(raw_core)
 
@@ -99,6 +110,11 @@ def parse_core_change_state(raw_core: str) -> Tuple[str, ItemState]:
         # 严格只传入 group(1)（即括号内的文本，如"计划"）
         normalized_prefix, state_enum = _normalize_state(state_match.group(1))
         body = raw_core[state_match.end():].strip()
+        # 管理动作完成 ≠ 技术实施完成：降级状态
+        if state_enum == ItemState.DONE:
+            body_lower = body.lower()
+            if any(kw in body_lower for kw in MANAGEMENT_ACTION_KEYWORDS):
+                normalized_prefix, state_enum = '【计划】', ItemState.PLANNED
     else:
         # 模型忘记加前缀，直接兜底为 【计划】
         normalized_prefix, state_enum = '【计划】', ItemState.PLANNED

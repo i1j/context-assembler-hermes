@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import Config
-from .post_process import STATE_PREFIX_REGEX, ItemState, parse_core_change_state
+from .post_process import STATE_PREFIX_REGEX, ItemState, parse_core_change_state, MANAGEMENT_ACTION_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -654,9 +654,15 @@ class SQLiteStore:
 
 
 def _infer_legacy_state(core_text: str) -> Tuple[str, ItemState]:
-    """从旧文本内容中推断状态，解决语义矛盾。"""
+    """从旧文本内容中推断状态，解决语义矛盾。
+
+    若文本含"已完成"等强标识但内容实为管理动作，降级为计划。
+    """
     text = core_text.lower()
     if any(k in text for k in ['已完成', '已实施', '已修复', '已接入', '已扩容', '已上线']):
+        # 检查是否为管理动作（分配 Jira/拉会等）
+        if any(kw in text for kw in MANAGEMENT_ACTION_KEYWORDS):
+            return '【计划】', ItemState.PLANNED
         return '【已实施】', ItemState.DONE
     if any(k in text for k in ['拟', '计划', '待实施', '准备', 'todo']):
         return '【计划】', ItemState.PLANNED
