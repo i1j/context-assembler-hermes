@@ -252,5 +252,6 @@ tool_upgrades = retriever.retrieve_tools(...) if budget > 0 else []
 | **read_file L0 行数取 JSON total_lines** | `json.dumps` 转义 `\n` 为 `\\n` 导致 split 永远 1。修复：`json.loads(c)["total_lines"]` | ✅ 已修复（磁盘，进程重启后生效） |
 | **"无有效增量" → "本轮无新内容"** | 内部术语改为自然语言，同步 Prompt + 测试 + 文档 5 文件 | ✅ 已修复 |
 | **CA_CONTEXT_LENGTH 升至 100K** | `.env` 环境变量覆盖，代码默认 50K 不变 | ✅ 已部署 |
-| **debug_token_budget()** | 纯只读 Token 水位查询，`store.get_max_token_offset()` + `engine.debug_token_budget()` | ✅ 已部署 |
+| **`_embed_fallback` 伪向量污染检索** | embed 后端（ollama）超时时返回 MD5+seed 确定性伪向量，不抛异常 → q_emb 被伪向量污染 → retriever 做余弦相似度选到无关话题。修复：`_encode_cached` 的 except 改 `raise`，调用方已有 try/except → q_emb=None → BM25-only 降级。影响：100s 超时 → 30s 超时，检索质量不降低（不引入随机噪声）。 | ✅ 已修复 (commit `e45faf9`) |
+| **`_OLLAMA_MAX_RETRIES=2` 造成 ~90s 阻塞** | 默认重试 2 次（共 3 次），每次 30s read timeout → 每次 embed 失败要 90s。修复：默认改为 0（环境变量 `CA_EMBED_MAX_RETRIES` 仍可覆盖）。 | ✅ 已修复 (commit `d6607cd`) |
 | **`_build_messages_from_plan` 用 `if l1:` 而非 `_is_valid_summary(l1)`** | 设计意图——退化摘要透传给 LLM 比吞掉更高效，非 bug | ✅ 设计确认 |

@@ -1,8 +1,8 @@
 # L1 摘要系统重构 — 需求与设计方案 v2
 
-**状态**: 技术方案阶段 · 待交叉评审  
+**状态**: ✅ 已交付（commit `4ca25df`，v4.7.0）  
 **基线**: v4.6.0 (commit `1afc1df`)  
-**日期**: 2026-06-15  
+**日期**: 2026-06-15（方案）/ 2026-06-15（交付）  
 **来源**: `docs/ca-l1-whitepaper-v1.2-gm.md`（已通过三轮红队审查 ✅）  
 **前序**: v1 技术方案存档于 `docs/ca-l1-refactor-technical-proposal-v1.md`
 
@@ -22,8 +22,8 @@
 | REQ-2 | 新增 `CA_L1_TEMPERATURE` 配置项 | 可通过环境变量设置，默认 0.3，validate/reload 支持 |
 | REQ-3 | 新增 `CA_L1_MAX_TOKENS` 配置项 | 可通过环境变量设置，默认 800，validate/reload 支持 |
 | REQ-4 | L1 生成调用使用独立 temperature 和 max_tokens | 不再硬编码，不再共用 `LLM_NUM_PREDICT` |
-| REQ-5 | 新增截断检测机制 | 双重校验：`finish_reason=='length'` + `endswith('</core_change>')`，任一触发抛 `L1TruncatedException` |
-| REQ-6 | 新增 `L1TruncatedException` 异常类 | C-stage 和 L-stage 都能捕获并触发降级 |
+| REQ-5 | 新增截断检测机制 | 双重校验：`finish_reason=='length'` + `endswith('</core_change>')`，任一触发写 `_assemble_status=1` 待补全记录 |
+| REQ-6 | 新增 `L1TruncatedException` 异常类 | 类已定义，当前截断检测在 `_run_c_stage` 中写 backfill（不抛异常），异常类预留供 future use |
 | REQ-7 | 新增 `parse_v1_markdown_xml()` 防御性解析器 | 解析 Markdown+XML 输出为(l1_dict, l0_text)，含语义短路和智能截断 |
 | REQ-8 | 新增 `format_previous_summary_for_prompt()` 适配器 | 将 DB 中历史 l1_text 统一转换为新提示词期望的 Markdown 格式 |
 | REQ-9 | OODAParser.TITLE_ALIASES 扩展 | 支持新 4 类中文标题别名（现象与问题/背景与约束/决策与共识/后续行动） |
@@ -76,10 +76,11 @@ format_previous_summary_for_prompt()    parse_v1_markdown_xml()
            │                                      │
            ▼                                      ▼
     ┌──────────────────────────────────────────────┘
-    │  主流程仍走 ooda_parser.parse()
-    │  （TITLE_ALIASES 扩展后兼容新旧两种格式）
+    │  parse_v1_markdown_xml 输出已是结构化 l1_dict
+    │  （4 类中文标题已映射为 5 类英 key），跳过
+    │  ooda_parser.parse（不兼容 ### Markdown 格式）
     ▼
-ooda_parser.parse() → clean_increment() → DB (5类英key JSON)
+clean_increment() → DB (5类英key JSON，格式不变)
 ```
 
 ### 2.2 涉及变更
@@ -90,12 +91,15 @@ ooda_parser.parse() → clean_increment() → DB (5类英key JSON)
 | 修改 | `ca/prompts.py` | 替换 `L1_GENERATION_PROMPT` 为 PDD 新版 |
 | 新增函数 | `ca/post_process.py` | 新增 `parse_v1_markdown_xml()` + `_safe_truncate()` + `_json_to_v1_markdown()` + 常量/预编译正则 |
 | 修改 | `ca/ooda_parser.py` | `TITLE_ALIASES` 扩展 4 类中文别名 |
-| 修改 | `ca/__init__.py` | `_call_llm_for_l1` 改返回 `Tuple[str,str]` + 截断检测 + 新参数 + `L1TruncatedException` |
+| 修改 | `ca/__init__.py` | `_call_llm_for_l1` 改返回 `Tuple[str,str]` + 新参数 + `L1TruncatedException`；截断检测下沉至 `_run_c_stage`；`_run_c_stage` 适配新数据流（跳过 ooda_parser.parse，直接 clean_increment） |
 | 新增函数 | `ca/store.py` | 新增 `format_previous_summary_for_prompt()`（从 post_process 引用） |
 | 修改 | `ca/lstage.py` | `_backfill_dialogue` 同步配置参数 + 截断检测 |
-| 新增 | `tests/test_parse_v1.py` | ~15 测试用例 |
-| 新增 | `tests/test_store_adapter.py` | ~8 测试用例 |
-| 修改 | `tests/test_c.py` | 追测 ~3 个截断检测用例 |
+| 修改 | `ca/stats.py` | 新增 4 统计字段（truncated_fallback / parse_fallback_count / skipped_empty / l1_latency_ms） |
+| 新增 | `tests/test_parse_v1.py` | ~27 测试用例（parse_v1_markdown_xml + prompt + 异常 + 格式转换 + 边界值） |
+| 新增 | `tests/test_store_adapter.py` | ~10 测试用例（format_previous_summary_for_prompt） |
+| 修改 | `tests/conftest.py` | `_mock_llm` 返回值 `str` → `Tuple[str,str]`（`('mock_response', 'stop')`） |
+| 修改 | `tests/test_c.py` | 追测 ~5 个截断检测 + DB 写入格式验证 |
+| 修改 | `tests/test_config.py` | 追测 ~5 个 L1 配置项用例 |
 | 修改 | `tests/test_v440.py` | 追测 ~2 个 L-stage 截断路径用例 |
 
 ---
@@ -125,8 +129,10 @@ _run_c_stage()
   │     current_dialog=l2_text)
   │
   ├─ response_text, finish_reason = _call_llm_for_l1(prev_l1, l2_text)  # ← 新签名
-  │     └─ 截断检测: finish_reason=='length' || !endswith('</core_change>')
-  │        → raise L1TruncatedException → _assemble_status=1 (backfill)
+  │     返回后由 _run_c_stage 执行截断检测：
+  │     finish_reason=='length' || !endswith('</core_change>')
+  │     → 直接写 _assemble_status=1 (backfill)，不抛异常
+  │     （检测逻辑下沉使 mock 路径可覆盖）
   │
   ├─ l1_dict, l0_text = parse_v1_markdown_xml(response_text)  # ← 新解析器
   │
@@ -138,14 +144,14 @@ _run_c_stage()
 
 ### 3.3 Metrics 接口
 
-4 个 Prometheus Counter/Gauge/Histogram：
+4 个指标通过 `stats.xxx += 1` 计数 + `logger.warning("[CA-METRIC] ...")` 上报（无 Prometheus 依赖）：
 
-| 指标 | 类型 | 指标名 | 接入点 |
+| 指标 | 实现方式 | 指标名 | 接入点 |
 |------|------|--------|--------|
-| 截断降级次数 | Counter | `ca.l1.truncated_fallback` | `_call_llm_for_l1` 抛出 `L1TruncatedException` 时 |
-| 解析 fallback 次数 | Counter | `ca.l1.parse_fallback_count` | `parse_v1_markdown_xml` 未匹配到 `<core_change>` 时 |
-| 跳过向量化轮次 | Gauge | `ca.l0.skipped_empty` | L0 为空字符串跳过 embedding 时 |
-| L1 延迟 | Histogram | `ca.l1.latency_ms` | `_call_llm_for_l1` 调用前后计时 |
+| 截断降级次数 | int counter | `ca.l1.truncated_fallback` | `_call_llm_for_l1` 失败时 + `_run_c_stage` 触发截断时 |
+| 解析 fallback 次数 | int counter | `ca.l1.parse_fallback_count` | `parse_v1_markdown_xml` 未匹配到 `<core_change>` 时 |
+| 跳过向量化轮次 | int counter | `ca.l0.skipped_empty` | `_run_c_stage` 中 l0_text 为空跳过 embedding 时 |
+| L1 延迟 | float ms | `ca.l1.latency_ms` | `_call_llm_for_l1` 调用前后计时 |
 
 ---
 
