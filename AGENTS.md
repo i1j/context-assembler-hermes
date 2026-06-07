@@ -4,7 +4,7 @@
 
 | 项       | 值                                                                        |
 | -------- | ------------------------------------------------------------------------- |
-| 版本     | v4.6.0 |
+| 版本     | v4.7.0 |
 | 部署方式 | 自包含独立副本                                                            |
 | 插件路径 | `~/.hermes/profiles/tester/plugins/ca_assembler/`                       |
 | 核心引擎 | `ca/` 子目录（入口 `ca/__init__.py` → `ContextAssembler`）         |
@@ -117,6 +117,21 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 
 变更历史统一记录在 `docs/changelog.md`（项目根目录）。调试/修复详情见 `docs/ca-debug-report-fix-verification.md`。
 
+### v4.7.0 — L1 摘要系统重构（2026-06-15）
+
+全面吸收白皮书 v1.2 Gold Master 设计（`docs/ca-l1-whitepaper-v1.2-gm.md`），重构 L1 摘要生成链路：
+
+- **ca/post_process.py**（新增）：`parse_v1_markdown_xml` 防御性解析器 + `_safe_truncate` 智能截断 + `_json_to_v1_markdown` 格式转换
+- **ca/prompts.py**：替换为"研发对话意图分析器"人设，4 类 Markdown + `<core_change>` XML 标签
+- **ca/__init__.py**：新增 `L1TruncatedException`；`_call_llm_for_l1` 返回 `Tuple[str,str]`；截断检测下沉至 `_run_c_stage`；独立 `temperature`/`max_tokens`
+- **ca/config.py**：新增 `L1_TEMPERATURE`(0.3) + `L1_MAX_TOKENS`(800) + validate + reload
+- **ca/ooda_parser.py**：`TITLE_ALIASES` 扩展 4 类中文别名
+- **ca/store.py**：`format_previous_summary_for_prompt` 历史适配器
+- **ca/lstage.py**：同步新签名 + 截断检测
+- **ca/stats.py**：新增 4 个统计字段（truncated_fallback / parse_fallback_count / skipped_empty / l1_latency_ms）
+
+**设计哲学**：PDD (Prompt-Driven Development) — 模型负责语义理解和 Markdown 续写，Python 代码负责截断检测、格式清洗、边界校验、新旧数据兼容。截断检测（`finish_reason=='length'` + `endswith('</core_change>')`）下沉至 `_run_c_stage` 调用层，使 mock 路径可覆盖。
+
 ## 存储结构
 ### DB 路径
 
@@ -166,6 +181,13 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 || `CA_LLM_TIMEOUT`    | 180                        | LLM 超时（秒）  |
 || `CA_CONTEXT_LENGTH` | 100000                     | 上下文 Token 预算上限（原 50000） |
 
+### L1 摘要生成配置（v4.7.0）
+
+| 变量                       | 默认值 | 说明                              |
+| -------------------------- | ------ | --------------------------------- |
+| `CA_L1_TEMPERATURE`      | 0.3    | L1 摘要生成温度（高确定性）         |
+| `CA_L1_MAX_TOKENS`       | 800    | L1 摘要生成最大 Token 数            |
+
 ### 话题拣选配置（v4.6.0）
 
 | 变量                       | 默认值   | 说明                          |
@@ -175,6 +197,57 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 | `CA_TOPIC_RADIUS_WEIGHT` | 2.0      | 半径公式中最近邻距离的权重系数 |
 | `CA_TOPIC_MAX_UPGRADE`   | 10       | 检索升级最大 topic 数         |
 | `CA_TOPIC_BG_LEVEL`      | `L0`   | BG 话题固定级别               |
+
+## L1 摘要生成架构（v4.7.0）
+
+### 新增模块
+
+| 模块/文件 | 类型 | 职责 |
+|-----------|------|------|
+| `ca/post_process.py` | **新增** | 防御性解析器：`parse_v1_markdown_xml`(主入口)、`_safe_truncate`(智能截断)、`_json_to_v1_markdown`(格式转换)、预编译正则、常量 |
+| `ca/__init__.py :: L1TruncatedException` | **新增** | 截断异常类，携带 `response_text` 供降级回读 |
+
+### 修改模块
+
+| 模块 | 变更 |
+|------|------|
+| `ca/prompts.py` | `L1_GENERATION_PROMPT` 替换为"研发对话意图分析器"人设，4 类 Markdown + `<core_change>` XML 标签 |
+| `ca/config.py` | 新增 `L1_TEMPERATURE`(0.3) + `L1_MAX_TOKENS`(800) |
+| `ca/ooda_parser.py` | `TITLE_ALIASES` 扩展 4 类中文别名 |
+| `ca/store.py` | 新增 `format_previous_summary_for_prompt` 适配器 |
+| `ca/__init__.py` | `_call_llm_for_l1` 返回 `Tuple[str,str]`；截断检测下沉至 `_run_c_stage`；独立 `temperature`/`max_tokens` |
+| `ca/lstage.py` | `_backfill_dialogue` 同步新签名 + 截断检测 |
+| `ca/stats.py` | 新增 4 统计字段 |
+
+### 数据流
+
+```
+旧 DB JSON (5类英key)               LLM 输出 (4类中文+XML)
+    │                                      │
+    ▼                                      ▼
+format_previous_summary_for_prompt()    parse_v1_markdown_xml()
+    │                                      │
+    ├─ None/"无" → "无"                    ├─ 物理截断尾随噪音
+    ├─ JSON → _json_to_v1_markdown         ├─ 提取 <core_change>
+    │        → 4类 Markdown                ├─ 提取 OODA 4 类列表（通过 TITLE_ALIASES 映射）
+    └─ 纯文本 → 原样返回                   └─ 语义短路 → (l1_dict, l0_text)
+           │                                      │
+           ▼                                      ▼
+    ┌──────────────────────────────────────────────┘
+    ▼
+clean_increment() → DB (5类英key JSON，格式不变)
+```
+
+### 截断检测机制
+
+截断检测在 `_run_c_stage` 调用层执行（v4.7.0 从 `_call_llm_for_l1` 内部下沉），双重校验：
+
+```
+finish_reason == 'length'           → 触发降级
+not response.strip().endswith('</core_change>') → 触发降级
+```
+
+任一触发 → 写 `_assemble_status=1` 待补全记录 → L-stage 异步重试（最多 3 次）。
 
 ## 断路器
 
@@ -253,21 +326,26 @@ print(water)
 | `ca_engine` | function | `(tmp_path) -> ContextAssembler` | 标准引擎实例，自动 mock embedding+LLM，teardown 执行 `.destroy()` |
 | `engine` | function | `(ca_engine) -> ContextAssembler` | `ca_engine` 别名，向后兼容 |
 | `_mock_embed` | function (autouse) | `(ca_engine) -> None` | 自动 mock `EmbeddingClient.embed` → `[0.1]*768` |
-| `_mock_llm` | function (autouse) | `() -> None` | 自动 mock `_call_llm_for_l1` → 固定 L1 文本 |
+| `_mock_llm` | function (autouse) | `() -> None` | 自动 mock `_call_llm_for_l1` → `('mock_response', 'stop')`（v4.7.0 新签名 `Tuple[str,str]`） |
 
 ### 测试文件与测试类
 
 | 文件 | 测试类 | 测试数 | 范围 |
 |------|--------|--------|------|
-| `test_c.py` | （函数级） | 14 | 对话轮 C‑stage：摘要生成、OODA 解析、状态标记 |
+| `test_c.py` | （函数级） | 19 | 对话轮 C‑stage：摘要生成、OODA 解析、状态标记、**截断检测（v4.7.0）**、**DB 写入格式验证** |
 | `test_a.py` | （函数级） | 17 | 对话轮 A‑stage：分层、检索、升级、尾部保护 |
 | `test_v440.py` | `TestToolTurnCStage` | 12 | 工具轮 C‑stage：多工具调用、字段优先级、L0 截断、预升级（1 个已替换为 pre_upgrade_removed） |
 | | `TestToolTurnAStage` | 8 | 工具轮 A‑stage：尾部保护、topic_boost、升级过滤、预算 |
-| | `TestLStageBackfill` | 7 | L‑stage：对话轮/工具轮补全、永久失败、周期扫描、预升级已移除验证 |
+| | `TestLStageBackfill` | 9 | L‑stage：对话轮/工具轮补全、永久失败、周期扫描、**截断路径（v4.7.0）** |
 | | `TestConfigAndOthers` | 11 | 配置热重载、去重非法值、Store 新列、并发销毁、快照隔离、性能 |
+| `test_config.py` | （函数级） | 11 | Config：环境变量解析、默认值、非法值回退、**L1_TEMPERATURE/L1_MAX_TOKENS（v4.7.0）** |
+| `test_parse_v1.py` | `TestParseV1MarkdownXml` | 16 | **新增（v4.7.0）**：`parse_v1_markdown_xml` 全场景测试（正常/截断/空/语义短路/别名兼容） |
+| | `TestL1GenerationPrompt` | 2 | **新增（v4.7.0）**：REQ-1 prompt 内容验证（含新旧特征检测） |
+| | `TestL1TruncatedException` | 1 | **新增（v4.7.0）**：异常类继承链和属性验证 |
+| | `TestJsonToV1Markdown` | 3 | **新增（v4.7.0）**：格式转换、缺失 key、特殊字符 |
+| | `TestSafeTruncateBoundary` | 5 | **新增（v4.7.0）**：边界值测试（0/1/全标点/全空格/负值） |
+| `test_store_adapter.py` | `TestFormatPreviousSummary` | 10 | **新增（v4.7.0）**：`format_previous_summary_for_prompt` 全场景（None/空/旧JSON/纯文本/大JSON） |
 | `test_store.py` | （函数级） | 10 | Store 层：读写 turn、turn_plan、BM25 tokens、分区清理 |
-| `test_config.py` | （函数级） | 6 | Config：环境变量解析、默认值、非法值回退 |
-| `test_embedding.py` | （函数级） | 5 | Embedding：向量计算、归一化、缓存 |
 | `test_circuit.py` | （函数级） | 7 | 断路器：失败计数、冷却恢复、状态持久化 |
 | `test_health.py` | （函数级） | 5 | 健康检查：引擎状态、DB 连接、缓存快照 |
 | `test_lifecycle.py` | （函数级） | 7 | 生命周期：reset、destroy、并发安全、接口完整性 |
@@ -389,3 +467,15 @@ Hermes 有两条完全独立的机制：
 | L0 摘要质量观察         | `ca-ctx-inspect/references/l0-summary-quality-observations.md` | 对话轮 L0 摘要质量实测                     |
 | system_overhead 分析    | `docs/system-overhead-measurement-analysis.md`                 | 测量代码移除分析                           |
 | CA v5 试验计划          | `docs/ca-v5-test-plan.md`                                      | 缓存友好改进 + 参数自动调优试验方案        |
+
+### v4.7.0 相关文档
+
+| 文档                    | 路径                                                             | 内容                                       |
+| ----------------------- | ---------------------------------------------------------------- | ------------------------------------------ |
+| L1 白皮书（GM）         | `docs/ca-l1-whitepaper-v1.2-gm.md`                             | 外部设计文档，PDD 架构、解析器、适配器设计 |
+| 需求与方案 v2           | `docs/ca-l1-refactor-requirements-v2.md`                       | 需求规格、总体设计、测试策略、实施步骤     |
+| 实现方案 v2             | `docs/ca-l1-refactor-impl-plan-v2.md`                          | 实现策略、接口设计、关键实现细节、13 步计划 |
+| 测试方案 v2             | `docs/ca-l1-refactor-test-plan-v2.md`                          | 分层策略、49 测试场景、Mock 策略            |
+| 交叉评审（测试线视角）  | `docs/cross-review-test-perspective.md`                         | 可测试性视角：10 项发现（2 高严重度）      |
+| 交叉评审（开发线视角）  | `docs/cross-review-dev-perspective.md`                         | 需求覆盖视角：7 项发现（2 高严重度）       |
+| 技术方案初稿 v1         | `docs/ca-l1-refactor-technical-proposal-v1.md`                 | 存档草案（v4.6.0 基线，未走完评审流程）    |
