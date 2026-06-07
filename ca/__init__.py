@@ -906,7 +906,6 @@ class ContextAssembler:
         # 计算最近邻形心距离
         centroids = {tid: td["centroid"] for tid, td in topic_data.items()
                      if td["centroid"] is not None}
-        from .retrieval import cosine_similarity
         for topic_id, td in topic_data.items():
             if td["centroid"] is None:
                 continue
@@ -950,7 +949,6 @@ class ContextAssembler:
                 continue
 
             # 计算 query 到 topic 形心的距离（余弦距离）
-            from .retrieval import cosine_similarity
             sim = cosine_similarity(q_emb, td["centroid"])
             d = 1.0 - sim
 
