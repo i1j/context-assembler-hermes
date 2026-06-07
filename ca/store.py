@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import Config
+from .post_process import STATE_PREFIX_REGEX, ItemState, parse_core_change_state
 
 logger = logging.getLogger(__name__)
 
@@ -476,6 +477,19 @@ class SQLiteStore:
             return (None, "", "")
         return (row[0], row[1] or "", row[2] or "")
 
+    def read_assemble_status(self, session_id: str, turn_index: int,
+                              turn_type: str = "dialogue",
+                              tool_sub_index: int = 0) -> Optional[int]:
+        """返回该 turn 的 _assemble_status。记录不存在时返回 None。"""
+        cur = self.conn.execute(
+            """SELECT _assemble_status
+               FROM turn_cache
+               WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?""",
+            (session_id, turn_index, turn_type, tool_sub_index),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
     # ── turn_plan 读写 ──
 
     def write_turn_plan(self, session_id: str, entries: List[Dict[str, Any]]) -> bool:
@@ -639,6 +653,16 @@ class SQLiteStore:
         return row[0] if row and row[0] is not None else None
 
 
+def _infer_legacy_state(core_text: str) -> Tuple[str, ItemState]:
+    """从旧文本内容中推断状态，解决语义矛盾。"""
+    text = core_text.lower()
+    if any(k in text for k in ['已完成', '已实施', '已修复', '已接入', '已扩容', '已上线']):
+        return '【已实施】', ItemState.DONE
+    if any(k in text for k in ['拟', '计划', '待实施', '准备', 'todo']):
+        return '【计划】', ItemState.PLANNED
+    return '【探讨】', ItemState.DISCUSSING
+
+
 def format_previous_summary_for_prompt(l1_text_from_db: str) -> str:
     """将 DB 中历史 l1_text 统一转换为新提示词期望的 Markdown 格式。
 
@@ -653,8 +677,8 @@ def format_previous_summary_for_prompt(l1_text_from_db: str) -> str:
     try:
         data = json.loads(stripped)
         if isinstance(data, dict):
-            from .post_process import _json_to_v1_markdown
-            result = _json_to_v1_markdown(data)
+            from .post_process import _json_to_v1_markdown as _legacy_json_to_v1_markdown
+            result = _legacy_json_to_v1_markdown(data)
             if result:
                 return result
             # 转换结果为空，原样返回

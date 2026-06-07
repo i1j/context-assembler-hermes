@@ -28,7 +28,7 @@ from .cache import AssemblyCache, CacheBuilder, BM25Snapshot, tokenise
 from .retrieval import Retriever, cosine_similarity
 from .embedding import EmbeddingClient
 from .ooda_parser import OODAParser
-from .post_process import robust_json_parse, clean_increment, parse_v1_markdown_xml, _safe_truncate
+from .post_process import robust_json_parse, clean_increment, parse_v1_markdown_xml, _safe_truncate, ItemState
 from .prompts import L1_GENERATION_PROMPT
 from .store import format_previous_summary_for_prompt
 from .stats import AssembleStats
@@ -358,7 +358,7 @@ class ContextAssembler:
                     logger.info("[CA] _run_c_stage turn %d: truncated, saved as pending backfill", turn_index)
                     return
 
-                l1_dict, l0_text = parse_v1_markdown_xml(response_text)
+                l1_dict, l0_text, core_state = parse_v1_markdown_xml(response_text)
                 if not l0_text:
                     logger.warning("[CA-METRIC] ca.l0.skipped_empty: turn=%d", turn_index)
                     self.stats.skipped_empty += 1
@@ -366,6 +366,9 @@ class ContextAssembler:
                 # 直接传给 clean_increment（跳过 ooda_parser.parse，
                 # 后者只兼容旧格式 "标题：内容" 格式，不兼容 Markdown ### 标题）
                 cleaned = clean_increment(l1_dict)
+                # 状态注入：将 core_state 嵌入 l1_dict 内部字段
+                if core_state and core_state != ItemState.UNKNOWN:
+                    cleaned["_state"] = core_state.value
                 cleaned["_assemble_status"] = 0
                 dialogue_ok = True
 
@@ -1188,6 +1191,15 @@ class ContextAssembler:
                 self._session_id, entry.turn_index,
                 entry.turn_type, entry.tool_sub_index
             )
+            # 对话轮退化条目过滤：_assemble_status=1 → l0/l1 不可用，跳过注入
+            # （仅检查 DB 记录条目的退化状态，不影响 add_turn 写入 cache 但未落库的用例）
+            if entry.turn_type == "dialogue" and l2 is not None:
+                db_status = self.store.read_assemble_status(
+                    self._session_id, entry.turn_index,
+                    entry.turn_type, entry.tool_sub_index
+                )
+                if db_status == 1:  # ASSEMBLE_PENDING_BACKFILL
+                    continue
             is_tool = entry.turn_type == "tool"
             prefix = f"[~/{entry.turn_index}"
             if is_tool:
@@ -1196,18 +1208,21 @@ class ContextAssembler:
                 prefix += "/0"
             prefix += "] "
 
+            # 对话轮 L1 → 格式化为可读文本（替代原始 JSON 注入）
+            l1_display = self._format_l1_for_display(l1) if entry.turn_type == "dialogue" else l1
+
             if entry.target_level == "L2":
                 # 保留原文
                 if l2:
                     self._extend_with_l2(result, l2, entry.turn_index)
                 elif l1 or l0:
                     # L2 不可用，降级到摘要
-                    text = l1 or l0
+                    text = l1_display or l0
                     result.append({"role": "assistant", "content": f"{prefix}{text}"})
                 # else: 无任何文本，跳过
             elif entry.target_level == "L1":
-                if l1:
-                    result.append({"role": "assistant", "content": f"{prefix}{l1}"})
+                if l1_display:
+                    result.append({"role": "assistant", "content": f"{prefix}{l1_display}"})
                 elif l0:
                     result.append({"role": "assistant", "content": f"{prefix}{l0}"})
                 elif l2:
@@ -1215,8 +1230,8 @@ class ContextAssembler:
             else:  # L0
                 if l0:
                     result.append({"role": "assistant", "content": f"{prefix}{l0}"})
-                elif l1:
-                    result.append({"role": "assistant", "content": f"{prefix}{l1}"})
+                elif l1_display:
+                    result.append({"role": "assistant", "content": f"{prefix}{l1_display}"})
                 elif l2:
                     self._extend_with_l2(result, l2, entry.turn_index)
 
@@ -1268,6 +1283,25 @@ class ContextAssembler:
             return bool(core and core != "本轮无新内容")
         except (json.JSONDecodeError, TypeError, AttributeError):
             return False
+
+    def _format_l1_for_display(self, l1_text: str) -> str:
+        """将对话轮 L1 JSON 摘要格式化为可读文本，替代原始 JSON 注入。"""
+        if not l1_text or not l1_text.strip():
+            return l1_text
+        try:
+            data = json.loads(l1_text)
+        except (json.JSONDecodeError, TypeError):
+            return l1_text
+        core = data.get("core_change", "")
+        if not core:
+            return l1_text
+        lines = [core]
+        for key in ("new_materials", "objective_facts"):
+            items = data.get(key, [])
+            if items:
+                joined = " | ".join(str(i)[:240] for i in items)
+                lines.append(f"  {joined}")
+        return "\n".join(lines)
 
     def _compute_tail_start(self, messages):
         """从消息尾部反向累计对话消息的 token 数，找到对话 tail 保护区。

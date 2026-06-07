@@ -303,7 +303,7 @@ def test_tc_c_T2_normal_stop(engine):
                       return_value=(
                           "### 现象与问题\n- 测试\n"
                           "### 背景与约束\n- 无\n"
-                          "### 决策与共识\n- 无\n"
+                          "### 决策与方案\n- 无\n"
                           "### 后续行动\n- 无\n"
                           "<core_change>正常测试</core_change>",
                           "stop"
@@ -359,7 +359,7 @@ def test_tc_c_X7_db_write_format(engine):
                       return_value=(
                           "### 现象与问题\n- CPU 90%\n"
                           "### 背景与约束\n- 内存 8G\n"
-                          "### 决策与共识\n- 扩容\n"
+                          "### 决策与方案\n- 扩容\n"
                           "### 后续行动\n- 采购\n"
                           "<core_change>CPU 过高决定扩容</core_change>",
                           "stop"

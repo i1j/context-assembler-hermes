@@ -101,7 +101,7 @@ def _mock_llm():
                return_value=(
                    "### 现象与问题\n- 无\n"
                    "### 背景与约束\n- 无\n"
-                   "### 决策与共识\n- 无\n"
+                   "### 决策与方案\n- 无\n"
                    "### 后续行动\n- 无\n"
                    "<core_change>mock_response</core_change>",
                    "stop"

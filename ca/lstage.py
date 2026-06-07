@@ -110,7 +110,7 @@ class BackfillThread(threading.Thread):
                 logger.warning("Permanent backfill failure for turn %d (truncated)", turn_index)
             return
 
-        l1_dict, l0_text = parse_v1_markdown_xml(response_text)
+        l1_dict, l0_text, core_state = parse_v1_markdown_xml(response_text)
         cleaned = clean_increment(l1_dict)
         if "core_change" not in cleaned:
             cleaned["core_change"] = "本轮无新内容"

@@ -11,6 +11,15 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
+from enum import Enum
+from typing import Tuple
+
+class ItemState(Enum):
+    DONE = "done"
+    PLANNED = "planned"
+    DISCUSSING = "discussing"
+    UNKNOWN = "unknown"
+
 _CORE_CHANGE_RE = re.compile(r"核心摘要[：:]\s*(.{1,200})", re.DOTALL)
 
 
@@ -60,11 +69,50 @@ MEANINGLESS_CORE: Set[str] = {"无", "暂无", "无有效增量", "无新增", "
 WHITESPACE_PATTERN = re.compile(r'\s+')
 CORE_CHANGE_PATTERN = re.compile(r'<core_change>(.*?)(?:</core_change>|\Z)', re.DOTALL | re.IGNORECASE)
 
+# 【状态前缀正则】：提取 【已实施】/【计划】/【探讨】
+# 匹配以 【内容】 开头的文本，捕获括号内 1-10 个字符
+STATE_PREFIX_REGEX = re.compile(r'^【([^】]{1,10})】\s*')
+
+# 模块级 Fail-Fast assert
+_test_match_1 = STATE_PREFIX_REGEX.match("【已实施】 扩容完成")
+_test_match_2 = STATE_PREFIX_REGEX.match("【计划】 拟引入Redis")
+assert _test_match_1 is not None and _test_match_1.group(1) == "已实施", "FATAL: STATE_PREFIX_REGEX 正则损坏 (Assert 1)!"
+assert _test_match_2 is not None and _test_match_2.group(1) == "计划", "FATAL: STATE_PREFIX_REGEX 正则损坏 (Assert 2)!"
+
+
+def _normalize_state(prefix_text: str) -> Tuple[str, ItemState]:
+    """仅对提取出的前缀文本（如'已完成'）进行归一化，绝不扫描整句。"""
+    s = prefix_text.strip().lower()
+    if any(k in s for k in ['已实施', '已完成', '已修复', '已接入', 'done']):
+        return '【已实施】', ItemState.DONE
+    if any(k in s for k in ['探讨', '讨论', '评估', '考虑', 'tbd']):
+        return '【探讨】', ItemState.DISCUSSING
+    return '【计划】', ItemState.PLANNED
+
+
+def parse_core_change_state(raw_core: str) -> Tuple[str, ItemState]:
+    """提取、归一化并重组状态前缀，返回格式化文本与结构化枚举。"""
+    raw_core = raw_core.strip()
+    state_match = STATE_PREFIX_REGEX.match(raw_core)
+
+    if state_match:
+        # 严格只传入 group(1)（即括号内的文本，如"计划"）
+        normalized_prefix, state_enum = _normalize_state(state_match.group(1))
+        body = raw_core[state_match.end():].strip()
+    else:
+        # 模型忘记加前缀，直接兜底为 【计划】
+        normalized_prefix, state_enum = '【计划】', ItemState.PLANNED
+        body = raw_core
+
+    final_text = f"{normalized_prefix} {body}" if body else normalized_prefix
+    return final_text, state_enum
+
+
 # 4 类 Markdown 标题 → 5 类英 key 映射
 SECTION_MAP = {
     "现象与问题": "new_materials",
     "背景与约束": "objective_facts",
-    "决策与共识": "consensus",
+    "决策与方案": "consensus",
     "后续行动": "actions",  # post_process 输出 actions，OODAParser 映射为 todo
 }
 
@@ -79,7 +127,7 @@ OODA_PATTERNS = {
         re.MULTILINE
     ),
     "decisions": re.compile(
-        r'^###\s+决策与共识[：:]?\s*$',
+        r'^###\s+决策与方案[：:]?\s*$',
         re.MULTILINE
     ),
     "actions": re.compile(
@@ -92,9 +140,9 @@ OODA_PATTERNS = {
 _LIST_ITEM_RE = re.compile(r'^[-*•]\s+(.+)$', re.MULTILINE)
 
 
-def _build_empty_result() -> Tuple[Dict, None]:
+def _build_empty_result() -> Tuple[Dict, None, None]:
     """返回退化空结果。"""
-    return {"core_change": "本轮无新内容"}, None
+    return {"core_change": "本轮无新内容"}, None, None
 
 
 def _safe_truncate(text: str, max_len: int = 100) -> str:
@@ -139,7 +187,7 @@ def _json_to_v1_markdown(data: dict) -> str:
     FIELD_MAP = {
         "new_materials": ("现象与问题", False),
         "objective_facts": ("背景与约束", False),
-        "consensus": ("决策与共识", False),
+        "consensus": ("决策与方案", False),
         "todo": ("后续行动", True),
     }
 
@@ -168,11 +216,12 @@ def _json_to_v1_markdown(data: dict) -> str:
     return result
 
 
-def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[str]]:
-    """解析 LLM 输出的 4 类 Markdown + XML 格式，返回 (l1_dict, l0_text)。
+def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[str], Optional[ItemState]]:
+    """解析 LLM 输出的 4 类 Markdown + XML 格式，返回 (l1_dict, l0_text, core_state)。
 
     l1_dict 包含 5 类英 key（core_change, new_materials, objective_facts, consensus, todo）。
     l0_text 是 core_change 的首句，最多 100 字。
+    core_state 是 core_change 的状态枚举（ItemState）。
     """
     if not llm_output or not llm_output.strip():
         logger.warning("[CA-METRIC] ca.l1.parse_fallback_count: llm_output is empty")
@@ -197,7 +246,7 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
     section_order = [
         ("现象与问题", "new_materials"),
         ("背景与约束", "objective_facts"),
-        ("决策与共识", "consensus"),
+        ("决策与方案", "consensus"),
         ("后续行动", "todo"),
     ]
 
@@ -256,14 +305,19 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
         if eng_key in section_items:
             l1_dict[eng_key] = section_items[eng_key][:3]
 
-    # 4. l0_text = core_text 首句[:100]
+    # 4. 状态提取 + l0_text
+    core_state: Optional[ItemState] = None
     l0_text: Optional[str] = None
     if core_text:
-        # 取首句
-        first_sentence = core_text
+        # 状态提取
+        normalized_core, core_state = parse_core_change_state(core_text)
+        # 更新 l1_dict 中的 core_change 为带状态前缀的版本
+        l1_dict["core_change"] = normalized_core
+        # l0_text = 首句[:100]
+        first_sentence = normalized_core
         for sep in ["。", "！", "？", ".", "!", "?"]:
-            if sep in core_text:
-                parts = core_text.split(sep, 1)
+            if sep in normalized_core:
+                parts = normalized_core.split(sep, 1)
                 first_sentence = parts[0] + sep
                 break
         l0_text = _safe_truncate(first_sentence, max_len=100)
@@ -273,4 +327,4 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
     if l0_text is None:
         logger.warning("[CA-METRIC] ca.l0.skipped_empty: l0_text is None/empty")
 
-    return (l1_dict, l0_text)
+    return (l1_dict, l0_text, core_state)
