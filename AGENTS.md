@@ -134,16 +134,14 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 
 ### v4.7.1 — L1 状态感知链路集成（2026-06-16）
 
-基于 v1.5.1 Final 文档（`docs/ca-l1-whitepaper-v1.5.1-final.md`），新增状态前缀提取与结构化透传，对抗小模型"完成时态"幻觉：
+基于 v1.5.1 Final → v1.6 Final 迭代，新增状态前缀提取与结构化透传，对抗小模型"完成时态"幻觉：
 
-- **ca/post_process.py**：新增 `ItemState` 枚举（DONE/PLANNED/DISCUSSING/UNKNOWN）+ `STATE_PREFIX_REGEX`（含模块级 fail-fast assert）+ `_normalize_state()`（作用域隔离归一化）+ `parse_core_change_state()`（结构化透传）；标题统一"决策与共识"→"决策与方案"；`parse_v1_markdown_xml` 返回三元组 `(l1_dict, l0_text, core_state)`
-- **ca/prompts.py**：标题统一 + `<core_change>` 增加 `【已实施】/【计划】/【探讨】` 状态前缀引导
+- **ca/post_process.py**：新增 `ItemState` 枚举（DONE/PLANNED/DISCUSSING/UNKNOWN）+ `STATE_PREFIX_REGEX`（含模块级 fail-fast assert）+ `_normalize_state()`（作用域隔离归一化）+ `parse_core_change_state()`（结构化透传，含管理动作降级）；标题统一"决策与共识"→"决策与方案"；`parse_v1_markdown_xml` 返回三元组 `(l1_dict, l0_text, core_state)`
+- **ca/prompts.py**：v1.6 Final 版本，`<example>` 标签 3 场景示例，人设"研发对话意图分析器"，优先级规则（已实施 > 计划 > 探讨），`【】`状态标签
 - **ca/ooda_parser.py**：`TITLE_ALIASES` 增加"决策与方案"
-- **ca/store.py**：新增 `_infer_legacy_state()`（文本自检推断历史状态）+ `format_previous_summary_for_prompt` 适配
+- **ca/store.py**：新增 `_infer_legacy_state()`（文本自检推断历史状态）+ `MANAGEMENT_ACTION_KEYWORDS` 集成 + `format_previous_summary_for_prompt` 适配
 - **ca/__init__.py**：适配新签名；状态注入 `l1_dict["_state"]`，零 schema 变更
-- **所有测试文件**：标题统一 + 状态前缀场景
-
-**设计哲学**：状态前缀使用 `【】` 中文直角引号避免 Markdown/JSON/XML 语法冲突；结构化字段 `_state` 仅存枚举值（`"done"`/`"planned"`/`"discussing"`），供下游代码层消费。
+- **所有测试文件**：标题统一 + 状态前缀场景 + prompt 检测更新
 
 ## 存储结构
 ### DB 路径

@@ -112,8 +112,9 @@ def parse_core_change_state(raw_core: str) -> Tuple[str, ItemState]:
         body = raw_core[state_match.end():].strip()
         # 管理动作完成 ≠ 技术实施完成：降级状态
         if state_enum == ItemState.DONE:
-            body_lower = body.lower()
-            if any(kw in body_lower for kw in MANAGEMENT_ACTION_KEYWORDS):
+            # 去空格/去空白后匹配，应对 "创建了 Jira" 等中英混排
+            body_flat = WHITESPACE_PATTERN.sub('', body.lower())
+            if any(kw in body_flat for kw in MANAGEMENT_ACTION_KEYWORDS):
                 normalized_prefix, state_enum = '【计划】', ItemState.PLANNED
     else:
         # 模型忘记加前缀，直接兜底为 【计划】
