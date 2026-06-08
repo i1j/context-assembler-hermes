@@ -1,12 +1,12 @@
-# ContextAssembler 详细设计文档 (v4.5.1)
+# ContextAssembler 详细设计文档 (v4.7.1)
 
 ## 文档信息
 
-| 项目         | 内容                             |
-| ------------ | -------------------------------- |
-| 文档版本     | 合并 v4.3.4 + v4.4.0 + v4.4.1 补充 |
-| 对应需求文档 | Software_REQUIREMENTS.md v4.4.0   |
-| 编制日期     | 2025-06-27（原始）/ 2026-06-05（v4.4.1 修订） |
+| 项目         | 内容                                                       |
+| ------------ | ---------------------------------------------------------- |
+| 文档版本     | v4.7.1（合并 v4.3.4 ~ v4.7.1 全部变更）                 |
+| 对应需求文档 | Software_REQUIREMENTS.md v4.4.0（L1 需求见白皮书 GM）  |
+| 编制日期     | 2025-06-27（原始）/ 2026-06-16（v4.7.1 最终修订）        |
 
 ---
 
@@ -23,12 +23,19 @@ v4.4.0 在对话轮摘要、双路检索、硬截断等能力基础上，新增�
 
 v4.4.1 在此基础上解决了对话轮与工具轮尾区混用、Token 估算偏差、上下文窗口查询过时、后台审查轮浪费 LLM 调用等问题，并新增话题边界检测与 turn_plan 可观测性。
 
+v4.6.0 全面重构拣选层，从 per-turn 拣选升级为 per-topic 拣选：引入话题分割（Jaccard 链合并）、三级定级（半径 r 公式）、TopicRetriever 双路检索（BM25 + 向量形心）。移除 C-stage BM25 预选机制，新增 topic_boost 工具轮升线。
+
+v4.7.0 重构 L1 摘要生成链路，采用 PDD（Prompt-Driven Development）范式：LLM 输出 4 类 Markdown + `<core_change>` XML 标签，Python 端以 `parse_v1_markdown_xml` 防御性解析，替代旧 OODA 文本格式。截断检测下沉至 `_run_c_stage` 调用层，独立 `L1_TEMPERATURE` / `L1_MAX_TOKENS` 参数。
+
+v4.7.1 新增 L1 状态感知链路：LLM 在 `<core_change>` 中输出 `【】` 状态前缀（已实施/计划/探讨），代码做归一化修正（别名对齐、缺失前缀兜底、管理动作降级），`_state` 字段注入 l1_dict（当前零消费）。
+
 ### 1.2 关键设计原则
 
 | 原则       | 实现方式                                                          |
 | ---------- | ----------------------------------------------------------------- |
 | 两阶段解耦 | C‑stage 异步生成摘要，A‑stage 同步组装上下文                    |
-| 防御性工程 | 别名匹配、容错解析、截断清洗、深度规范化指纹                      |
+| PDD 范式 | L1 摘要由 LLM 生成 Markdown+XML 结构，Python 负责防御性解析、截断检测、格式清洗  |
+| 防御性工程 | 别名匹配、容错解析、截断清洗、深度规范化指纹、状态归一化            |
 | 轻量化     | SQLite 持久化，自实现 BM25、余弦相似度、向量序列化                |
 | 可观测性   | 健康检查、Prometheus 指标、阶段统计、turn_plan 拣选决策记录       |
 | 集中配置   | 所有可调参数通过 `config.py` 统一暴露，支持环境变量覆盖和热重载 |
@@ -51,15 +58,15 @@ v4.4.1 在此基础上解决了对话轮与工具轮尾区混用、Token 估算�
 │  │ C‑stage (post_llm_call) │  │ A‑stage (pre_llm_call)   │ │
 │  │       异步              │  │       同步               │ │
 │  │                         │  │                          │ │
-│  │ L2 → LLM 生成 OODA 文本 │  │ 用户输入                 │ │
-│  │     → OODAParser 解析   │  │  → 获取快照+数据副本     │ │
-│  │     → 清洗+提取 L0      │  │  → BM25/向量检索 (RRF)   │ │
-│  │     → 嵌入(L1,L0)       │  │  → 动态预算闸门         │ │
-│  │     → 写入 SQLite       │  │  → Head/Middle/Tail 组装 │ │
-│  │     → 更新 AssemblyCache│  │  → 全指纹去重(原位标记) │ │
-│  │     → 工具轮规则摘要    │  │  → turn_plan 拣选记录   │ │
-│  │     → 话题边界检测      │  │  → turn_plan 驱动组装   │ │
-│  │     → 预选工具轮        │  │                          │ │
+│  │ L2 → LLM 生成 Markdown+XML   │  │ 用户输入                 │ │
+│  │     → parse_v1_markdown_xml  │  │  → 话题分割+三级定级     │ │
+│  │     → clean_increment        │  │  → BM25/向量检索(RRF)    │ │
+│  │     → 状态归一化+提取L0     │  │  → 动态预算闸门          │ │
+│  │     → 嵌入(L1,L0)           │  │  → Head/Middle/Tail 组装  │ │
+│  │     → 写入 SQLite           │  │  → 全指纹去重(原位标记)  │ │
+│  │     → 更新 AssemblyCache    │  │  → turn_plan 拣选记录    │ │
+│  │     → 工具轮规则摘要        │  │  → turn_plan 驱动组装    │ │
+│  │     → 话题边界检测          │  │                          │ │
 │  └───────────┬─────────────┘  └──────────┬───────────────┘ │
 │              │                           │                 │
 │              └───────────┬───────────────┘                 │
@@ -92,8 +99,8 @@ plugins/ca_assembler/__init__.py
     ├── retrieval.py (Retriever) ← 双路检索（对话 + 工具）+ RRF 融合
     ├── embedding.py (EmbeddingClient) ← 嵌入服务，多后端，LRU 缓存
     ├── ooda_parser.py       ← OODA 解析 + 向量语义去重
-    ├── post_process.py      ← JSON 容错解析 + 清洗
-    ├── prompts.py           ← L1 生成 Prompt
+    ├── post_process.py      ← L1 解析(parse_v1_markdown_xml)+状态归一化+JSON容错
+    ├── prompts.py           ← L1 Prompt(研发对话意图分析器人设+4类Markdown+XML)
     ├── tool_summarizer.py   ← 工具轮规则引擎摘要
     ├── tool_field_priority.yaml ← 工具字段优先级配置
     ├── lstage.py            ← L-stage 异步补全线程
@@ -130,6 +137,12 @@ plugins/ca_assembler/__init__.py
 | `_assemble_status`  | INTEGER | 0          | 摘要生成状态：0=正常，1=C‑stage 失败待补全，2=L‑stage 永久失败       |
 | `backfill_attempts` | INTEGER | 0          | L‑stage 补全重试次数                                                  |
 | `created_at`        | TEXT    | —         | 创建时间戳                                                            |
+| `query_embedding`| BLOB    | NULL      | 用户消息嵌入向量（v4.6.0 新增）                                      |
+
+
+> **l1_text 内部结构（v4.7.0+）**：5 类英 key JSON，`core_change` 含 `【】` 状态前缀。
+> 例如：`{"core_change": "【已实施】扩容完成", "new_materials": ["CPU 90%"], ...}`
+> v4.7.1 额外注入 `"_state"` 字段（`"done"`/`"planned"`/`"discussing"`），当前零消费。
 
 ### 3.2 turn_plan 表（schema v3 新增）
 
@@ -172,18 +185,18 @@ turn_plan(session_id, turn_index, turn_type, tool_sub_index,
 1. `process_turn_async` 在锁内计算 `turn_index = max(内部计数器+1, 历史用户消息数)`，检查重复任务。
 2. **后台审查检测**（v4.4.1）：主线程读取 `tools.skill_provenance.get_current_write_origin()` ContextVar。若为 `"background_review"`，将标志传入 daemon 线程（ContextVar 不跨线程传播），跳过 LLM 调用，规则生成结构化 L1：`{"core_change": "系统后台审查", "_assemble_status": 0, ...}`。
 3. 正常流程：启动后台线程执行 `_run_c_stage`：
-   - 调用 `_call_llm_for_l1` 生成 OODA 文本（带重试，降级时返回完整五节"无有效增量"）。
-   - `OODAParser.parse` 解析 OODA 文本，并与上一轮 L1 做向量语义去重。
-   - `robust_json_parse` + `clean_increment` 容错清洗。
-   - 提取 L0（`core_change` 前 100 字符）。
+   - 调用 `_call_llm_for_l1` 生成 Markdown+XML 文本（带重试，失败时返回 `("", "error")`）。
+   - **截断检测**（v4.7.0）：双重校验 `finish_reason == "length"` 或 `not text.endswith("</core_change>")` → 触发降级，写入 `_assemble_status=1` 待补全，触发 L1TruncatedException。
+   - `parse_v1_markdown_xml` 防御性解析（提取 4 类 Markdown 标题列表 + `<core_change>` 标签内容 + 状态前缀归一化）。
+   - `clean_increment` 容错清洗（输入已由 PDD 解析器完成结构化，跳过旧 OODAParser）。
+   - L0 提取：`core_change` 首句 ≤100 字符（含 `【】` 前缀），`_extract_l0` 调用 `_safe_truncate`。
    - 并行嵌入 L1、L0（失败时置 None）。
    - **话题边界检测**（v4.4.1）：当前轮 L1 向量与上一对话轮 L1 向量计算余弦相似度，低于 `TOPIC_BOUNDARY_DISTANCE`（默认 0.50）→ 递增 `topic_id`，通过 `store.upsert_turn_plan_topic()` 持久化。
    - `SQLiteStore.write_turn` 持久化。
    - `AssemblyCache.add_turn` 更新内存缓存，异步触发快照重建。
 4. **工具轮处理**：检测本轮消息中的工具调用 → `_extract_tool_groups` 分组 → `ToolSummarizer.summarize_group` 生成 L1/L0 → 存储到 `turn_cache`（`turn_type='tool'`）→ 更新 `AssemblyCache` 工具轮字典。
-5. **预选工具轮**：以对话 L1 的 `core_change` 为 Query，在工具轮 BM25 索引中检索 Top-K，标记为预选（`_pre_upgraded_tool_turns`），供下一轮 A-stage 使用。
-6. 异常时写入"无有效增量"降级记录（`_assemble_status=1`），更新缓存。
-7. 无论成功或失败，均触发 L-stage 补全线程。
+5. **异常处理**：截断检测失败或 LLM 异常时写入降级记录（`core_change: "本轮无新内容"`, `_assemble_status=1`），更新缓存，触发 L-stage 补全。
+6. 无论成功或失败，均触发 L-stage 补全线程。
 
 ### 4.2 工具组提取
 
@@ -249,17 +262,160 @@ turn_plan(session_id, turn_index, turn_type, tool_sub_index,
 
 **search_files 目录分组**：`_summarize_search_files()` 对大量命中（total_count > 3）的文件路径用 `Counter` 按父目录名聚合，取前 4 组。替代罗列前 3 个文件名，LLM 直接看到匹配分布。输出示例：`search_files: 66 matches [ca:30, tests:25, docs:11]`。
 
-### 4.4 预选工具轮
+### 4.4 L1 PDD 设计（v4.7.0）
 
-`_pre_upgrade_tools` 以对话 L1 的 `core_change` 为 Query，在工具轮 BM25 索引中检索 Top-K（`CA_TOOL_PRE_UPGRADE_COUNT`，默认 3），标记为预选。
+#### 4.4.1 设计哲学：PDD（Prompt-Driven Development）
 
-### 4.5 LLM 失败标记
+PDD 核心原则：**模型负责语义理解与结构化输出，Python 负责防御性解析与边界校验**。
 
-当 LLM 返回的文本以 `"核心摘要：无有效增量"` 开头且包含降级特征时，`_assemble_status` 置为 1（待补全）；否则为 0。
+```
+LLM (prompts.py)                    Python (post_process.py)
+┌─────────────────────┐             ┌────────────────────────────┐
+│ ### 现象与问题      │  ────────→  │ parse_v1_markdown_xml():  │
+│ - CPU 使用率 90%   │             │   1. _safe_truncate 截断  │
+│ ### 决策与方案      │             │   2. 提取 <core_change>   │
+│ - 扩容              │             │   3. 提取 4 类 Markdown   │
+│ <core_change>       │             │   4. 状态归一化            │
+│ 【已实施】扩容完成  │             │   5. 返回 (l1_dict, l0,   │
+│ </core_change>      │             │      core_state)          │
+└─────────────────────┘             └────────────────────────────┘
+                                           ↓
+                                    clean_increment()
+                                           ↓
+                                    DB (5类英key JSON)
+```
 
-### 4.6 LLM 参数注入
+#### 4.4.2 parse_v1_markdown_xml 解析器
 
-参数三级回退：实例属性 → Config 类属性 → 硬编码默认值。`num_predict` 使用 `Config.LLM_NUM_PREDICT`（默认 24768）。
+**入口**：`ca/post_process.py:parse_v1_markdown_xml`
+
+| 步骤 | 操作 | 说明 |
+|------|------|------|
+| 1 | `_safe_truncate` | 物理截断 LLM 输出至 2000 字符，去除尾随噪音 |
+| 2 | `CORE_CHANGE_PATTERN` 搜索 | 提取 `<core_change>(.*?)</core_change>` 内容 |
+| 3 | 4 类 Markdown 标题解析 | 按顺序查找 `### 现象与问题/背景与约束/决策与方案/后续行动` |
+| 4 | 状态提取 | 调 `parse_core_change_state()` 归一化 `【】` 前缀 |
+| 5 | L0 截取 | `core_change` 首句 ≤100 字符 |
+| 6 | 返回 | `(l1_dict, l0_text, core_state)` |
+
+**`_safe_truncate` 边界规则**：
+
+| 条件 | 行为 |
+|------|------|
+| `text` 为空 | 返回 `""` |
+| `max_len ≤ 0` | 返回 `""` |
+| `len(text) ≤ max_len` | 原样返回 |
+| 截断点在 CJK 字符中间 | 回退至最近完整字符边界 |
+| 截断点在标点/空白处 | 在句末截断 |
+
+#### 4.4.3 截断检测机制（v4.7.0 下沉至 _run_c_stage）
+
+v4.7.0 将截断检测从 `_call_llm_for_l1` 内部移至 `_run_c_stage` 调用层，确保 mock 路径也可覆盖：
+
+```python
+if finish_reason == "length" or not response_text.strip().endswith("</core_change>"):
+    # 触发降级：_assemble_status=1，等待 L-stage 补全
+```
+
+双重校验：
+- `finish_reason == 'length'` → LLM 自身标记截断
+- `not text.endswith('</core_change>')` → LLM 未完成 XML 闭合 → 推理截断
+
+任一触发 → 写入 `_assemble_status=1` 待补全记录 → L-stage 异步重试（最多 3 次）。
+
+**`L1TruncatedException`**：携带 `response_text` 供降级代码读取部分输出。
+
+### 4.5 L1 状态感知链路（v4.7.1）
+
+#### 4.5.1 设计目标
+
+对抗小模型"完成时态幻觉"：LLM 倾向于将所有变更写为"已实施"，即使在只做方案讨论的场景。
+
+**方案**：Prompt 约束 LLM 输出 `【】` 状态标签，代码做归一化修正。
+
+#### 4.5.2 数据流
+
+```
+LLM 输出: 【已完成】扩容完成
+    │
+    ▼
+STATE_PREFIX_REGEX 提取 "已完成"
+    │
+    ▼
+_normalize_state("已完成") → ("【已实施】", ItemState.DONE)
+    │
+    ▼
+管理动作降级检查 (MANAGEMENT_ACTION_KEYWORDS)
+  body_flat = "扩容完成"
+  不含管理动作 → 保留 DONE
+    │
+    ▼
+final_text = "【已实施】 扩容完成"
+l1_dict["core_change"] = final_text
+    │
+    ▼
+clean_increment() → DB
+cleaned["_state"] = "done"  # 额外注入，当前零消费
+```
+
+#### 4.5.3 关键组件
+
+| 组件 | 职责 | 位置 |
+|------|------|------|
+| `ItemState` 枚举 | `DONE`/`PLANNED`/`DISCUSSING`/`UNKNOWN` | `post_process.py:17` |
+| `STATE_PREFIX_REGEX` | 提取 `【内容】` 前缀，模块级 fail-fast assert | `post_process.py:74-80` |
+| `_normalize_state()` | 别名归一化：已完成→已实施, TBD→探讨 | `post_process.py:91` |
+| `parse_core_change_state()` | 状态提取 + 管理动作降级 | `post_process.py:101` |
+| `MANAGEMENT_ACTION_KEYWORDS` | 管理动作关键词列表（创建 jira/拉会等） | `post_process.py:83` |
+| `format_previous_summary_for_prompt()` | 历史摘要 → 新 prompt 格式适配器 | `store.py:673` |
+
+**归一化映射**：
+
+| LLM 输出前缀 | 归一化后 | `ItemState` |
+|-------------|---------|-------------|
+| `已实施` / `已完成` / `已修复` / `已接入` / `done` | `【已实施】` | `DONE` |
+| 含管理动作关键词 | `【计划】`（降级） | `PLANNED` |
+| `探讨` / `讨论` / `评估` / `考虑` / `tbd` | `【探讨】` | `DISCUSSING` |
+| 其他 / 缺失 | `【计划】`（兜底） | `PLANNED` |
+
+#### 4.5.4 format_previous_summary_for_prompt 适配器
+
+将 DB 中历史 `l1_text` 转换为新 prompt 所需的 Markdown 格式：
+
+| 输入 | 转换 | 输出 |
+|------|------|------|
+| `None` / `"无"` | → | `"无"` |
+| JSON（旧 5 类英 key） | `_json_to_v1_markdown()` | 4 类 Markdown 文本 |
+| 纯文本 | 原样返回 | 原文本 |
+
+`_json_to_v1_markdown` 将旧 JSON 反转换为 `<core_change>` + 4 类 Markdown 格式，保证新旧数据在 prompt 中格式一致。
+
+#### 4.5.5 设计权衡
+
+- **`_state` 字段被写入但从不消费** — 作为结构化预留，当前 A-stage/L-stage/检索均不读此字段。
+- **`_infer_legacy_state()` 是死代码** — `store.py` 中定义但无调用链。
+- **`_normalize_state` 仅对提取出的前缀文本操作** — 不扫描整句正文，防止误匹配。
+
+### 4.6 C‑stage 降级标记
+
+降级标记 `_assemble_status` 由以下条件触发（v4.7.0 更新）：
+- **截断检测失败**：`finish_reason == "length"` 或 `not text.endswith("</core_change>")` → status=1
+- **LLM 异常**：所有重试均失败，返回 `("", "error")` → status=1
+- **C‑stage 内部异常**：`try/except` 捕获 → status=1
+- **正常生成**：以上均不满足 → status=0
+
+### 4.7 LLM 参数注入
+
+L1 摘要生成使用独立参数集（v4.7.0 从 L2 参数解耦）：
+
+| 参数 | 环境变量 | 默认值 | 说明 |
+|------|---------|--------|------|
+| `temperature` | `CA_L1_TEMPERATURE` | 0.3 | 高确定性，限制模型创造性 |
+| `num_predict` | `CA_L1_MAX_TOKENS` | 800 | L1 输出上限（v4.5.x 共用 L2 的 24768，v4.7.0 独立） |
+| 模型 | `CA_LLM_MODEL` | `qwen3-4b-instruct` | 与 Embedding 模型独立 |
+| 端点 | `CA_LLM_ENDPOINT` | `http://localhost:11440` | 与 Embedding 端点独立 |
+
+参数三级回退：实例属性 → Config 类属性 → 硬编码默认值。
 
 ---
 
@@ -297,7 +453,7 @@ A‑stage 由 `ContextAssembler.assemble` 实现，包含完整的阶段统计�
 | 维度 | 对话轮 | 工具轮 |
 |------|--------|--------|
 | 尾区保护 | `_compute_tail_start`：反向累计**仅对话消息**（跳过 `role=tool`），10K tokens（`//2` 估算后 ≈ 20K chars） | `TOOL_TAIL_TURN_COUNT=2`：最近 N 个**对话轮**的工具原文保留 |
-| 升级策略 | 检索升级（Retriever.retrieve）→ L1 JSON 摘要；未升级→ L0 一行 | 预升级（`_pre_upgrade_tools`）→ L1 JSON 摘要；检索升级→ L1/L0 |
+| 升级策略 | 检索升级（Retriever.retrieve）→ L1 JSON 摘要；未升级→ L0 一行 | topic_boost + 检索升级→ L1；未升级→ L0 |
 | Middle | → L0 一行（或检索升级→L1） | → L0 一行（与对话 Middle 一致） |
 
 **工具尾区按对话轮判定而非消息索引**：工具是否在尾区取决于其所属对话轮是否在最后 N 轮，与工具组在消息列表中的物理位置无关。
@@ -308,7 +464,7 @@ A‑stage 由 `ContextAssembler.assemble` 实现，包含完整的阶段统计�
 
 - **Tail**：`_compute_tail_start` 从尾部反向累计**仅对话消息**的 token，达到 `PROTECT_TAIL_TOKENS`（10000）时停止。Tail 中的对话轮保留原文（L2）。
 - **Middle**：Tail 之前的对话轮。默认降级为 L0 一行摘要；若被检索升级为 L1，则展为 L1 JSON 摘要。
-- **工具轮 Head**：C‑stage 预选产生的 `_pre_upgraded_tool_turns` 集合，不在 Middle 中。
+- **工具轮 Head**：由 topic_boost 或检索升级的工具轮集合，不在 Middle 中。
 - **工具轮 Tail**：最后 `TOOL_TAIL_TURN_COUNT` 个对话轮的工具原文保护集。
 
 ### 5.4 检索与拣选
@@ -320,7 +476,7 @@ A‑stage 由 `ContextAssembler.assemble` 实现，包含完整的阶段统计�
 **预算闸门**（`_available_budget`）精确计算：
 
 1. **系统消息 Token**：累加所有 `role: system` 消息。
-2. **工具预升级 Token**：C‑stage 预选工具轮中的工具组（`tool_head`），计原文 token。
+2. **工具预升级 Token**：由 topic_boost 或检索升级的工具组（`tool_head`），计原文 token。
 3. **Tail Token**：对话消息 >= `tail_start` 的 + 工具组所属对话轮在 `tool_tail_turns` 中的。
 4. **公式**：`budget = context_length × 0.95 - system_tokens - head_tokens - tail_tokens - system_overhead`。≤0 时跳过检索。
    > 注：`head_tokens` 名称保留但仅用于工具预升级，对话轮无自动头区。
@@ -445,7 +601,7 @@ deepseek-v4-flash: 1M × 0.50 = **500K tokens**。
 
 1. 查询 `_assemble_status = 1` 的记录。
 2. 使用 `l2_text` 作为输入（不依赖外部消息快照）。
-3. 对话轮：调用 `_call_llm_for_l1` 重新生成。
+3. 对话轮：调用 `_call_llm_for_l1` 重新生成，后续经 `parse_v1_markdown_xml` 解析（与 C-stage 路径相同）。
 4. 工具轮：调用规则引擎重新生成。
 5. 成功：`_assemble_status` → 0，写入 DB + 缓存。
 6. 失败：递增 `backfill_attempts`；达到 3 次 → `_assemble_status = 2`，永久跳过。
@@ -505,12 +661,19 @@ deepseek-v4-flash: 1M × 0.50 = **500K tokens**。
 | `CA_PROTECT_TAIL_TOKENS` | 10000 | 对话尾区 token 预算（`//2` 后 ≈ 20K chars） |
 | `CA_TOOL_TAIL_TURN_COUNT` | 2 | 工具尾区保护最近 N 个对话轮 |
 | `CA_COMPRESSION_THRESHOLD` | 0.50 | 压缩警戒比值，乘 model_window 得预算上限 |
-| `CA_TOOL_PRE_UPGRADE_COUNT` | 3 | C‑stage 预选工具轮数量 |
+| `CA_L1_TEMPERATURE` | 0.3 | L1 摘要生成温度（v4.7.0，高确定性） |
+| `CA_L1_MAX_TOKENS` | 800 | L1 摘要最大 Token（v4.7.0，与 L2 解耦） |
+| `CA_TOOL_PRE_UPGRADE_COUNT` | 3 | C‑stage 预选工具轮数量（v4.6.0 已移除功能） |
 | `CA_TOOL_MAX_UPGRADE_K` | 3 | A‑stage 最大升级工具轮数 |
-| `CA_TOOL_PRE_UPGRADE_WINDOW` | 50 | 预选检索窗口（最近 N 轮） |
+| `CA_TOOL_PRE_UPGRADE_WINDOW` | 50 | 预选检索窗口（最近 N 轮，v4.6.0 已移除） |
+| `CA_TOPIC_JACCARD_ENTRY` | 0.03 | 话题分割首次合并 Jaccard 阈值（v4.6.0） |
+| `CA_TOPIC_JACCARD_CHAIN` | 0.04 | 话题分割链内扩展 Jaccard 阈值（v4.6.0） |
+| `CA_TOPIC_RADIUS_WEIGHT` | 2.0 | 半径公式中最近邻距离的权重系数（v4.6.0） |
+| `CA_TOPIC_MAX_UPGRADE` | 10 | 检索升级最大 topic 数（v4.6.0） |
+| `CA_TOPIC_BG_LEVEL` | L0 | BG 话题固定级别（v4.6.0） |
 | `CA_TOPIC_BOUNDARY_DISTANCE` | 0.50 | 话题边界余弦距离阈值 |
 | `CA_DEDUP_ENABLED` | True | 全指纹去重开关 |
-| `CA_LLM_NUM_PREDICT` | 24768 | LLM 生成 token 上限 |
+| `CA_LLM_NUM_PREDICT` | 24768 | LLM 生成 token 上限（v4.7.0 起仅用于 L2，L1 用 CA_L1_MAX_TOKENS） |
 | `CA_BACKFILL_DIALOGUE_RATE` | 2 | 对话轮补全速率 |
 | `CA_BACKFILL_TOOL_RATE` | 5 | 工具轮补全速率 |
 | `CA_SHUTDOWN_TIMEOUT` | 5 | 资源清理等待超时 |
@@ -548,7 +711,7 @@ deepseek-v4-flash: 1M × 0.50 = **500K tokens**。
 | SQLiteStore     | 锁竞争              | 指数退避重试                      |
 | EmbeddingClient | 超时 / 网络错误     | 清除连接池重试，最终降级 fallback |
 | A‑stage        | 嵌入失败            | 记录错误，降级为纯 BM25 检索      |
-| C‑stage        | LLM 超时 / 解析失败 | 降级写入"无有效增量"（status=1） |
+| C‑stage        | LLM 超时 / 解析失败 / 截断 | 降级写入"本轮无新内容"（status=1）；截断检测：双重校验 finish_reason+XML闭合 |
 | 工具 JSON 解析  | 解析失败            | 降级摘要 `result_summary="无法解析"`，不重试 |
 | L‑stage        | 补全失败 ≥3 次     | `_assemble_status=2`，WARNING，永久跳过 |
 | AssemblyCache   | 重建异常            | 进入冷却期，延迟重试              |
@@ -651,7 +814,7 @@ plan 按 `(turn_index, type_priority, tool_sub_index)` 排序，保证对话轮�
 | **后台审查轮规则跳过 LLM**               | `write_origin == "background_review"` 时规则生成 L1："系统后台审查"，避免浪费 LLM 调用                                                                                     |
 | 工具组粒度                                | 一个 `tool_calls` 消息及其后续所有 `tool` 响应视为一个工具轮，C/A 阶段索引逻辑完全一致                                                                                     |
 | 子索引从 1 开始                           | 对话轮 `tool_sub_index=0`，工具轮从 1 递增，清晰区分                                                                                                                       |
-| 兜底预选工具轮 L1                          | 即使 A‑stage 预算极度紧张，预选工具轮保证至少以 L1 形式保留                                                                                                                |
+| 兜底工具轮 L1（v4.6.0 移除预选机制）        | 即使 A‑stage 预算极度紧张，工具轮保证至少以 L1 形式保留（v4.6.0 后由 topic_boost 接管）                                                                                     |
 | 工具组匹配使用索引而非对象引用            | 消息列表可能被重组，对象引用不可靠；使用 `start_index` 确保匹配鲁棒性                                                                                                      |
 | L‑stage 无条件触发                       | 线程自行判断是否有待处理记录，避免遗漏，无额外开销                                                                                                                         |
 | 去重 Fail‑Safe 策略                      | 非法配置值时强制启用去重，遵循"故障导向安全"，宁可误杀重复，不可撑爆窗口                                                                                                   |
@@ -660,6 +823,78 @@ plan 按 `(turn_index, type_priority, tool_sub_index)` 排序，保证对话轮�
 | **turn_plan 驱动组装**                   | v4.5.0：turn_plan 从调试记录升级为 A-stage 消息组装的直接输入。`_compute_turn_plan` 统一决策，`_build_messages_from_plan` 按 plan 读取文本                                                                                                                     |
 | **原位去重标记**                          | `(同[~/N])` 标记替换静默删除——LLM 在时间线上看到"这事又在 N 轮发生了"，而非被删项凭空消失。标注在删位而非幸存者上，幸存者内容纯净                                                                                          |
 | **Token 水位查询接口**                   | `debug_token_budget()` 纯只读查询当前 token 使用量 vs 预算上限。`store.get_max_token_offset()` + `Config.CONTEXT_LENGTH` 计算，零副作用。|
+| **PDD 范式**                               | LLM 负责 Markdown+XML 语义输出，Python 负责防御性解析、截断检测、格式清洗。模型做对是唯一正确路径，代码做"不被模型拖累"的隔离层。|
+| **L1 截断检测下沉至调用层**               | 从 `_call_llm_for_l1` 内部移至 `_run_c_stage`，确保 mock 路径也可覆盖截断逻辑。双重校验：finish_reason + XML 闭合。|
+| **状态前缀归一化**                          | LLM 输出 `【已完成】` 等别名 → 代码归一化为 `【已实施】`；缺失前缀时兜底 `【计划】`；管理动作降级（分配 Jira ≠ 实施）。|
+| **话题分割拣选**（v4.6.0）                | 从 per-turn 拣选升级为 per-topic。Jaccard 链合并分割话题，半径 r 定级（内球→L2, 外球→L1, BM25→L1, 其余→L0），TopicRetriever 双路检索。|
+
+---
+
+## 18. 话题拣选重构（v4.6.0）
+
+### 18.1 概述
+
+v4.6.0 将 A-stage 拣选从 per-turn 升级为 per-topic，核心思想：**同一话题的连续轮次应当整体定级**。
+移除 C-stage BM25 预选机制（`_pre_upgrade_tools`），新增话题分割与 TopicRetriever。
+
+### 18.2 话题分割
+
+```
+一轮对话 → 5 字段 JSON → 计算 3 步 Jaccard
+  a. R1: BG 检测（l0_text == "无"）
+  b. R2: 与上一轮 Jaccard ≥ 阈值 → 合并到同话题
+  c. Entry: 新轮次启动新话题
+```
+
+| 步骤 | 规则 | 阈值 |
+|------|------|------|
+| R1: BG 检测 | `l0_text == "无"` 或含 BG 关键词 | 直接标记为 BG |
+| R2: Entry 合并 | 与上一轮 Jaccard ≥ `JACCARD_ENTRY` | 0.03 |
+| R2: Chain 扩展 | 链内连续轮次 Jaccard ≥ `JACCARD_CHAIN` | 0.04 |
+
+### 18.3 三级定级（半径 r）
+
+**核心公式**：`r = min(max_intra, nearest / WEIGHT)`
+
+| 级别 | 条件 | 呈现 |
+|------|------|------|
+| **内球（L2）** | 形心距离 `d ≤ r/2` | 原始 L2 文本 |
+| **外球（L1）** | 形心距离 `r/2 < d ≤ r` | L1 摘要 |
+| **BM25 捞回** | BM25 得分 > 0 | L1 摘要 |
+| **其余** | 以上均不满足 | L0 单行 |
+| **BG 话题** | 固定级别 | `CA_TOPIC_BG_LEVEL`（默认 L0） |
+
+### 18.4 TopicRetriever
+
+检索对象从 per-turn 升级为 per-topic：
+
+```
+Session
+  ├─ Topic 1 (turn 1-3): centroid = avg(L1_emb), agg_text = concat(L1)
+  ├─ Topic 2 (turn 4-5): ...
+  └─ ...
+
+TopicRetriever
+  ├─ BM25(topic_agg_text) → scored topics
+  ├─ vector(topic_centroid, query_embedding) → cosine scored topics
+  └─ RRF merge → retrieved_topics
+```
+
+**query_embedding 列**：v4.6.0 新增 `turn_cache.query_embedding`，存储用户消息的嵌入向量，供后续回放分析和搜索体验改进。
+
+### 18.5 工具轮 topic_boost
+
+非 tail 非 retrieved 工具轮默认 L0，但当其**父对话 topic 整体定级为 L2 时**，自动升 L1：
+
+```python
+if parent_topic.target_level == "L2" and not is_tail and not is_retrieved:
+    target_level = "L1"  # topic_boost
+```
+
+### 18.6 移除的功能
+
+- **`_pre_upgrade_tools`**：C-stage 不再用 BM25 预选工具轮
+- **`CA_TOOL_PRE_UPGRADE_COUNT` / `CA_TOOL_PRE_UPGRADE_WINDOW`**：配置项保留但已无实际效果
 
 ---
 
@@ -690,9 +925,9 @@ plan 按 `(turn_index, type_priority, tool_sub_index)` 排序，保证对话轮�
 | REQ-FUNC-ASTAGE-007 | 硬截断兜底                         | 5.5         | `_hard_truncation`                                |
 | REQ-FUNC-ASTAGE-008 | 工具组完整性保护                   | 5.5         | `_hard_truncation` 分组逻辑                       |
 | REQ-FUNC-ASTAGE-009 | 截断提示消息                       | 5.5         | `_hard_truncation` 插入提示                       |
-| REQ-TOOL-P001       | C‑stage 预选                      | 4.4         | `_pre_upgrade_tools`                              |
+| REQ-TOOL-P001       | C‑stage 预选（v4.6.0 移除）              | 4.4, 18.6   | `_pre_upgrade_tools`（已移除）                     |
 | REQ-TOOL-P002       | A‑stage Tail 保护（工具轮）       | 5.2, 5.5    | `_build_messages_from_plan` 中 tool_tail_turns 判断 |
-| REQ-TOOL-P003       | 兜底保障                           | 5.5         | 预选工具轮强制 L1                                   |
+| REQ-TOOL-P003       | 兜底保障                           | 5.5         | 工具轮兜底 L1（v4.6.0 由 topic_boost 接管）        |
 | REQ-TOOL-P004       | 确定性降级                         | 5.4         | `_select_upgrades` 排序                           |
 | REQ-TOOL-P005       | 同类型内确定性排序                 | 5.4         | 按 RRF 得分排序                                     |
 | REQ-TOOL-P006       | 升级上限                           | 5.4         | `CA_TOOL_MAX_UPGRADE_K` 控制                      |
@@ -704,6 +939,12 @@ plan 按 `(turn_index, type_priority, tool_sub_index)` 排序，保证对话轮�
 | REQ-FUNC-DEDUP-006  | 调试日志                           | 6           | DEBUG 输出                                          |
 | REQ-L-STAGE-001~007 | L‑stage 补全各项需求              | 7.1~7.3     | `BackfillThread` 及触发逻辑                       |
 | REQ-TOOL-CFG01~10   | 配置项                             | 10          | `config.py`                                       |
+| REQ-L1-SUMM-001     | PDD L1 摘要生成（Markdown+XML）    | 4.4.1-4.4.2 | `parse_v1_markdown_xml` + `prompts.py` L1_GENERATION_PROMPT
+| REQ-L1-SUMM-002     | 截断检测（双重校验）              | 4.4.3       | `_run_c_stage` finish_reason + </core_change> 校验
+| REQ-L1-SUMM-003     | 状态前缀归一化                     | 4.5         | `parse_core_change_state` + `_normalize_state`
+| REQ-TOPIC-001       | 话题分割（Jaccard 链合并）         | 18.2        | `_compute_topic_groups`（5 字段 JSON）
+| REQ-TOPIC-002       | 三级定级（半径 r）                | 18.3        | `_grade_topics_by_radius`
+| REQ-TOPIC-003       | TopicRetriever 双路检索             | 18.4        | `TopicRetriever`（BM25 + 向量形心）
 | REQ-PERF-001~007    | 性能需求                           | 5.1, 5.4 等 | 设计保证，需基准测试                                |
 | REQ-REL-001~005     | 可靠性需求                         | 12, 13, 14  | 相应模块实现                                        |
 | REQ-OBS-001~002     | 可观测性需求                       | 11, 16      | `AssembleStats`, `health.py`, `turn_plan`        |
@@ -721,8 +962,8 @@ plan 按 `(turn_index, type_priority, tool_sub_index)` 排序，保证对话轮�
 | `ca/retrieval.py`                   | 双路检索（对话+工具）+ RRF 融合      | REQ-FUNC-ASTAGE-002, TOOL-P005                                                                                          |
 | `ca/embedding.py`                   | 嵌入服务与 LRU 缓存                  | REQ-PERF-003                                                                                                            |
 | `ca/ooda_parser.py`                 | OODA 解析与语义去重                  | REQ-FUNC-CSTAGE-002 (辅助)                                                                                              |
-| `ca/post_process.py`                | JSON 容错与清洗                      | REQ-FUNC-CSTAGE-002 (辅助)                                                                                              |
-| `ca/prompts.py`                     | L1 生成提示词                        | REQ-FUNC-CSTAGE-002                                                                                                     |
+| `ca/post_process.py`                | L1 解析(parse_v1_markdown_xml)+状态归一化+JSON容错 | REQ-FUNC-CSTAGE-002, L1-SUMM-001~003                                                                                              |
+| `ca/prompts.py`                     | L1 Prompt（研发对话意图分析器人设+4类Markdown+XML） | REQ-FUNC-CSTAGE-002, L1-SUMM-001                                                                                                     |
 | `ca/stats.py`                       | 阶段统计（`AssembleStats`）        | REQ-OBS-002                                                                                                             |
 | `ca/health.py`                      | 健康检查与 Prometheus                | REQ-OBS-001                                                                                                             |
 | `ca/tool_summarizer.py`             | 工具轮摘要规则引擎                   | REQ-TOOL-C002~C005, C008                                                                                                |
