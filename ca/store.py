@@ -732,7 +732,7 @@ class SQLiteStore:
             logger.warning("increment_backfill_attempts called on readonly store, skipping")
             return
         # v5: 使用 (session_id, turn_index, role, seq_index) 定位
-        role = 'user' if turn_type == 'dialogue' else 'tool'
+        role = 'user' if turn_type == 'dialogue' else ('assistant' if turn_type == 'tool_group' else 'tool')
         self.conn.execute(
             """UPDATE turn_cache SET backfill_attempts = backfill_attempts + 1
                WHERE session_id=? AND turn_index=? AND role=? AND seq_index=?""",
@@ -762,7 +762,12 @@ class SQLiteStore:
                 return (None, "", "")
             return (row[0], row[1] or "", row[2] or "")
         # v5: 使用 role 和 seq_index 定位
-        role = 'user' if turn_type == 'dialogue' else 'tool'
+        if turn_type == 'dialogue':
+            role = 'user'
+        elif turn_type == 'tool_group':
+            role = 'assistant'
+        else:
+            role = 'tool'
         cur = self.conn.execute(
             """SELECT content, l1_text, l0_text
                FROM turn_cache

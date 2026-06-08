@@ -183,6 +183,8 @@ class TurnPlanEntry:
     turn_index: int
     turn_type: str = "dialogue"
     tool_sub_index: int = 0
+    api_call_count: int = 0    # PR3: v5 主键扩展
+    seq_index: int = 0         # PR3: v5 主键扩展
 
     target_level: str = "L0"           # L2 | L1 | L0
     decision_reason: str = "middle"    # head | tail | retrieved | pre_upgraded | tool_head | middle
@@ -202,6 +204,8 @@ class TurnPlanEntry:
             "turn_index": self.turn_index,
             "turn_type": self.turn_type,
             "tool_sub_index": self.tool_sub_index,
+            "api_call_count": self.api_call_count,
+            "seq_index": self.seq_index,
             "target_level": self.target_level,
             "decision_reason": self.decision_reason,
             "l2_tokens": self.l2_tokens,
@@ -712,32 +716,105 @@ class ContextAssembler:
 
     # ---------- A‑stage ----------
     def _rebuild_messages_from_cache(self) -> List[Dict]:
-        """从 l2_text 重建消息列表。
+        """从 turn_cache 重建消息列表。
 
-        每条 record 的 l2_text 是该轮独立的消息 JSON 数组：
-        - dialogue 轮: [{"role": "user", ...}, {"role": "assistant", ...}]
-        - tool 轮:     [{"role": "assistant", "tool_calls": [...]}, {"role": "tool", ...}]
+        版本路由：
+        - v5: 从新列（role/content/tool_calls_json/tool_call_id/finish_reason/...）重建
+        - v4: 从 l2_text JSON 重建（向后兼容）
 
-        按 turn_index + turn_type 顺序拼接。
-
+        按 turn_index/role/tool_calls 顺序拼接。
         """
         messages: List[Dict] = []
         for rec in self.store.read_session(self._session_id):
-            l2 = rec.get("l2_text")
-            if not l2:
-                continue
             turn_index = rec.get("turn_index", 0)
-            try:
-                msgs = json.loads(l2)
-                if isinstance(msgs, list):
-                    for m in msgs:
-                        m["_turn_index"] = turn_index
-                    messages.extend(msgs)
+
+            # v5 path: 检查是否有 api_call_count（v5 独占字段）
+            if "api_call_count" in rec:
+                api_count = rec.get("api_call_count", 0)
+                seq = rec.get("seq_index", 0)
+                turn_type = rec.get("turn_type", "dialogue")
+                content = rec.get("content") or ""
+
+                if turn_type == "tool":
+                    # 工具行 — 兼容旧 l2_text (JSON 数组在 content 中)
+                    if content.startswith("["):
+                        try:
+                            expanded = json.loads(content)
+                            if isinstance(expanded, list):
+                                for m in expanded:
+                                    m["_turn_index"] = turn_index
+                                messages.extend(expanded)
+                                continue
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    msg = {"role": "tool", "content": content, "_turn_index": turn_index}
+                    tc_id = rec.get("tool_call_id")
+                    if tc_id:
+                        msg["tool_call_id"] = tc_id
+                    tn = rec.get("tool_name")
+                    if tn:
+                        msg["name"] = tn
+                    messages.append(msg)
+                elif api_count == 0 and seq == 0:
+                    # user 行 — 兼容旧 l2_text (JSON 数组)
+                    if content and content.startswith("["):
+                        try:
+                            expanded = json.loads(content)
+                            if isinstance(expanded, list):
+                                for m in expanded:
+                                    m["_turn_index"] = turn_index
+                                messages.extend(expanded)
+                                continue
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    messages.append({"role": "user", "content": content, "_turn_index": turn_index})
+                elif api_count == 999999 and seq == 0:
+                    # final assistant 行
+                    msg = {"role": "assistant", "content": content, "_turn_index": turn_index}
+                    finish = rec.get("finish_reason") or "stop"
+                    msg["finish_reason"] = finish
+                    messages.append(msg)
+                elif api_count >= 1 and seq == 0:
+                    # assistant{tc} 行（工具组）
+                    tc_json = rec.get("tool_calls_json")
+                    if tc_json:
+                        try:
+                            tc_parsed = json.loads(tc_json)
+                        except (json.JSONDecodeError, TypeError):
+                            tc_parsed = []
+                        msg = {"role": "assistant", "content": content,
+                               "tool_calls": tc_parsed, "_turn_index": turn_index}
+                        finish = rec.get("finish_reason") or "tool_calls"
+                        msg["finish_reason"] = finish
+                        messages.append(msg)
+                    else:
+                        messages.append({"role": "assistant", "content": content, "_turn_index": turn_index})
                 else:
-                    raise ValueError("l2_text is not a list")
-            except (json.JSONDecodeError, ValueError):
-                messages.append({"role": "user", "content": l2, "_turn_index": turn_index})
+                    # 其他行（异常时序），fallback 到 l2_text
+                    l2 = rec.get("l2_text") or rec.get("content")
+                    if l2:
+                        self._extend_l2_messages(messages, l2, turn_index)
+            else:
+                # v4 path: 从 l2_text JSON 重建
+                l2 = rec.get("l2_text")
+                if not l2:
+                    continue
+                self._extend_l2_messages(messages, l2, turn_index)
         return messages
+
+    @staticmethod
+    def _extend_l2_messages(messages: List[Dict], l2_text: str, turn_index: int) -> None:
+        """将 l2_text (JSON 消息数组) 展开到 messages，标记 _turn_index。"""
+        try:
+            msgs = json.loads(l2_text)
+            if isinstance(msgs, list):
+                for m in msgs:
+                    m["_turn_index"] = turn_index
+                messages.extend(msgs)
+            else:
+                messages.append({"role": "user", "content": l2_text, "_turn_index": turn_index})
+        except (json.JSONDecodeError, ValueError):
+            messages.append({"role": "user", "content": l2_text, "_turn_index": turn_index})
 
     def _extract_tool_group(self, messages, start):
         group = [messages[start]]
@@ -808,6 +885,7 @@ class ContextAssembler:
         with stats.time_phase("get_snapshot"):
             l1_texts, l0_texts = self.cache.get_snapshot_data()
             tool_l1_texts, tool_l0_texts = self.cache.get_tool_snapshot_data()
+            tool_group_l1_texts, tool_group_l0_texts = self.cache.get_tool_group_snapshot_data()
 
         idx_to_turn = {i: msg.get("_turn_index", i) for i, msg in enumerate(messages)}
         tool_key_map = self._build_tool_key_map(messages, idx_to_turn)
@@ -866,6 +944,7 @@ class ContextAssembler:
         with stats.time_phase("plan"):
             plan = self._compute_turn_plan_v2(
                 messages, l1_texts, l0_texts, tool_l1_texts, tool_l0_texts,
+                tool_group_l1_texts, tool_group_l0_texts,
                 tail_start, tool_tail_turns, idx_to_turn, tool_key_map,
                 budget, turn_to_topic, topic_grades, topic_data, retrieved_topics, selected_tools
             )
@@ -1251,10 +1330,11 @@ class ContextAssembler:
 
     def _compute_turn_plan_v2(self, messages, l1_texts, l0_texts,
                                tool_l1_texts, tool_l0_texts,
+                               tool_group_l1_texts, tool_group_l0_texts,
                                tail_start, tool_tail_turns, idx_to_turn, tool_key_map,
                                budget, turn_to_topic, topic_grades, topic_data,
                                retrieved_topics, selected_tools) -> List[TurnPlanEntry]:
-        """话题级拣选决策 + 工具轮绑定。
+        """话题级拣选决策 + 工具轮绑定 + 工具组三级注入。
 
         对话轮决策规则：
           tail           → L2 (tail)
@@ -1317,6 +1397,35 @@ class ContextAssembler:
                 entry.decision_reason = "topic_degraded"
             entries.append(entry)
 
+        # ── 工具组（assistant{tc} 行）──
+        for turn_idx in sorted(tool_group_l1_texts.keys()):
+            l1 = tool_group_l1_texts.get(turn_idx) or ""
+            l0 = tool_group_l0_texts.get(turn_idx) or ""
+            d_l1 = l1_texts.get(turn_idx, "")
+
+            sum_tk = self._token_estimate(l1) or self._token_estimate(l0 or "")
+            l2_tk = sum(self._token_estimate(m.get("content", ""))
+                       for m in messages if m.get("_turn_index", -1) == turn_idx)
+
+            entry = TurnPlanEntry(turn_index=turn_idx, turn_type="tool_group",
+                                  api_call_count=1, seq_index=0,
+                                  l2_tokens=l2_tk, summary_tokens=sum_tk,
+                                  tokens_saved=max(0, l2_tk - sum_tk),
+                                  budget_remaining=budget,
+                                  topic_group=turn_to_topic.get(turn_idx))
+
+            if l1:
+                entry.target_level = "L1"
+                entry.decision_reason = "retrieved"
+                entry.rrf_score = 1.0
+            elif l0:
+                entry.target_level = "L0"
+                entry.decision_reason = "retrieved"
+            else:
+                entry.target_level = "L2"
+                entry.decision_reason = "retrieved"
+            entries.append(entry)
+
         # ── 工具轮 ──
         for key, l1 in sorted(tool_l1_texts.items(), key=lambda x: (x[0][0], x[0][1])):
             l0 = tool_l0_texts.get(key) or ""
@@ -1340,6 +1449,7 @@ class ContextAssembler:
 
             entry = TurnPlanEntry(turn_index=turn_idx, turn_type="tool",
                                   tool_sub_index=key[1],
+                                  api_call_count=1, seq_index=key[1],
                                   l2_tokens=l2_tk, summary_tokens=sum_tk,
                                   tokens_saved=max(0, l2_tk - sum_tk),
                                   budget_remaining=budget,
@@ -1419,15 +1529,25 @@ class ContextAssembler:
                 if db_status == 1:  # ASSEMBLE_PENDING_BACKFILL
                     continue
             is_tool = entry.turn_type == "tool"
+            is_tool_group = entry.turn_type == "tool_group"
             prefix = f"[~/{entry.turn_index}"
             if is_tool:
                 prefix += f"/{entry.tool_sub_index}"
+            elif is_tool_group:
+                prefix += "/g"
             else:
                 prefix += "/0"
             prefix += "] "
 
             # 对话轮 L1 → 格式化为可读文本（替代原始 JSON 注入）
             l1_display = self._format_l1_for_display(l1) if entry.turn_type == "dialogue" else l1
+
+            # 工具组：用 _format_group_summary 格式化
+            if is_tool_group and l1:
+                group_display = self._format_group_summary(l1)
+                if group_display:
+                    result.append({"role": "assistant", "content": f"{prefix}{group_display}"})
+                    continue
 
             if entry.target_level == "L2":
                 # 保留原文
@@ -1521,6 +1641,37 @@ class ContextAssembler:
                 lines.append(f"  {joined}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _format_group_summary(group_l1_json: str) -> str:
+        """将工具组 L1 JSON 格式化为可读文本。
+
+        输入：{"group_intent":"查文件","group_result":"aaa；x.py","tool_count":3,"state":"ok"}
+        输出：工具组：查文件→aaa；x.py（3个，ok）
+        """
+        if not group_l1_json or not group_l1_json.strip():
+            return ""
+        try:
+            data = json.loads(group_l1_json)
+        except (json.JSONDecodeError, TypeError):
+            return ""
+        intent = data.get("group_intent", "") or ""
+        result = data.get("group_result", "") or ""
+        count = data.get("tool_count", 0)
+        state = data.get("state", "ok") or ""
+        parts = []
+        if intent:
+            parts.append(intent)
+        if result and (not intent or result != f"调用 {count} 个工具"):
+            parts.append(f"→{result}")
+        if not parts and count == 0:
+            return ""
+        text = "工具组：" + "".join(parts)
+        text += f"（{count}个"
+        if state:
+            text += f"，{state}"
+        text += "）"
+        return text[:200]
+
     def _compute_tail_start(self, messages):
         """从消息尾部反向累计对话消息的 token 数，找到对话 tail 保护区。
 
@@ -1572,8 +1723,8 @@ class ContextAssembler:
             result.extend(grp)
         return result
 
-    # 匹配 [~/N] 或 [~/N/M] 前缀标签（N,M 为正整数）
-    _CA_TAG_RE = re.compile(r'^\[~/\d+(?:/\d+)?\]\s*')
+    # 匹配 [~/N] 或 [~/N/M] 或 [~/N/g] 前缀标签（N,M 为正整数）
+    _CA_TAG_RE = re.compile(r'^\[~/\d+(?:/\d+|/g)?\]\s*')
 
     def _deduplicate_messages(self, messages):
         """全指纹去重，含跨轮摘要标签归一化 + 原位指向标记。
@@ -1581,8 +1732,8 @@ class ContextAssembler:
         对 content 中的 [~/N] / [~/N/M] 前缀标签做剥离后再计算指纹，
         使跨轮相同摘要（同名工具同结果、同 core_change 对话轮等）可命中同一指纹。
         重复项保留**最先**出现的那条（留最先），后续重复在原位替换为
-        指向标记 `(同[~/N/0])` / `(同[~/N/m])`，指向第一次出现的 tag。
-        两位格式统一：对话轮 `[~/N/0]`，工具轮 `[~/N/m]`。
+        指向标记 `(同[~/N/0])` / `(同[~/N/m])` / `(同[~/N/g])`，指向第一次出现的 tag。
+        三位格式统一：对话轮 `[~/N/0]`，工具组 `[~/N/g]`，工具轮 `[~/N/m]`。
         留最先策略：首次出现位置永远不动 → 前缀稳定；
         标记在原位替换不会进一步破坏缓存（重复位置本就要变动）。
         system 消息豁免，始终保留。

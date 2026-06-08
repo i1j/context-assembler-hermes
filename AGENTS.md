@@ -4,7 +4,7 @@
 
 | 项       | 值                                                                        |
 | -------- | ------------------------------------------------------------------------- |
-| 版本     | v5.0-pr2 |
+| 版本     | v5.0-pr3 |
 | plugin.yaml | 声明 v4.5.1（未同步）                |
 | 部署方式 | 自包含独立副本                                                            |
 | 插件路径 | `~/.hermes/profiles/tester/plugins/ca_assembler/`                       |
@@ -151,6 +151,23 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 行为：将工具执行结果填充到对应 buffer 中。Hermes 原始 status(`ok`/`error`/`blocked`/`cancelled`)透传。
 
 ## 变更历史
+
+### v5.0-pr3 — 三级摘要 + 三级注入（R5+R6）+ cache 新主键（2026-06-22）
+
+基于技术方案完整实施 PR3（8 步），实现三级摘要和三级注入。
+
+**关键变更**：
+- **`_rebuild_messages_from_cache` 版本路由**：v5 从新列（role/content/tool_calls_json/tool_call_id）重建消息，v4 从 l2_text JSON 重建。含向后兼容扩展（旧 l2_text JSON 数组在 content 中时自动展开）
+- **`TurnPlanEntry` 扩展**：新增 `api_call_count`/`seq_index` 字段，`as_dict()` 同步输出
+- **`_compute_turn_plan_v2` 三级判定**：新增工具组（`turn_type="tool_group"`）条目，从 cache `tool_group_l1_texts` 读取摘要
+- **`_build_messages_from_plan` 三级注入**：工具组条目注入 `[~/N/g]` 标记，调用 `_format_group_summary()` 格式化
+- **`_format_group_summary()`**：工具组 L1 JSON → 可读文本，格式 `工具组：intent→result（N个，state）`
+- **`_CA_TAG_RE` 更新**：`r'^\[~/\d+(?:/\d+|/g)?\]\s*'` 匹配三类标记
+- **`_deduplicate_messages` 适配**：注释更新三位格式 `[~/N/0]`/`[~/N/g]`/`[~/N/M]`
+- **`AssemblyCache` 工具组缓存**：新增 `tool_group_l1_texts`/`tool_group_l0_texts`，`CacheBuilder.build()` 检测 `tool_calls_json` 非空行关联到工具组
+- **`store.py` 适配**：`read_turn_texts`/`read_assemble_status`/`increment_backfill_attempts` 支持 `turn_type="tool_group"` 映射 role='assistant'
+
+**测试**：新增 `test_pr3_injection.py`（8 测试），覆盖版本路由(3)、三级判定注入(3)、cache 新主键(1)、端到端(1)。**零新增回归**。
 
 ### v5.0-pr2 — Buffer层 + 数据采集重定向（R2+R3+R4）（2026-06-22）
 
@@ -442,7 +459,7 @@ print(water)
 
 ## 测试接口清单
 
-**测试总数**：354 条（活跃 263 条 + legacy 91 条）
+**测试总数**：362 条（活跃 271 条 + legacy 91 条）
 
 ### Fixtures（`tests/conftest.py`）
 
@@ -459,6 +476,7 @@ print(water)
 
 | 文件 | 测试数 | 范围 |
 |------|--------|------|
+| `test_pr3_injection.py` | 8 | 三级摘要+注入：版本路由(3) + 三级判定/注入(3) + cache(1) + e2e(1) |
 | `test_tool_buffer.py` | 15 | Buffer 层：ToolGroupBuffer(2) + _on_api_response(3) + _on_pre_tool_call(2) + _on_post_tool_call(3) + flush(4) + destroy(1) |
 | `test_c.py` | 25 | 对话轮 C‑stage：摘要生成、OODA 解析、状态标记、截断检测（v4.7.0）、DB 写入格式验证、配置参数 |
 | `test_a.py` | 20 | 对话轮 A‑stage：分层、双检索、RRF 融合、预算门控、截断保护、plan‑based 组装 |

@@ -140,6 +140,10 @@ class AssemblyCache:
         self.tool_l0_embeddings: Dict[Tuple[int, int], List[float]] = {}
         self.tool_l1_embeddings: Dict[Tuple[int, int], List[float]] = {}
 
+        # PR3: 工具组摘要缓存 (assistant{tc} 行)
+        self.tool_group_l0_texts: Dict[Tuple[int, int], str] = {}
+        self.tool_group_l1_texts: Dict[Tuple[int, int], str] = {}
+
         self._snapshot: Optional[BM25Snapshot] = None
         self._snapshot_lock = threading.RLock()
         self._dirty = False
@@ -264,6 +268,11 @@ class AssemblyCache:
         with self._lock:
             return dict(self.tool_l1_texts), dict(self.tool_l0_texts)
 
+    def get_tool_group_snapshot_data(self) -> Tuple[Dict[int, str], Dict[int, str]]:
+        """获取工具组摘要数据。key 为 turn_index。"""
+        with self._lock:
+            return dict(self.tool_group_l1_texts), dict(self.tool_group_l0_texts)
+
     def cancel_retry_timer(self):
         with self._retry_lock:
             if self._retry_timer:
@@ -300,12 +309,18 @@ class CacheBuilder:
                             cache.tool_l1_embeddings[key] = rec["l1_embedding"]
                     else:
                         idx = rec["turn_index"]
-                        cache.l0_texts[idx] = rec.get("l0_text", "")
-                        cache.l1_texts[idx] = rec.get("l1_text", "")
-                        if rec.get("l0_embedding"):
-                            cache.l0_embeddings[idx] = rec["l0_embedding"]
-                        if rec.get("l1_embedding"):
-                            cache.l1_embeddings[idx] = rec["l1_embedding"]
+                        # PR3: 检测 assistant{tc} 行（有 tool_calls_json）→ 工具组缓存
+                        tc_json = rec.get("tool_calls_json")
+                        if tc_json:
+                            cache.tool_group_l1_texts[idx] = rec.get("l1_text", "")
+                            cache.tool_group_l0_texts[idx] = rec.get("l0_text", "")
+                        else:
+                            cache.l0_texts[idx] = rec.get("l0_text", "")
+                            cache.l1_texts[idx] = rec.get("l1_text", "")
+                            if rec.get("l0_embedding"):
+                                cache.l0_embeddings[idx] = rec["l0_embedding"]
+                            if rec.get("l1_embedding"):
+                                cache.l1_embeddings[idx] = rec["l1_embedding"]
                 cache._dirty = True
             cache.rebuild_bm25_snapshot()
         except Exception as e:
@@ -319,6 +334,8 @@ class CacheBuilder:
                 cache.tool_l1_texts.clear()
                 cache.tool_l0_embeddings.clear()
                 cache.tool_l1_embeddings.clear()
+                cache.tool_group_l0_texts.clear()
+                cache.tool_group_l1_texts.clear()
                 cache._dirty = True
             cache.rebuild_bm25_snapshot()
         return cache
