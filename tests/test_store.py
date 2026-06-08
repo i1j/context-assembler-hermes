@@ -229,3 +229,229 @@ def test_tc_s_012_wal_mode_validated(tmp_path):
     mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
     conn.close()
     assert mode == "wal", f"Expected WAL mode, got {mode}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PR1 v5 Schema 验证测试（测试线 WP1）
+# ═══════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.high
+def test_v5_schema_created(tmp_path):
+    """v5 新库创建时验证 v5 表结构正确
+    Steps: 新建 SQLiteStore → 写入触发 schema 创建 → 检查 v5 列"""
+    db = tmp_path / "test_v5.db"
+    store = SQLiteStore(db_path=str(db))
+    # 第一次写操作触发 schema 创建
+    store.write_turn("sid", 1, l0_text="test", l1_text="{}", token_offset=0)
+    store.close()
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    cols = {r[1]: r[2] for r in conn.execute("PRAGMA table_info(turn_cache)")}
+    conn.close()
+    # v5 关键列
+    assert "role" in cols, f"Missing role column, got {list(cols.keys())}"
+    assert "api_call_count" in cols, f"Missing api_call_count column"
+    assert "seq_index" in cols, f"Missing seq_index column"
+    assert "content" in cols, f"Missing content column"
+    # v4 列作为虚拟列存在（需要独立连接，因为 store.close 可能关闭了原始连接）
+    conn2 = sqlite3.connect(str(db))
+    xcols = {r[1]: r[6] for r in conn2.execute("PRAGMA table_xinfo(turn_cache)")}
+    conn2.close()
+    assert "turn_type" in xcols, f"Missing turn_type generated column: {list(xcols.keys())}"
+    assert "tool_sub_index" in xcols, f"Missing tool_sub_index generated column"
+    assert "l2_text" in xcols, f"Missing l2_text generated column"
+
+
+@pytest.mark.high
+def test_v5_turn_plan_pk_extended(tmp_path):
+    """v5 turn_plan PK 含 api_call_count + seq_index
+    Steps: 新建 store → 写入触发 schema → 检查 turn_plan 列"""
+    db = tmp_path / "test_v5_tp.db"
+    store = SQLiteStore(db_path=str(db))
+    store.write_turn("sid", 1, l0_text="test", l1_text="{}", token_offset=0)
+    store.close()
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    cols = {r[1]: r[2] for r in conn.execute("PRAGMA table_info(turn_plan)")}
+    conn.close()
+    assert "api_call_count" in cols
+    assert "seq_index" in cols
+
+
+@pytest.mark.high
+def test_v5_write_turn_old_params_backward(tmp_path):
+    """write_turn 旧参数（turn_type, tool_sub_index）→ v5 映射
+    Steps: 用旧参数写入 → read_turn 返回正确值"""
+    db = tmp_path / "test_v5_bw.db"
+    store = SQLiteStore(db_path=str(db))
+    store.write_turn("sid", 1, turn_type="dialogue", tool_sub_index=0,
+                     l0_text="l0_val", l1_text="l1_val", token_offset=100)
+    rec = store.read_turn("sid", 1)
+    assert rec is not None
+    assert rec["l0_text"] == "l0_val"
+    assert rec["turn_type"] == "dialogue"
+    store.close()
+
+
+@pytest.mark.medium
+def test_v5_write_turn_l2_text_backward(tmp_path):
+    """write_turn l2_text → content 向后兼容映射
+    Steps: l2_text=JSON → 读出 content 等于该 JSON"""
+    import json
+    db = tmp_path / "test_v5_l2.db"
+    store = SQLiteStore(db_path=str(db))
+    l2_val = json.dumps([{"role": "user", "content": "hello"}])
+    store.write_turn("sid", 1, turn_type="dialogue", tool_sub_index=0,
+                     l2_text=l2_val, l0_text="", l1_text="{}", token_offset=0)
+    rec = store.read_turn("sid", 1)
+    assert rec is not None
+    assert rec["l2_text"] == l2_val  # 虚拟列
+    store.close()
+
+
+@pytest.mark.medium
+def test_v5_read_session_turn_type_mapping(tmp_path):
+    """v5 read_session 返回 turn_type 映射正确
+    Steps: 写入 role='user' → read_session 返回 turn_type='dialogue'"""
+    db = tmp_path / "test_v5_rs.db"
+    store = SQLiteStore(db_path=str(db))
+    store.write_turn("sid", 1, role="user", l0_text="l0", l1_text="{}", token_offset=0)
+    records = store.read_session("sid")
+    assert len(records) == 1
+    assert records[0]["turn_type"] == "dialogue", f"Got {records[0]['turn_type']}"
+    assert records[0]["role"] == "user" if "role" in records[0] else True
+    store.close()
+
+
+@pytest.mark.medium
+def test_v5_max_turn_index_uses_role(tmp_path):
+    """v5 max_turn_index 用 WHERE role='user' 条件
+    Steps: 写入 user + tool 行 → max_turn_index 只计 user 行"""
+    db = tmp_path / "test_v5_mti.db"
+    store = SQLiteStore(db_path=str(db))
+    store.write_turn("sid", 1, role="user", l0_text="u1", l1_text="{}", token_offset=0)
+    store.write_turn("sid", 2, role="user", l0_text="u2", l1_text="{}", token_offset=0)
+    store.write_turn("sid", 3, role="tool", l0_text="", l1_text="", token_offset=50,
+                     api_call_count=1, seq_index=1)
+    assert store.max_turn_index("sid") == 2  # 只计 user 行
+    store.close()
+
+
+@pytest.mark.medium
+def test_v5_write_turn_plan_read_back(tmp_path):
+    """v5 write_turn_plan / read_turn_plan 含 api_call_count / seq_index
+    Steps: 写入 plan → 读回来验证新字段"""
+    db = tmp_path / "test_v5_wtp.db"
+    store = SQLiteStore(db_path=str(db))
+    entries = [{
+        "turn_index": 1, "api_call_count": 0, "seq_index": 0,
+        "turn_type": "dialogue", "target_level": "L0",
+        "decision_reason": "middle", "l2_tokens": 10,
+        "summary_tokens": 5, "tokens_saved": 5,
+    }]
+    result = store.write_turn_plan("sid", entries)
+    assert result, "write_turn_plan should succeed"
+    plans = store.read_turn_plan("sid")
+    assert len(plans) == 1
+    assert plans[0]["api_call_count"] == 0
+    assert plans[0]["seq_index"] == 0
+    store.close()
+
+
+@pytest.mark.medium
+def test_v5_readonly_guard(tmp_path):
+    """v5 writable store 不可打开 v4 DB: RuntimeError
+    Steps: 创建 v4 格式 DB → SQLiteStore(readonly=False) → 首次连接报 RuntimeError"""
+    import sqlite3
+    db = tmp_path / "test_v4.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE turn_cache (session_id TEXT, turn_index INTEGER, "
+                 "turn_type TEXT, tool_sub_index INTEGER, "
+                 "l0_text TEXT, l1_text TEXT, token_offset INTEGER, "
+                 "PRIMARY KEY (session_id, turn_index, turn_type, tool_sub_index))")
+    conn.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO _meta (key, value) VALUES ('schema_version', '4')")
+    conn.commit()
+    conn.close()
+    store = SQLiteStore(db_path=str(db), readonly=False)
+    with pytest.raises(RuntimeError, match="v4 DB"):
+        _ = store.conn  # 首次连接触发 schema 检查
+
+
+@pytest.mark.medium
+def test_v5_readonly_mode(tmp_path):
+    """v4 DB readonly 模式可正常读取
+    Steps: 创建 v4 格式 DB → readonly=True 打开 → 读操作正常"""
+    import sqlite3
+    db = tmp_path / "test_v4_ro.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE turn_cache (
+            session_id TEXT, turn_index INTEGER,
+            turn_type TEXT NOT NULL DEFAULT 'dialogue',
+            tool_sub_index INTEGER NOT NULL DEFAULT 0,
+            l0_text TEXT, l1_text TEXT, l2_text TEXT,
+            l0_embedding BLOB, l1_embedding BLOB,
+            bm25_tokens TEXT,
+            token_offset INTEGER, backfill_attempts INTEGER DEFAULT 0,
+            _assemble_status INTEGER DEFAULT 0,
+            query_embedding BLOB,
+            created_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (session_id, turn_index, turn_type, tool_sub_index)
+        );
+        CREATE TABLE turn_plan (
+            session_id TEXT, turn_index INTEGER,
+            turn_type TEXT, tool_sub_index INTEGER,
+            target_level TEXT, decision_reason TEXT,
+            l2_tokens INTEGER, summary_tokens INTEGER, tokens_saved INTEGER,
+            rrf_score REAL, upgrade_rank INTEGER,
+            budget_remaining INTEGER, topic_group INTEGER, created_at TEXT,
+            PRIMARY KEY (session_id, turn_index, turn_type, tool_sub_index)
+        );
+        CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO _meta (key, value) VALUES ('schema_version', '4');
+    """)
+    conn.execute("INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, l0_text, l1_text, token_offset) "
+                 "VALUES ('sid', 1, 'dialogue', 0, 'l0', 'l1', 0)")
+    conn.commit()
+    conn.close()
+
+    store = SQLiteStore(db_path=str(db), readonly=True)
+    recs = store.read_session("sid")
+    assert len(recs) == 1
+    assert recs[0]["l0_text"] == "l0"
+    # readonly 写入应静默跳过
+    result = store.write_turn("sid", 2, l0_text="l0_new")
+    assert result is False, "readonly write should return False"
+    store.close()
+
+
+@pytest.mark.high
+def test_v5_write_turn_with_new_params(tmp_path):
+    """write_turn v5 新参数可直接传入
+    Steps: 用 role/api_call_count/seq_index 写入 → 读出验证"""
+    db = tmp_path / "test_v5_new.db"
+    store = SQLiteStore(db_path=str(db))
+    store.write_turn("sid", 1, role="assistant", api_call_count=1, seq_index=0,
+                     content="thought text", tool_calls_json='[{"id":"call_1"}]',
+                     finish_reason="tool_calls",
+                     l0_text="", l1_text="{}", token_offset=0)
+    records = store.read_session("sid")
+    assert len(records) == 1
+    r = records[0]
+    assert r.get("content") == "thought text"
+    assert r.get("api_call_count") == 1
+    assert r.get("seq_index") == 0
+    assert r.get("turn_type") == "dialogue"  # role=assistant → turn_type='dialogue'
+    store.close()
+
+
+@pytest.mark.medium
+def test_v5_write_tool_group_stub(tmp_path):
+    """write_tool_group() stub 存在且 raise NotImplementedError
+    Steps: 调用 stub → NotImplementedError"""
+    db = tmp_path / "test_v5_stub.db"
+    store = SQLiteStore(db_path=str(db))
+    with pytest.raises(NotImplementedError, match="PR2"):
+        store.write_tool_group("sid", 1, 1, [])
+    store.close()

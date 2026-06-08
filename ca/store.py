@@ -28,42 +28,78 @@ from .post_process import STATE_PREFIX_REGEX, ItemState, parse_core_change_state
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 INITIAL_BACKFILL_ATTEMPTS = 0
 
-_SCHEMA_SQL = f"""
+# v5 turn_cache 表：独立消息列 + 新主键 (session_id, turn_index, api_call_count, seq_index)
+# 行类型:
+#   user:            api=0, seq=0, role='user'
+#   assistant{tc}:   api>=1, seq=0, role='assistant', tool_calls_json IS NOT NULL
+#   tool:            api>=1, seq>=1, role='tool', tool_call_id IS NOT NULL
+#   final assistant: api=999999, seq=0, role='assistant', finish_reason='stop'
+# v4 遗留列 (turn_type, tool_sub_index, l2_text) 保留至 PR2 以支持过渡期查询
+_SCHEMA_SQL_V5 = f"""
 CREATE TABLE IF NOT EXISTS turn_cache (
     session_id    TEXT    NOT NULL,
     turn_index    INTEGER NOT NULL,
+    api_call_count INTEGER NOT NULL DEFAULT 0,
+    seq_index     INTEGER NOT NULL DEFAULT 0,
+
+    -- 消息独立列
+    role          TEXT    NOT NULL DEFAULT 'user',
+    content       TEXT,
+    tool_call_id  TEXT,
+    tool_name     TEXT,
+    tool_calls_json TEXT,
+    finish_reason TEXT,
+
+    -- 元数据列
+    api_request_id TEXT,
+    duration_ms   INTEGER,
+    status        TEXT,
+    error_type    TEXT,
+    error_message TEXT,
+    usage_json    TEXT,
+
+    -- CA 摘要列
     l0_text       TEXT    NOT NULL DEFAULT '',
     l1_text       TEXT    NOT NULL DEFAULT '',
     l0_embedding  BLOB,
     l1_embedding  BLOB,
     bm25_tokens   TEXT,
     token_offset  INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
-    turn_type     TEXT    NOT NULL DEFAULT 'dialogue',
-    backfill_attempts INTEGER NOT NULL DEFAULT {INITIAL_BACKFILL_ATTEMPTS},
-    tool_sub_index INTEGER NOT NULL DEFAULT 0,
-    l2_text       TEXT,
-    _assemble_status INTEGER NOT NULL DEFAULT 0,
     query_embedding BLOB,
-    PRIMARY KEY (session_id, turn_index, turn_type, tool_sub_index)
+
+    -- 装配状态
+    _assemble_status INTEGER NOT NULL DEFAULT 0,
+    backfill_attempts INTEGER NOT NULL DEFAULT {INITIAL_BACKFILL_ATTEMPTS},
+
+    -- v4 遗留列（虚拟列，PR2 后移除）
+    turn_type     TEXT    GENERATED ALWAYS AS (
+        CASE WHEN role='user' OR role='assistant' THEN 'dialogue' ELSE 'tool' END
+    ) STORED,
+    tool_sub_index INTEGER GENERATED ALWAYS AS (seq_index) STORED,
+    l2_text       TEXT    GENERATED ALWAYS AS (content) STORED,
+
+    created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+
+    PRIMARY KEY (session_id, turn_index, api_call_count, seq_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tc_session ON turn_cache(session_id);
 CREATE INDEX IF NOT EXISTS idx_tc_offset ON turn_cache(session_id, token_offset);
-CREATE INDEX IF NOT EXISTS idx_tc_turn_type ON turn_cache(session_id, turn_type);
+CREATE INDEX IF NOT EXISTS idx_tc_role ON turn_cache(session_id, role);
 CREATE INDEX IF NOT EXISTS idx_tc_assemble_status ON turn_cache(_assemble_status);
-CREATE INDEX IF NOT EXISTS idx_pending_backfill ON turn_cache(session_id, turn_type, _assemble_status);
+CREATE INDEX IF NOT EXISTS idx_pending_backfill ON turn_cache(session_id, role, _assemble_status);
 
--- TurnPlan: 记录 A-stage 每轮拣选决策，供调试比对。
--- 后期可扩展 topic_group 字段，将相邻对话轮合并为话题。
+-- TurnPlan: 记录 A-stage 每轮拣选决策。
+-- v5 PK 含 api_call_count + seq_index，支持逐工具调度。
 CREATE TABLE IF NOT EXISTS turn_plan (
     session_id     TEXT    NOT NULL,
     turn_index     INTEGER NOT NULL,
+    api_call_count INTEGER NOT NULL DEFAULT 0,
+    seq_index      INTEGER NOT NULL DEFAULT 0,
     turn_type      TEXT    NOT NULL DEFAULT 'dialogue',
-    tool_sub_index INTEGER NOT NULL DEFAULT 0,
 
     -- 拣选决策
     target_level   TEXT    NOT NULL DEFAULT 'L0',
@@ -86,7 +122,7 @@ CREATE TABLE IF NOT EXISTS turn_plan (
 
     created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
 
-    PRIMARY KEY (session_id, turn_index, turn_type, tool_sub_index)
+    PRIMARY KEY (session_id, turn_index, api_call_count, seq_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tp_session ON turn_plan(session_id);
@@ -122,7 +158,18 @@ def _unpack_f32(blob: bytes) -> Optional[List[float]]:
 
 
 class SQLiteStore:
-    def __init__(self, db_path: str | Path, checkpoint_interval: Optional[int] = None):
+    def __init__(self, db_path: str | Path,
+                 checkpoint_interval: Optional[int] = None,
+                 readonly: bool = False):
+        """
+        Args:
+            db_path: 数据库文件路径
+            checkpoint_interval: WAL checkpoint 间隔秒数（默认 Config.DB_CHECKPOINT_INTERVAL）
+            readonly: True = v4 旧库只读模式；False = v5 新库读写模式
+                      注意：readonly 在此版本同时控制「版本路由」和「读写模式」。
+                            readonly=True = v4 旧库只读, readonly=False = v5 新库读写。
+        """
+        self._readonly = readonly
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
@@ -150,16 +197,43 @@ class SQLiteStore:
                 self._local.conn = None
 
         if not hasattr(self._local, 'conn') or self._local.conn is None:
-            self._local.conn = sqlite3.connect(str(self._db_path), timeout=10, check_same_thread=False)
-            self._local.conn.execute("PRAGMA journal_mode=WAL")
-            cur = self._local.conn.execute("PRAGMA journal_mode")
-            row = cur.fetchone()
-            if row and row[0].lower() != "wal":
-                logger.warning("WAL mode could not be enabled (current=%s), performance may degrade", row[0])
-            self._local.conn.execute("PRAGMA synchronous=NORMAL")
-            self._local.conn.execute(f"PRAGMA busy_timeout={Config.DB_BUSY_TIMEOUT_MS}")
-            self._local.conn.executescript(_SCHEMA_SQL)
-            self._check_schema()
+            if self._readonly:
+                # v4 readonly 模式：?mode=ro 连接，跳过 PRAGMA/schema
+                ro_uri = f"file:{self._db_path.resolve()}?mode=ro"
+                self._local.conn = sqlite3.connect(ro_uri, timeout=10, check_same_thread=False, uri=True)
+                # 跳过 PRAGMA journal_mode=WAL / synchronous / busy_timeout（readonly 下会报错）
+                # schema 由 v4 旧代码创建，无需再次执行
+                self._check_schema_readonly()
+            else:
+                self._local.conn = sqlite3.connect(str(self._db_path), timeout=10, check_same_thread=False)
+                self._local.conn.execute("PRAGMA journal_mode=WAL")
+                cur = self._local.conn.execute("PRAGMA journal_mode")
+                row = cur.fetchone()
+                if row and row[0].lower() != "wal":
+                    logger.warning("WAL mode could not be enabled (current=%s), performance may degrade", row[0])
+                self._local.conn.execute("PRAGMA synchronous=NORMAL")
+                self._local.conn.execute(f"PRAGMA busy_timeout={Config.DB_BUSY_TIMEOUT_MS}")
+
+                # 先检查是否存在旧版 v4 DB（运行 schema SQL 之前）
+                try:
+                    ver_row = self._local.conn.execute(
+                        "SELECT value FROM _meta WHERE key='schema_version'"
+                    ).fetchone()
+                    if ver_row:
+                        existing_ver = int(ver_row[0])
+                        if existing_ver < 5:
+                            raise RuntimeError(
+                                f"v4 DB (schema_version={existing_ver}) cannot be opened in writable mode. "
+                                "Use readonly=True or migrate with migration_v5.py."
+                            )
+                        # v5 DB 已存在，跳过 schema 创建（表结构已就绪）
+                        logger.debug("v5 DB already exists, skipping schema creation")
+                    else:
+                        # 空 DB / 无 _meta → 创建 v5 schema
+                        self._local.conn.executescript(_SCHEMA_SQL_V5)
+                except sqlite3.OperationalError:
+                    # _meta 表不存在 → 空 DB，创建 v5 schema
+                    self._local.conn.executescript(_SCHEMA_SQL_V5)
 
         self._local.last_used = now
         return self._local.conn
@@ -168,6 +242,24 @@ class SQLiteStore:
     def conn(self) -> sqlite3.Connection:
         return self._get_conn()
 
+    def _check_schema_readonly(self) -> None:
+        """readonly 模式下的 schema 检查：验证版本号，不做任何写操作。"""
+        conn = self._local.conn
+        try:
+            row = conn.execute("SELECT value FROM _meta WHERE key='schema_version'").fetchone()
+            if row:
+                current_ver = int(row[0])
+                if current_ver >= 5:
+                    logger.warning("v5 DB opened in readonly mode — reads may be incomplete")
+                # v4 旧库正常 readonly 模式
+            else:
+                logger.warning("No schema version found in readonly DB")
+        except (sqlite3.Error, ValueError) as exc:
+            logger.warning("Readonly schema check failed: %s", exc)
+        finally:
+            # 确保 last_used 被赋值（异常路径保护）
+            pass
+
     def _check_schema(self) -> None:
         conn = self.conn
         try:
@@ -175,6 +267,12 @@ class SQLiteStore:
             if row:
                 current_ver = int(row[0])
                 if current_ver < _SCHEMA_VERSION:
+                    # v4 DB 不可通过可写模式打开
+                    if current_ver < 5:
+                        raise RuntimeError(
+                            f"v4 DB (schema_version={current_ver}) cannot be opened in writable mode. "
+                            "Use readonly=True or migrate with migration_v5.py."
+                        )
                     self._migrate(current_ver)
                 elif current_ver > _SCHEMA_VERSION:
                     logger.warning("Schema version %d > expected %d, rebuilding.", current_ver, _SCHEMA_VERSION)
@@ -198,6 +296,10 @@ class SQLiteStore:
 
     def _migrate(self, from_version: int) -> None:
         """增量迁移：从旧版本升级到最新版本，不丢数据。"""
+        if not self._readonly and from_version < 5:
+            raise RuntimeError(
+                f"v{from_version}→v5 惰性迁移不可通过可写路径触发，请用 migration_v5.py 脚本。"
+            )
         conn = self.conn
         if from_version <= 3:
             try:
@@ -215,7 +317,7 @@ class SQLiteStore:
     def _rebuild(self) -> None:
         conn = self.conn
         conn.executescript("DROP TABLE IF EXISTS turn_cache; DROP TABLE IF EXISTS turn_plan; DROP TABLE IF EXISTS _meta;")
-        conn.executescript(_SCHEMA_SQL)
+        conn.executescript(_SCHEMA_SQL_V5)
         conn.commit()
 
     def _start_checkpoint_daemon(self, interval: int) -> None:
@@ -262,32 +364,79 @@ class SQLiteStore:
         l2_text: Optional[str] = None,
         _assemble_status: int = 0,
         max_retries: Optional[int] = None,
+        # v5 新增参数（Optional，向后兼容）
+        api_call_count: Optional[int] = None,
+        seq_index: Optional[int] = None,
+        role: Optional[str] = None,
+        content: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        tool_calls_json: Optional[str] = None,
+        finish_reason: Optional[str] = None,
+        api_request_id: Optional[str] = None,
+        duration_ms: Optional[int] = None,
+        status: Optional[str] = None,
+        error_type: Optional[str] = None,
+        error_message: Optional[str] = None,
+        usage_json: Optional[str] = None,
     ) -> bool:
+        if self._readonly:
+            logger.warning("write_turn called on readonly store, skipping")
+            return False
         effective_retries = max_retries if max_retries is not None else Config.DB_MAX_RETRY
+
+        # 向后兼容映射：旧参数 → v5 新参数
+        if api_call_count is None:
+            api_call_count = 0
+        if seq_index is None:
+            seq_index = tool_sub_index or 0
+        if role is None:
+            # turn_type='dialogue' → role='user'（对话轮首行恒为用户消息）
+            role = 'user' if turn_type == 'dialogue' else turn_type
+        # 向后兼容：l2_text（旧 v4 列）→ content（v5 生成 l2_text 的源列）
+        if content is None and l2_text is not None:
+            content = l2_text
+
         for attempt in range(effective_retries):
             try:
                 self.conn.execute(
                     """INSERT OR REPLACE INTO turn_cache
-                       (session_id, turn_index, l0_text, l1_text,
-                        l0_embedding, l1_embedding, bm25_tokens, token_offset,
-                        turn_type, backfill_attempts, tool_sub_index, l2_text, _assemble_status)
-                       VALUES (:session_id, :turn_index, :l0_text, :l1_text,
-                               :l0_embedding, :l1_embedding, :bm25_tokens, :token_offset,
-                               :turn_type, :backfill_attempts, :tool_sub_index, :l2_text, :_assemble_status)""",
+                       (session_id, turn_index, api_call_count, seq_index,
+                        role, content, tool_call_id, tool_name, tool_calls_json, finish_reason,
+                        api_request_id, duration_ms, status, error_type, error_message, usage_json,
+                        l0_text, l1_text, l0_embedding, l1_embedding, bm25_tokens, token_offset,
+                        query_embedding, _assemble_status, backfill_attempts)
+                       VALUES (:session_id, :turn_index, :api_call_count, :seq_index,
+                               :role, :content, :tool_call_id, :tool_name, :tool_calls_json, :finish_reason,
+                               :api_request_id, :duration_ms, :status, :error_type, :error_message, :usage_json,
+                               :l0_text, :l1_text, :l0_embedding, :l1_embedding, :bm25_tokens, :token_offset,
+                               :query_embedding, :_assemble_status, :backfill_attempts)""",
                     {
                         "session_id": session_id,
                         "turn_index": turn_index,
+                        "api_call_count": api_call_count,
+                        "seq_index": seq_index,
+                        "role": role,
+                        "content": content,
+                        "tool_call_id": tool_call_id,
+                        "tool_name": tool_name,
+                        "tool_calls_json": tool_calls_json,
+                        "finish_reason": finish_reason,
+                        "api_request_id": api_request_id,
+                        "duration_ms": duration_ms,
+                        "status": status,
+                        "error_type": error_type,
+                        "error_message": error_message,
+                        "usage_json": usage_json,
                         "l0_text": l0_text,
                         "l1_text": l1_text,
                         "l0_embedding": _pack_f32(l0_embedding) if l0_embedding else None,
                         "l1_embedding": _pack_f32(l1_embedding) if l1_embedding else None,
                         "bm25_tokens": json.dumps(bm25_tokens, ensure_ascii=False) if bm25_tokens else None,
                         "token_offset": token_offset,
-                        "turn_type": turn_type,
-                        "backfill_attempts": INITIAL_BACKFILL_ATTEMPTS,
-                        "tool_sub_index": tool_sub_index,
-                        "l2_text": l2_text,
+                        "query_embedding": None,
                         "_assemble_status": _assemble_status,
+                        "backfill_attempts": INITIAL_BACKFILL_ATTEMPTS,
                     },
                 )
                 self.conn.commit()
@@ -307,6 +456,9 @@ class SQLiteStore:
         return False
 
     def write_turns_batch(self, session_id: str, records: List[TurnRecord]) -> bool:
+        if self._readonly:
+            logger.warning("write_turns_batch called on readonly store, skipping")
+            return False
         if not records:
             return True
 
@@ -316,6 +468,13 @@ class SQLiteStore:
             "bm25_tokens": None, "token_offset": 0,
             "turn_type": "dialogue", "tool_sub_index": 0,
             "l2_text": None, "_assemble_status": 0,
+            # v5 defaults
+            "api_call_count": 0, "seq_index": 0, "role": "user",
+            "content": None, "tool_call_id": None, "tool_name": None,
+            "tool_calls_json": None, "finish_reason": None,
+            "api_request_id": None, "duration_ms": None, "status": None,
+            "error_type": None, "error_message": None, "usage_json": None,
+            "backfill_attempts": INITIAL_BACKFILL_ATTEMPTS,
         }
 
         try:
@@ -325,26 +484,42 @@ class SQLiteStore:
                 vals = {**defaults, **rec}
                 conn.execute(
                     """INSERT OR REPLACE INTO turn_cache
-                       (session_id, turn_index, l0_text, l1_text,
-                        l0_embedding, l1_embedding, bm25_tokens, token_offset,
-                        turn_type, backfill_attempts, tool_sub_index, l2_text, _assemble_status)
-                       VALUES (:session_id, :turn_index, :l0_text, :l1_text,
-                               :l0_embedding, :l1_embedding, :bm25_tokens, :token_offset,
-                               :turn_type, :backfill_attempts, :tool_sub_index, :l2_text, :_assemble_status)""",
+                       (session_id, turn_index, api_call_count, seq_index,
+                        role, content, tool_call_id, tool_name, tool_calls_json, finish_reason,
+                        api_request_id, duration_ms, status, error_type, error_message, usage_json,
+                        l0_text, l1_text, l0_embedding, l1_embedding, bm25_tokens, token_offset,
+                        query_embedding, _assemble_status, backfill_attempts)
+                       VALUES (:session_id, :turn_index, :api_call_count, :seq_index,
+                               :role, :content, :tool_call_id, :tool_name, :tool_calls_json, :finish_reason,
+                               :api_request_id, :duration_ms, :status, :error_type, :error_message, :usage_json,
+                               :l0_text, :l1_text, :l0_embedding, :l1_embedding, :bm25_tokens, :token_offset,
+                               :query_embedding, :_assemble_status, :backfill_attempts)""",
                     {
                         "session_id": session_id,
                         "turn_index": vals["turn_index"],
+                        "api_call_count": vals.get("api_call_count", 0),
+                        "seq_index": vals.get("seq_index", vals.get("tool_sub_index", 0)),
+                        "role": vals.get("role", "user"),
+                        "content": vals.get("content"),
+                        "tool_call_id": vals.get("tool_call_id"),
+                        "tool_name": vals.get("tool_name"),
+                        "tool_calls_json": vals.get("tool_calls_json"),
+                        "finish_reason": vals.get("finish_reason"),
+                        "api_request_id": vals.get("api_request_id"),
+                        "duration_ms": vals.get("duration_ms"),
+                        "status": vals.get("status"),
+                        "error_type": vals.get("error_type"),
+                        "error_message": vals.get("error_message"),
+                        "usage_json": vals.get("usage_json"),
                         "l0_text": vals["l0_text"],
                         "l1_text": vals["l1_text"],
                         "l0_embedding": _pack_f32(vals["l0_embedding"]) if vals["l0_embedding"] else None,
                         "l1_embedding": _pack_f32(vals["l1_embedding"]) if vals["l1_embedding"] else None,
                         "bm25_tokens": json.dumps(vals["bm25_tokens"], ensure_ascii=False) if vals["bm25_tokens"] else None,
                         "token_offset": vals["token_offset"],
-                        "turn_type": vals["turn_type"],
-                        "backfill_attempts": vals.get("backfill_attempts", INITIAL_BACKFILL_ATTEMPTS),
-                        "tool_sub_index": vals["tool_sub_index"],
-                        "l2_text": vals["l2_text"],
+                        "query_embedding": None,
                         "_assemble_status": vals["_assemble_status"],
+                        "backfill_attempts": vals.get("backfill_attempts", INITIAL_BACKFILL_ATTEMPTS),
                     },
                 )
             conn.commit()
@@ -361,32 +536,96 @@ class SQLiteStore:
             self._session_cache_time = 0.0
 
     def read_session(self, session_id: str) -> List[TurnRecord]:
+        if self._readonly:
+            cur = self.conn.execute(
+                """SELECT turn_index, l0_text, l1_text, l0_embedding, l1_embedding,
+                          bm25_tokens, token_offset, turn_type, backfill_attempts,
+                          tool_sub_index, l2_text, _assemble_status
+                   FROM turn_cache WHERE session_id=? ORDER BY turn_index ASC""",
+                (session_id,),
+            )
+            rows = []
+            for row in cur:
+                rows.append({
+                    "turn_index": row[0], "l0_text": row[1] or "", "l1_text": row[2] or "",
+                    "l0_embedding": _unpack_f32(row[3]) if row[3] else None,
+                    "l1_embedding": _unpack_f32(row[4]) if row[4] else None,
+                    "bm25_tokens": json.loads(row[5]) if row[5] else [],
+                    "token_offset": row[6], "turn_type": row[7] or "dialogue",
+                    "backfill_attempts": row[8] or 0, "tool_sub_index": row[9] or 0,
+                    "l2_text": row[10], "_assemble_status": row[11] or 0,
+                })
+            return rows
+        # v5 新库：新列 + role→turn_type 映射 + 新 ORDER BY
         cur = self.conn.execute(
             """SELECT turn_index, l0_text, l1_text, l0_embedding, l1_embedding,
-                      bm25_tokens, token_offset, turn_type, backfill_attempts,
-                      tool_sub_index, l2_text, _assemble_status
-               FROM turn_cache WHERE session_id=? ORDER BY turn_index ASC""",
+                      bm25_tokens, token_offset, role, backfill_attempts,
+                      seq_index, api_call_count, content, tool_call_id, tool_name,
+                      tool_calls_json, finish_reason, api_request_id, duration_ms,
+                      status, error_type, error_message, usage_json, _assemble_status
+               FROM turn_cache WHERE session_id=?
+               ORDER BY turn_index, api_call_count, seq_index""",
             (session_id,),
         )
         rows = []
-        for row in cur:
+        for r in cur:
+            role_val = r[7]
+            # role→turn_type 映射
+            mapped_turn_type = 'tool' if role_val == 'tool' else 'dialogue'
             rows.append({
-                "turn_index": row[0], "l0_text": row[1] or "", "l1_text": row[2] or "",
-                "l0_embedding": _unpack_f32(row[3]) if row[3] else None,
-                "l1_embedding": _unpack_f32(row[4]) if row[4] else None,
-                "bm25_tokens": json.loads(row[5]) if row[5] else [],
-                "token_offset": row[6], "turn_type": row[7] or "dialogue",
-                "backfill_attempts": row[8] or 0, "tool_sub_index": row[9] or 0,
-                "l2_text": row[10], "_assemble_status": row[11] or 0,
+                "turn_index": r[0], "l0_text": r[1] or "", "l1_text": r[2] or "",
+                "l0_embedding": _unpack_f32(r[3]) if r[3] else None,
+                "l1_embedding": _unpack_f32(r[4]) if r[4] else None,
+                "bm25_tokens": json.loads(r[5]) if r[5] else [],
+                "token_offset": r[6], "turn_type": mapped_turn_type,
+                "backfill_attempts": r[8] or 0,
+                "tool_sub_index": r[9] or 0,
+                "seq_index": r[9] or 0,
+                "api_call_count": r[10] or 0,
+                "content": r[11],
+                "tool_call_id": r[12],
+                "tool_name": r[13],
+                "tool_calls_json": r[14],
+                "finish_reason": r[15],
+                "api_request_id": r[16],
+                "duration_ms": r[17],
+                "status": r[18],
+                "error_type": r[19],
+                "error_message": r[20],
+                "usage_json": r[21],
+                "_assemble_status": r[22] or 0,
+                "l2_text": r[11],  # l2_text ≈ content（向后兼容）
             })
         return rows
 
     def read_turn(self, session_id: str, turn_index: int) -> Optional[TurnRecord]:
+        if self._readonly:
+            cur = self.conn.execute(
+                """SELECT turn_index, l0_text, l1_text, l0_embedding, l1_embedding,
+                          bm25_tokens, token_offset, turn_type, backfill_attempts,
+                          tool_sub_index, l2_text, _assemble_status
+                   FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue' LIMIT 1""",
+                (session_id, turn_index),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "turn_index": row[0], "l0_text": row[1] or "", "l1_text": row[2] or "",
+                "l0_embedding": _unpack_f32(row[3]) if row[3] else None,
+                "l1_embedding": _unpack_f32(row[4]) if row[4] else None,
+                "bm25_tokens": json.loads(row[5]) if row[5] else [],
+                "token_offset": row[6], "turn_type": row[7], "backfill_attempts": row[8],
+                "tool_sub_index": row[9] or 0, "l2_text": row[10], "_assemble_status": row[11],
+            }
+        # v5: 查询 user 行，硬编码 turn_type='dialogue'
         cur = self.conn.execute(
             """SELECT turn_index, l0_text, l1_text, l0_embedding, l1_embedding,
-                      bm25_tokens, token_offset, turn_type, backfill_attempts,
-                      tool_sub_index, l2_text, _assemble_status
-               FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue' LIMIT 1""",
+                      bm25_tokens, token_offset, backfill_attempts,
+                      seq_index, api_call_count, content, _assemble_status
+               FROM turn_cache
+               WHERE session_id=? AND turn_index=? AND role='user' AND api_call_count=0 AND seq_index=0
+               LIMIT 1""",
             (session_id, turn_index),
         )
         row = cur.fetchone()
@@ -397,13 +636,23 @@ class SQLiteStore:
             "l0_embedding": _unpack_f32(row[3]) if row[3] else None,
             "l1_embedding": _unpack_f32(row[4]) if row[4] else None,
             "bm25_tokens": json.loads(row[5]) if row[5] else [],
-            "token_offset": row[6], "turn_type": row[7], "backfill_attempts": row[8],
-            "tool_sub_index": row[9] or 0, "l2_text": row[10], "_assemble_status": row[11],
+            "token_offset": row[6], "turn_type": "dialogue",
+            "backfill_attempts": row[7], "tool_sub_index": row[8] or 0,
+            "l2_text": row[10], "_assemble_status": row[11] or 0,
+            "seq_index": row[8] or 0, "api_call_count": row[9] or 0,
+            "content": row[10],
         }
 
     def max_turn_index(self, session_id: str) -> int:
+        if self._readonly:
+            row = self.conn.execute(
+                "SELECT MAX(turn_index) FROM turn_cache WHERE session_id=? AND turn_type='dialogue'",
+                (session_id,),
+            ).fetchone()
+            return row[0] if row[0] is not None else -1
+        # v5: user 行（role='user', api_call_count=0）
         row = self.conn.execute(
-            "SELECT MAX(turn_index) FROM turn_cache WHERE session_id=? AND turn_type='dialogue'",
+            "SELECT MAX(turn_index) FROM turn_cache WHERE session_id=? AND role='user' AND api_call_count=0",
             (session_id,),
         ).fetchone()
         return row[0] if row[0] is not None else -1
@@ -421,20 +670,49 @@ class SQLiteStore:
         return ids
 
     def delete_session(self, session_id: str) -> None:
+        if self._readonly:
+            logger.warning("delete_session called on readonly store, skipping")
+            return
         self.conn.execute("DELETE FROM turn_cache WHERE session_id=?", (session_id,))
         self.conn.execute("DELETE FROM turn_plan WHERE session_id=?", (session_id,))
         self.conn.commit()
         self._invalidate_session_cache()
 
     def get_pending_backfill(self, session_id: str, turn_type: str) -> List[TurnRecord]:
+        if self._readonly:
+            cur = self.conn.execute(
+                """SELECT turn_index, l0_text, l1_text, l0_embedding, l1_embedding,
+                          bm25_tokens, token_offset, turn_type, backfill_attempts,
+                          tool_sub_index, l2_text, _assemble_status
+                   FROM turn_cache
+                   WHERE session_id=? AND turn_type=? AND _assemble_status=1
+                   ORDER BY turn_index ASC""",
+                (session_id, turn_type),
+            )
+            rows = []
+            for row in cur:
+                rows.append({
+                    "turn_index": row[0], "l0_text": row[1] or "", "l1_text": row[2] or "",
+                    "l0_embedding": _unpack_f32(row[3]) if row[3] else None,
+                    "l1_embedding": _unpack_f32(row[4]) if row[4] else None,
+                    "bm25_tokens": json.loads(row[5]) if row[5] else [],
+                    "token_offset": row[6], "turn_type": row[7], "backfill_attempts": row[8],
+                    "tool_sub_index": row[9] or 0, "l2_text": row[10], "_assemble_status": row[11],
+                })
+            return rows
+        # v5: turn_type 参数映射为 role 查询
+        # turn_type='dialogue' → role IN ('user','assistant')
+        # turn_type='tool' → role='tool'
+        role_filter = ('user', 'assistant') if turn_type == 'dialogue' else ('tool',)
+        placeholders = ','.join('?' for _ in role_filter)
         cur = self.conn.execute(
-            """SELECT turn_index, l0_text, l1_text, l0_embedding, l1_embedding,
-                      bm25_tokens, token_offset, turn_type, backfill_attempts,
-                      tool_sub_index, l2_text, _assemble_status
-               FROM turn_cache
-               WHERE session_id=? AND turn_type=? AND _assemble_status=1
-               ORDER BY turn_index ASC""",
-            (session_id, turn_type),
+            f"""SELECT turn_index, l0_text, l1_text, l0_embedding, l1_embedding,
+                       bm25_tokens, token_offset, role, backfill_attempts,
+                       seq_index, content, _assemble_status
+                FROM turn_cache
+                WHERE session_id=? AND role IN ({placeholders}) AND _assemble_status=1
+                ORDER BY turn_index, api_call_count, seq_index""",
+            (session_id, *role_filter),
         )
         rows = []
         for row in cur:
@@ -443,16 +721,22 @@ class SQLiteStore:
                 "l0_embedding": _unpack_f32(row[3]) if row[3] else None,
                 "l1_embedding": _unpack_f32(row[4]) if row[4] else None,
                 "bm25_tokens": json.loads(row[5]) if row[5] else [],
-                "token_offset": row[6], "turn_type": row[7], "backfill_attempts": row[8],
-                "tool_sub_index": row[9] or 0, "l2_text": row[10], "_assemble_status": row[11],
+                "token_offset": row[6], "turn_type": turn_type,
+                "backfill_attempts": row[8],
+                "tool_sub_index": row[9] or 0, "l2_text": row[10], "_assemble_status": row[11] or 0,
             })
         return rows
 
     def increment_backfill_attempts(self, session_id: str, turn_index: int, turn_type: str, sub_index: int = 0):
+        if self._readonly:
+            logger.warning("increment_backfill_attempts called on readonly store, skipping")
+            return
+        # v5: 使用 (session_id, turn_index, role, seq_index) 定位
+        role = 'user' if turn_type == 'dialogue' else 'tool'
         self.conn.execute(
             """UPDATE turn_cache SET backfill_attempts = backfill_attempts + 1
-               WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?""",
-            (session_id, turn_index, turn_type, sub_index),
+               WHERE session_id=? AND turn_index=? AND role=? AND seq_index=?""",
+            (session_id, turn_index, role, sub_index),
         )
         self.conn.commit()
 
@@ -466,11 +750,24 @@ class SQLiteStore:
         l2_text 可能为 None（如果该 turn 未存储 L2），l1/l0 至少为空字符串。
         调用方根据 target_level 选择对应字段构建消息。
         """
+        if self._readonly:
+            cur = self.conn.execute(
+                """SELECT l2_text, l1_text, l0_text
+                   FROM turn_cache
+                   WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?""",
+                (session_id, turn_index, turn_type, tool_sub_index),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return (None, "", "")
+            return (row[0], row[1] or "", row[2] or "")
+        # v5: 使用 role 和 seq_index 定位
+        role = 'user' if turn_type == 'dialogue' else 'tool'
         cur = self.conn.execute(
-            """SELECT l2_text, l1_text, l0_text
+            """SELECT content, l1_text, l0_text
                FROM turn_cache
-               WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?""",
-            (session_id, turn_index, turn_type, tool_sub_index),
+               WHERE session_id=? AND turn_index=? AND role=? AND seq_index=?""",
+            (session_id, turn_index, role, tool_sub_index),
         )
         row = cur.fetchone()
         if row is None:
@@ -481,11 +778,22 @@ class SQLiteStore:
                               turn_type: str = "dialogue",
                               tool_sub_index: int = 0) -> Optional[int]:
         """返回该 turn 的 _assemble_status。记录不存在时返回 None。"""
+        if self._readonly:
+            cur = self.conn.execute(
+                """SELECT _assemble_status
+                   FROM turn_cache
+                   WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?""",
+                (session_id, turn_index, turn_type, tool_sub_index),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+        # v5
+        role = 'user' if turn_type == 'dialogue' else 'tool'
         cur = self.conn.execute(
             """SELECT _assemble_status
                FROM turn_cache
-               WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?""",
-            (session_id, turn_index, turn_type, tool_sub_index),
+               WHERE session_id=? AND turn_index=? AND role=? AND seq_index=?""",
+            (session_id, turn_index, role, tool_sub_index),
         )
         row = cur.fetchone()
         return row[0] if row else None
@@ -494,20 +802,27 @@ class SQLiteStore:
 
     def write_turn_plan(self, session_id: str, entries: List[Dict[str, Any]]) -> bool:
         """写入一次 assemble() 产生的全部拣选决策。先清空再批量写入。"""
+        if self._readonly:
+            logger.warning("write_turn_plan called on readonly store, skipping")
+            return False
         if not entries:
             return True
         try:
             conn = self.conn
             conn.execute("DELETE FROM turn_plan WHERE session_id=?", (session_id,))
+            # v5 PK 含 api_call_count + seq_index
             conn.executemany(
                 """INSERT INTO turn_plan
-                   (session_id, turn_index, turn_type, tool_sub_index,
+                   (session_id, turn_index, api_call_count, seq_index, turn_type,
                     target_level, decision_reason,
                     l2_tokens, summary_tokens, tokens_saved,
                     rrf_score, upgrade_rank, budget_remaining, topic_group)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(session_id,
-                  e["turn_index"], e.get("turn_type", "dialogue"), e.get("tool_sub_index", 0),
+                  e["turn_index"],
+                  e.get("api_call_count", 0 if e.get("turn_type", "dialogue") == "dialogue" else 1),
+                  e.get("seq_index", e.get("tool_sub_index", 0)),
+                  e.get("turn_type", "dialogue"),
                   e["target_level"], e["decision_reason"],
                   e.get("l2_tokens", 0), e.get("summary_tokens", 0), e.get("tokens_saved", 0),
                   e.get("rrf_score"), e.get("upgrade_rank"), e.get("budget_remaining"),
@@ -520,25 +835,48 @@ class SQLiteStore:
             return False
 
     def read_turn_plan(self, session_id: str) -> List[Dict[str, Any]]:
+        if self._readonly:
+            cur = self.conn.execute(
+                """SELECT session_id, turn_index, turn_type, tool_sub_index,
+                          target_level, decision_reason,
+                          l2_tokens, summary_tokens, tokens_saved,
+                          rrf_score, upgrade_rank, budget_remaining, topic_group
+                   FROM turn_plan WHERE session_id=?
+                   ORDER BY turn_index, turn_type, tool_sub_index""",
+                (session_id,),
+            )
+            return [
+                {"turn_index": r[1], "turn_type": r[2], "tool_sub_index": r[3],
+                 "target_level": r[4], "decision_reason": r[5],
+                 "l2_tokens": r[6], "summary_tokens": r[7], "tokens_saved": r[8],
+                 "rrf_score": r[9], "upgrade_rank": r[10], "budget_remaining": r[11],
+                 "topic_group": r[12]}
+                for r in cur
+            ]
+        # v5: 新 ORDER BY
         cur = self.conn.execute(
-            """SELECT session_id, turn_index, turn_type, tool_sub_index,
+            """SELECT session_id, turn_index, api_call_count, seq_index, turn_type,
                       target_level, decision_reason,
                       l2_tokens, summary_tokens, tokens_saved,
                       rrf_score, upgrade_rank, budget_remaining, topic_group
                FROM turn_plan WHERE session_id=?
-               ORDER BY turn_index, turn_type, tool_sub_index""",
+               ORDER BY turn_index, api_call_count, seq_index""",
             (session_id,),
         )
         return [
-            {"turn_index": r[1], "turn_type": r[2], "tool_sub_index": r[3],
-             "target_level": r[4], "decision_reason": r[5],
-             "l2_tokens": r[6], "summary_tokens": r[7], "tokens_saved": r[8],
-             "rrf_score": r[9], "upgrade_rank": r[10], "budget_remaining": r[11],
-             "topic_group": r[12]}
+            {"turn_index": r[1], "api_call_count": r[2], "seq_index": r[3],
+             "tool_sub_index": r[3], "turn_type": r[4],
+             "target_level": r[5], "decision_reason": r[6],
+             "l2_tokens": r[7], "summary_tokens": r[8], "tokens_saved": r[9],
+             "rrf_score": r[10], "upgrade_rank": r[11], "budget_remaining": r[12],
+             "topic_group": r[13]}
             for r in cur
         ]
 
     def delete_turn_plan(self, session_id: str) -> None:
+        if self._readonly:
+            logger.warning("delete_turn_plan called on readonly store, skipping")
+            return
         self.conn.execute("DELETE FROM turn_plan WHERE session_id=?", (session_id,))
         self.conn.commit()
 
@@ -547,10 +885,13 @@ class SQLiteStore:
     def write_query_embedding(self, session_id: str, turn_index: int,
                                embedding: List[float]) -> bool:
         """写入当前对话轮的 query_embedding（用户消息的嵌入向量）。"""
+        if self._readonly:
+            logger.warning("write_query_embedding called on readonly store, skipping")
+            return False
         try:
             self.conn.execute(
                 """UPDATE turn_cache SET query_embedding=?
-                   WHERE session_id=? AND turn_index=? AND turn_type='dialogue' AND tool_sub_index=0""",
+                   WHERE session_id=? AND turn_index=? AND role='user' AND api_call_count=0 AND seq_index=0""",
                 (_pack_f32(embedding), session_id, turn_index),
             )
             self.conn.commit()
@@ -561,8 +902,17 @@ class SQLiteStore:
 
     def read_query_embedding(self, session_id: str, turn_index: int) -> Optional[List[float]]:
         """读取指定对话轮的 query_embedding。"""
+        if self._readonly:
+            cur = self.conn.execute(
+                "SELECT query_embedding FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue'",
+                (session_id, turn_index),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                return _unpack_f32(row[0])
+            return None
         cur = self.conn.execute(
-            "SELECT query_embedding FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue'",
+            "SELECT query_embedding FROM turn_cache WHERE session_id=? AND turn_index=? AND role='user' AND api_call_count=0",
             (session_id, turn_index),
         )
         row = cur.fetchone()
@@ -633,12 +983,16 @@ class SQLiteStore:
                                turn_type: str, tool_sub_index: int,
                                topic_id: int) -> None:
         """写入或更新单条 turn_plan 的 topic_group，供 C-stage 话题检测使用。"""
+        if self._readonly:
+            logger.warning("upsert_turn_plan_topic called on readonly store, skipping")
+            return
+        api_call_count = 0 if turn_type == 'dialogue' else 1
         self.conn.execute(
-            """INSERT INTO turn_plan (session_id, turn_index, turn_type, tool_sub_index, topic_group)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(session_id, turn_index, turn_type, tool_sub_index)
+            """INSERT INTO turn_plan (session_id, turn_index, api_call_count, seq_index, turn_type, topic_group)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(session_id, turn_index, api_call_count, seq_index)
                DO UPDATE SET topic_group=excluded.topic_group""",
-            (session_id, turn_index, turn_type, tool_sub_index, topic_id),
+            (session_id, turn_index, api_call_count, tool_sub_index, turn_type, topic_id),
         )
         self.conn.commit()
 
@@ -651,6 +1005,22 @@ class SQLiteStore:
         )
         row = cur.fetchone()
         return row[0] if row and row[0] is not None else None
+
+    # ── write_tool_group stub（PR2 实现）──
+
+    def write_tool_group(self, session_id: str, turn_index: int,
+                          api_call_count: int, rows: List[Dict[str, Any]]) -> bool:
+        """批量写入一个工具组的全部消息行（assistant{tc} + tool×N）。
+
+        rows: 按拓扑排序后的消息列表，每行含 role/content/tool_call_id/...
+
+        PR1 定义接口但暂不调用（PR2 由 _flush_tool_buffer 调用）。
+        实现：BEGIN TRANSACTION → 逐行 INSERT → COMMIT → 返回 True/False。
+        """
+        if self._readonly:
+            logger.warning("write_tool_group called on readonly store, skipping")
+            return False
+        raise NotImplementedError("write_tool_group: PR2 实现, PR1 仅定义接口")
 
 
 def _infer_legacy_state(core_text: str) -> Tuple[str, ItemState]:
