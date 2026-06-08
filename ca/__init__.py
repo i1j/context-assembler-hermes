@@ -51,6 +51,24 @@ except ImportError:
     def get_current_write_origin() -> str:
         return "unknown"
 from .tool_summarizer import ToolSummarizer
+
+
+@dataclass
+class ToolGroupBuffer:
+    """一个 API 调用对应的工具组缓冲区。"""
+    thought: str
+    tool_defs: List[Dict]                    # ToolCall 定义列表
+    api_call_count: int
+    turn_index: int
+    finish_reason: str = "tool_calls"        # tool_calls / length
+    results: Dict[str, Dict] = None          # tool_call_id → 执行结果
+    usage: Optional[Dict] = None
+
+    def __post_init__(self):
+        if self.results is None:
+            self.results = {}
+
+
 from .lstage import BackfillThread
 
 logger = logging.getLogger(__name__)
@@ -213,6 +231,8 @@ class ContextAssembler:
 
         self.tool_summarizer = ToolSummarizer()
         self._topic_tool_boost: Set[int] = set()
+        self._tool_buffer: Dict[str, ToolGroupBuffer] = {}   # api_request_id → buffer
+        self._api_sequence: int = 0                          # fallback 自增计数器
         self.stats = AssembleStats()
 
         self._dialogue_backfill = BackfillThread(self, 'dialogue', Config.BACKFILL_DIALOGUE_RATE)
@@ -236,6 +256,11 @@ class ContextAssembler:
 
 
     def destroy(self):
+        # 0. Flush 悬挂 buffer
+        if self._tool_buffer:
+            n = len(self._tool_buffer)
+            logger.warning("[CA] destroy: flushing %d hanging tool groups", n)
+            self.flush_tool_buffer()
         # 1. 先等待所有 C‑stage 任务完成
         self.wait_for_pending(Config.SHUTDOWN_TIMEOUT)
         # 2. 再停止 L‑stage 线程
@@ -266,8 +291,7 @@ class ContextAssembler:
 
     # ---------- C‑stage ----------
     def process_turn_async(self, user_message: str, assistant_response: str,
-                           conversation_history: Optional[List[Dict]] = None,
-                           messages: Optional[List[Dict]] = None) -> int:
+                           conversation_history: Optional[List[Dict]] = None) -> int:
         expected = len([m for m in (conversation_history or []) if m.get("role") == "user"])
         with self._task_lock:
             target = max(self._turn_counter + 1, expected)
@@ -277,9 +301,8 @@ class ContextAssembler:
             self._turn_counter = target
             turn_index = target
 
-        logger.info("[CA] process_turn_async: starting C-stage for turn %d (expected=%d, messages=%s)",
-                    turn_index, expected,
-                    "yes" if messages else "no")
+        logger.info("[CA] process_turn_async: starting C-stage for turn %d (expected=%d)",
+                    turn_index, expected)
 
         l2_text = f"User: {user_message}\nAssistant: {assistant_response}"
         prev_l1 = self._get_previous_l1()
@@ -292,7 +315,7 @@ class ContextAssembler:
 
         thread = threading.Thread(
             target=self._run_c_stage,
-            args=(self._session_id, turn_index, prev_l1, l2_text, token_offset, messages,
+            args=(self._session_id, turn_index, prev_l1, l2_text, token_offset,
                   user_message, assistant_response, _bg_review),
             daemon=True, name=f"CA-CStage-{turn_index}"
         )
@@ -304,7 +327,7 @@ class ContextAssembler:
         return turn_index
 
     def _run_c_stage(self, session_id, turn_index, prev_l1, l2_text, token_offset,
-                     messages=None, user_message="", assistant_response="",
+                     user_message="", assistant_response="",
                      bg_review=False):
         start = time.monotonic()
         logger.info("[CA] _run_c_stage: START turn %d", turn_index)
@@ -398,31 +421,6 @@ class ContextAssembler:
             )
             self.cache.add_turn(turn_index, l0_text, l1_str, l0_emb, l1_emb)
 
-            if messages:
-                tool_turns = self._extract_tool_calls(messages)
-                for sub_index, turn in enumerate(tool_turns, start=1):
-                    try:
-                        tool_l1, tool_l0 = self.tool_summarizer.summarize(turn["tool_call"], turn["tool_responses"])
-                        try:
-                            tool_l1_emb = self.embed_client.embed(json.dumps(tool_l1, ensure_ascii=False))
-                            tool_l0_emb = self.embed_client.embed(tool_l0)
-                        except Exception:
-                            tool_l1_emb = None
-                            tool_l0_emb = None
-                        self.store.write_turn(
-                            session_id, turn_index,
-                            l0_text=tool_l0,
-                            l1_text=json.dumps(tool_l1, ensure_ascii=False),
-                            l0_embedding=tool_l0_emb, l1_embedding=tool_l1_emb,
-                            token_offset=token_offset,
-                            turn_type='tool', tool_sub_index=sub_index,
-                            l2_text=json.dumps(turn["l2_messages"], ensure_ascii=False),
-                            _assemble_status=0
-                        )
-                        self.cache.add_tool_turn(turn_index, sub_index, tool_l0, json.dumps(tool_l1, ensure_ascii=False), tool_l0_emb, tool_l1_emb)
-                    except Exception as e:
-                        logger.error("Tool call %d-%d failed: %s", turn_index, sub_index, e)
-
             if dialogue_ok:
                 self.stats.tool_pre_upgrade_count = 0
 
@@ -490,6 +488,226 @@ class ContextAssembler:
             else:
                 i += 1
         return tool_turns
+
+
+    # ---------- Tool Buffer ----------
+
+    def _on_api_response(self, *,
+                         api_request_id: str,
+                         assistant_message: Any,
+                         api_call_count: int,
+                         turn_index: int,
+                         finish_reason: str = "tool_calls",
+                         usage: Optional[Dict] = None) -> None:
+        """post_api_request hook handler — 将 assistant 响应写入 buffer。
+
+        从 assistant_message 提取 thought + tool_defs，
+        创建 ToolGroupBuffer 存入 _tool_buffer[api_request_id]。
+        """
+        thought = getattr(assistant_message, "content", "") or ""
+        tool_calls = getattr(assistant_message, "tool_calls", None) or []
+        tool_defs = []
+        for tc in tool_calls:
+            tc_id = getattr(tc, "id", "") or ""
+            tc_name = getattr(tc, "name", "") or ""
+            tc_args = getattr(tc, "arguments", None)
+            if isinstance(tc_args, str):
+                try:
+                    tc_args = json.loads(tc_args)
+                except (json.JSONDecodeError, TypeError):
+                    tc_args = {}
+            tool_defs.append({
+                "id": tc_id,
+                "type": getattr(tc, "type", "function"),
+                "function": {"name": tc_name, "arguments": tc_args},
+            })
+
+        # 截断保护：tool_defs 为空且 finish_reason 不是 tool_calls → 纯对话，不写入 buffer
+        if not tool_defs and finish_reason != "tool_calls":
+            return
+
+        self._tool_buffer[api_request_id] = ToolGroupBuffer(
+            thought=thought,
+            tool_defs=tool_defs,
+            api_call_count=api_call_count,
+            turn_index=turn_index,
+            finish_reason=finish_reason,
+            usage=usage,
+        )
+        logger.info("[CA] _on_api_response: buffered api_call_count=%d turn=%d api_request_id=%s tools=%d",
+                    api_call_count, turn_index, api_request_id, len(tool_defs))
+
+    def _on_pre_tool_call(self, *,
+                          tool_call_id: str,
+                          tool_name: str,
+                          args: Optional[Dict] = None,
+                          api_request_id: str = "") -> None:
+        """pre_tool_call hook handler — 在 buffer 中预注册工具占位。"""
+        buf = self._tool_buffer.get(api_request_id)
+        if buf is None:
+            # 容错：如果 buffer 不存在（异常时序），auto-create sentinel 条目
+            logger.warning("[CA] _on_pre_tool_call: no buffer for api_request_id=%s, auto-creating sentinel (api_call_count=999999)",
+                          api_request_id)
+            self._tool_buffer[api_request_id] = ToolGroupBuffer(
+                thought="",
+                tool_defs=[],
+                api_call_count=999999,
+                turn_index=self._turn_counter,
+            )
+            buf = self._tool_buffer[api_request_id]
+
+        if tool_call_id not in buf.results:
+            buf.results[tool_call_id] = {
+                "tool_name": tool_name,
+                "args": args or {},
+                "status": "pending",
+            }
+        logger.debug("[CA] _on_pre_tool_call: registered %s (%s) in api_request_id=%s",
+                     tool_name, tool_call_id, api_request_id)
+
+    def _on_post_tool_call(self, *,
+                           tool_call_id: str,
+                           tool_name: str,
+                           args: Optional[Dict] = None,
+                           result: Any = None,
+                           status: str = "ok",
+                           duration_ms: int = 0,
+                           error_type: Optional[str] = None,
+                           error_message: Optional[str] = None,
+                           api_request_id: str = "") -> None:
+        """post_tool_call hook handler — 将工具执行结果写入 buffer。"""
+        buf = self._tool_buffer.get(api_request_id)
+        if buf is None:
+            # 容错：auto-create sentinel
+            logger.warning("[CA] _on_post_tool_call: no buffer for api_request_id=%s, auto-creating sentinel (api_call_count=999999)",
+                          api_request_id)
+            self._tool_buffer[api_request_id] = ToolGroupBuffer(
+                thought="",
+                tool_defs=[],
+                api_call_count=999999,
+                turn_index=self._turn_counter,
+            )
+            buf = self._tool_buffer[api_request_id]
+
+        content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False) if result else ""
+
+        buf.results[tool_call_id] = {
+            "tool_name": tool_name,
+            "args": args or {},
+            "content": content,
+            "status": status,
+            "duration_ms": duration_ms,
+            "error_type": error_type,
+            "error_message": error_message,
+        }
+        logger.debug("[CA] _on_post_tool_call: filled %s (%s) status=%s dur=%dms",
+                     tool_name, tool_call_id, status, duration_ms)
+
+    def flush_tool_buffer(self, user_message: str = "") -> int:
+        """将 _tool_buffer 全部数据写入 store，并清空 buffer。
+
+        流程：
+        ① 按 buffer 创建顺序（api_call_count）排序
+        ② user 行 (api=0, seq=0)
+        ③ 每组 assistant{tc} (api=N, seq=0) + tool×M (api=N, seq=1..M)
+           — 调用 generate_group_summary 写入 assistant{tc}.l1_text
+           — 调用 summarize 生成 per-tool L1 (pop thought_process)
+        ④ 清空 buffer
+
+        Returns:
+            写入的行数（不含 future final 行）
+        """
+        if not self._tool_buffer:
+            logger.debug("[CA] flush_tool_buffer: buffer empty, no rows to write")
+            return 0
+
+        # 按 api_call_count 排序
+        sorted_items = sorted(
+            self._tool_buffer.items(),
+            key=lambda kv: kv[1].api_call_count,
+        )
+
+        total_rows = 0
+        for api_request_id, buf in sorted_items:
+            turn_idx = buf.turn_index
+
+            # ② user 行 (仅第一组写入，避免重复)
+            if buf.api_call_count == 1 and user_message:
+                self.store.write_turn(
+                    self._session_id, turn_idx,
+                    l0_text="", l1_text="",
+                    l0_embedding=None, l1_embedding=None,
+                    token_offset=0,
+                    api_call_count=0, seq_index=0, role='user',
+                    content=user_message,
+                    _assemble_status=0,
+                )
+                total_rows += 1
+
+            # 收集工具结果用于 generate_group_summary
+            tool_results_for_summary = []
+            for tc_def in buf.tool_defs:
+                tc_id = tc_def.get("id", "")
+                result_data = buf.results.get(tc_id, {})
+                tool_results_for_summary.append({
+                    "tool_name": tc_def.get("function", {}).get("name", ""),
+                    "status": result_data.get("status", "ok"),
+                    "result_summary": result_data.get("content", "")[:80],
+                })
+
+            group_summary = ToolSummarizer.generate_group_summary(
+                buf.thought, tool_results_for_summary
+            )
+
+            # ③ assistant{tc} 行 (api=N, seq=0)
+            tool_calls_json = json.dumps(buf.tool_defs, ensure_ascii=False)
+            self.store.write_turn(
+                self._session_id, turn_idx,
+                l0_text=group_summary.get("group_result", "工具组"),
+                l1_text=json.dumps(group_summary, ensure_ascii=False),
+                l0_embedding=None, l1_embedding=None,
+                token_offset=0,
+                api_call_count=buf.api_call_count, seq_index=0,
+                role='assistant', content=buf.thought,
+                tool_calls_json=tool_calls_json,
+                finish_reason=buf.finish_reason,
+                _assemble_status=0,
+            )
+            total_rows += 1
+
+            # ③ tool × M 行 (api=N, seq=1..M)
+            for seq_idx, tc_def in enumerate(buf.tool_defs, start=1):
+                tc_id = tc_def.get("id", "")
+                result_data = buf.results.get(tc_id, {})
+                tool_content = result_data.get("content", "")
+                tool_status = result_data.get("status", "ok")
+
+                per_tool_l1 = {
+                    "tool_name": tc_def.get("function", {}).get("name", ""),
+                    "result_summary": tool_content[:80] if tool_content else "无返回数据",
+                    "status": tool_status,
+                    "_assemble_status": 0,
+                }
+                self.store.write_turn(
+                    self._session_id, turn_idx,
+                    l0_text=per_tool_l1["tool_name"] + ": " + (tool_content[:60] if tool_content else "无返回"),
+                    l1_text=json.dumps(per_tool_l1, ensure_ascii=False),
+                    l0_embedding=None, l1_embedding=None,
+                    token_offset=0,
+                    api_call_count=buf.api_call_count, seq_index=seq_idx,
+                    role='tool', content=tool_content,
+                    tool_call_id=tc_id,
+                    tool_name=tc_def.get("function", {}).get("name", ""),
+                    status=tool_status,
+                    _assemble_status=0,
+                )
+                total_rows += 1
+
+        # ④ 清空 buffer
+        self._tool_buffer.clear()
+        logger.info("[CA] flush_tool_buffer: flushed %d rows for %d api groups",
+                    total_rows, len(sorted_items))
+        return total_rows
 
 
     # ---------- A‑stage ----------

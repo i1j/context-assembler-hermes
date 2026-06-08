@@ -1013,14 +1013,74 @@ class SQLiteStore:
         """批量写入一个工具组的全部消息行（assistant{tc} + tool×N）。
 
         rows: 按拓扑排序后的消息列表，每行含 role/content/tool_call_id/...
+              至少有一行且 seq_index 从 0 开始递增。
 
-        PR1 定义接口但暂不调用（PR2 由 _flush_tool_buffer 调用）。
-        实现：BEGIN TRANSACTION → 逐行 INSERT → COMMIT → 返回 True/False。
+        PR1 定义接口契约，PR2 完整实现。
+        实现：遍历 rows → 调用 write_turn 逐行写入（带重试）。
         """
         if self._readonly:
             logger.warning("write_tool_group called on readonly store, skipping")
             return False
-        raise NotImplementedError("write_tool_group: PR2 实现, PR1 仅定义接口")
+
+        # 使用指数退避重试整组写入
+        max_retries = getattr(Config, 'DB_MAX_RETRY', 3)
+        for attempt in range(max_retries):
+            try:
+                for row in rows:
+                    self.conn.execute(
+                        """INSERT OR REPLACE INTO turn_cache
+                           (session_id, turn_index, api_call_count, seq_index,
+                            role, content, tool_call_id, tool_name, tool_calls_json, finish_reason,
+                            api_request_id, duration_ms, status, error_type, error_message, usage_json,
+                            l0_text, l1_text, l0_embedding, l1_embedding, bm25_tokens, token_offset,
+                            query_embedding, _assemble_status, backfill_attempts)
+                           VALUES (:session_id, :turn_index, :api_call_count, :seq_index,
+                                   :role, :content, :tool_call_id, :tool_name, :tool_calls_json, :finish_reason,
+                                   :api_request_id, :duration_ms, :status, :error_type, :error_message, :usage_json,
+                                   :l0_text, :l1_text, :l0_embedding, :l1_embedding, :bm25_tokens, :token_offset,
+                                   :query_embedding, :_assemble_status, :backfill_attempts)""",
+                        {
+                            "session_id": session_id,
+                            "turn_index": turn_index,
+                            "api_call_count": api_call_count,
+                            "seq_index": row.get("seq_index", 0),
+                            "role": row.get("role", ""),
+                            "content": row.get("content"),
+                            "tool_call_id": row.get("tool_call_id"),
+                            "tool_name": row.get("tool_name"),
+                            "tool_calls_json": row.get("tool_calls_json"),
+                            "finish_reason": row.get("finish_reason"),
+                            "api_request_id": row.get("api_request_id"),
+                            "duration_ms": row.get("duration_ms"),
+                            "status": row.get("status"),
+                            "error_type": row.get("error_type"),
+                            "error_message": row.get("error_message"),
+                            "usage_json": row.get("usage_json"),
+                            "l0_text": row.get("l0_text", ""),
+                            "l1_text": row.get("l1_text", ""),
+                            "l0_embedding": _pack_f32(row.get("l0_embedding")) if row.get("l0_embedding") else None,
+                            "l1_embedding": _pack_f32(row.get("l1_embedding")) if row.get("l1_embedding") else None,
+                            "bm25_tokens": json.dumps(row.get("bm25_tokens"), ensure_ascii=False) if row.get("bm25_tokens") else None,
+                            "token_offset": row.get("token_offset", 0),
+                            "query_embedding": None,
+                            "_assemble_status": row.get("_assemble_status", 0),
+                            "backfill_attempts": row.get("backfill_attempts", 0),
+                        },
+                    )
+                self.conn.commit()
+                self._invalidate_session_cache()
+                logger.debug("[CA] write_tool_group: wrote %d rows for turn=%d api_call=%d",
+                             len(rows), turn_index, api_call_count)
+                return True
+            except sqlite3.OperationalError as exc:
+                if attempt < max_retries - 1:
+                    wait = 0.1 * (2 ** attempt)
+                    logger.debug("DB locked, retrying in %.2fs (attempt %d/%d)",
+                                 wait, attempt + 1, max_retries)
+                    time.sleep(wait)
+                else:
+                    logger.error("write_tool_group failed after %d retries: %s", max_retries, exc)
+                    return False
 
 
 def _infer_legacy_state(core_text: str) -> Tuple[str, ItemState]:

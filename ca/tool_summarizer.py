@@ -721,3 +721,66 @@ class ToolSummarizer:
         if tail_len < 0:
             return text[:max_len] + "…"
         return text[:head_len] + "…" + text[-tail_len:]
+
+    @staticmethod
+    def generate_group_summary(thought: str,
+                                tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """纯文本拼接工具组摘要，不调 LLM。
+
+        Args:
+            thought: assistant 的思考文本
+            tool_results: 工具结果列表，每项含 tool_name / status / result_summary
+
+        Returns:
+            {"group_intent": str, "group_result": str,
+             "tool_count": int, "state": "ok"|"error"|"blocked"|"cancelled"}
+        """
+        # 1. group_intent：截取 thought 首句（≤80 字符）
+        intent = (thought or "").strip().split("\n")[0][:80]
+
+        # 2. group_result：汇总各工具 result_summary
+        ok_count = 0
+        error_count = 0
+        tool_names = []
+        for tr in (tool_results or []):
+            name = tr.get("tool_name", "?")
+            tool_names.append(name)
+            st = tr.get("status", "ok")
+            if st == "ok":
+                ok_count += 1
+            else:
+                error_count += 1
+
+        # 确定整体状态
+        if error_count > 0 and ok_count == 0:
+            state = "error"
+        elif error_count > 0:
+            state = "error"  # 有工具失败就标 error（保守策略）
+        elif ok_count > 0:
+            state = "ok"
+        else:
+            state = "ok"
+
+        # 工具名去重后摘要
+        unique_tools = list(dict.fromkeys(tool_names))
+        tool_list = ", ".join(unique_tools[:5])
+        if len(unique_tools) > 5:
+            tool_list += f" 等 {len(unique_tools)} 种工具"
+
+        result_parts = []
+        for tr in (tool_results or []):
+            rs = tr.get("result_summary", "")
+            if rs:
+                result_parts.append(rs[:60])
+        result_str = "；".join(result_parts[:3])
+        if len(result_parts) > 3:
+            result_str += "…"
+
+        group_result = f"调用 {len(tool_results)} 个工具" if not result_str else result_str
+
+        return {
+            "group_intent": intent,
+            "group_result": group_result,
+            "tool_count": len(tool_results),
+            "state": state,
+        }

@@ -32,12 +32,16 @@ _engines_lock = threading.Lock()
 
 
 def register(ctx) -> None:
-    """注册 CA 插件的生命周期 hooks。"""
+    """注册 CA 插件的生命周期 hooks 和工具轮数据采集 hooks。"""
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("on_session_reset", _on_session_reset)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
+    # PR2: 工具轮数据采集钩子
+    ctx.register_hook("post_api_request", _on_post_api_request)
+    ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+    ctx.register_hook("post_tool_call", _on_post_tool_call)
 
 
 # ── Hook 分发函数 ──
@@ -116,6 +120,66 @@ def _on_post_llm_call(**kwargs: Any) -> None:
                 (kwargs.get("user_message", "") or "")[:60],
                 len(kwargs.get("assistant_response", "") or ""))
     plugin.post_llm_call(**kwargs)
+
+
+# ── PR2: 工具轮数据采集钩子 ──
+
+def _on_post_api_request(**kwargs: Any) -> None:
+    session_id = kwargs.get("session_id", "")
+    with _engines_lock:
+        plugin = _engines.get(session_id)
+    if not plugin or plugin._engine_errored:
+        return
+    try:
+        plugin._engine._on_api_response(
+            api_request_id=kwargs.get("api_request_id", ""),
+            assistant_message=kwargs.get("assistant_message"),
+            api_call_count=kwargs.get("api_call_count", 0),
+            turn_index=plugin._engine._turn_counter + 1,
+            finish_reason=kwargs.get("finish_reason", "stop"),
+            usage=kwargs.get("usage"),
+        )
+    except Exception as exc:
+        logger.warning("[CA] _on_post_api_request error: %s", exc)
+
+
+def _on_pre_tool_call(**kwargs: Any) -> None:
+    session_id = kwargs.get("session_id", "")
+    with _engines_lock:
+        plugin = _engines.get(session_id)
+    if not plugin or plugin._engine_errored:
+        return
+    try:
+        plugin._engine._on_pre_tool_call(
+            tool_call_id=kwargs.get("tool_call_id", ""),
+            tool_name=kwargs.get("tool_name", ""),
+            args=kwargs.get("args", {}),
+            api_request_id=kwargs.get("api_request_id", ""),
+        )
+    except Exception as exc:
+        logger.warning("[CA] _on_pre_tool_call error: %s", exc)
+
+
+def _on_post_tool_call(**kwargs: Any) -> None:
+    session_id = kwargs.get("session_id", "")
+    with _engines_lock:
+        plugin = _engines.get(session_id)
+    if not plugin or plugin._engine_errored:
+        return
+    try:
+        plugin._engine._on_post_tool_call(
+            tool_call_id=kwargs.get("tool_call_id", ""),
+            tool_name=kwargs.get("tool_name", ""),
+            args=kwargs.get("args", {}),
+            result=kwargs.get("result"),
+            status=kwargs.get("status", "ok"),
+            duration_ms=kwargs.get("duration_ms", 0),
+            error_type=kwargs.get("error_type"),
+            error_message=kwargs.get("error_message"),
+            api_request_id=kwargs.get("api_request_id", ""),
+        )
+    except Exception as exc:
+        logger.warning("[CA] _on_post_tool_call error: %s", exc)
 
 
 # ── 断路器 ──
@@ -329,7 +393,12 @@ class CAContextAssemblerPlugin:
         return "\n\n".join(merged)
 
     def post_llm_call(self, **kwargs: Any) -> None:
-        """在 LLM 响应后处理该轮对话，构建未来上下文的摘要。"""
+        """在 LLM 响应后处理该轮对话，构建未来上下文的摘要。
+
+        PR2 职责分离：
+        1. 先 flush_tool_buffer() 写入工具行（增量采集）
+        2. 再 process_turn_async() 异步处理对话轮摘要
+        """
         if self._engine_errored or not self._engine:
             logger.info("[CA] post_llm_call skipped: engine not available (errored=%s engine=%s)",
                        self._engine_errored, self._engine is not None)
@@ -351,17 +420,22 @@ class CAContextAssemblerPlugin:
             logger.info("[CA] post_llm_call: empty um and ar, skipped")
             return
 
+        # PR2 Step 1: flush tool buffer（增量采集的工具数据写入 store）
+        try:
+            rows_written = self._engine.flush_tool_buffer(user_message=user_message)
+            if rows_written > 0:
+                logger.info("[CA] post_llm_call: flushed %d tool rows to store", rows_written)
+        except Exception as exc:
+            logger.warning("[CA] post_llm_call: flush_tool_buffer error: %s", exc)
+
         # 传副本给异步线程，避免列表被外部修改导致竞态
         history_copy = list(conversation_history) if conversation_history else []
         logger.info("[CA] post_llm_call: calling process_turn_async for session %s turn %d",
                     self._session_id, self._engine._turn_counter + 1 if self._engine else -1)
-        # messages=history_copy 保留了完整对话列表（含 tool_calls），
-        # _run_c_stage 用它提取工具轮 + 写 l2_text（供 A-stage 重建）。
-        # 写入是累计快照模式，_rebuild_messages_from_cache 自动去重。
+        # PR2: 不再传 messages=history_copy，_run_c_stage 不再遍历 messages 写工具行
         self._engine.process_turn_async(
             user_message, assistant_response,
             history_copy,
-            messages=history_copy,
         )
         logger.info("[CA] post_llm_call: process_turn_async returned for session %s",
                     self._session_id)

@@ -304,26 +304,32 @@ class TestPreLlmCall:
 
 
 class TestPostLlmCall:
-    """post_llm_call 钩子。"""
+    """post_llm_call 钩子 — PR2 新增 flush_tool_buffer 前置。"""
 
-    def test_calls_process_turn_async(self):
-        """调用 engine.process_turn_async 传递正确的参数。"""
+    def test_calls_flush_then_process(self):
+        """先 flush_tool_buffer，再 process_turn_async，不再传 messages。"""
         plugin = CAContextAssemblerPlugin()
         mock_engine = MagicMock()
+        mock_engine.flush_tool_buffer.return_value = 3
         plugin._engine = mock_engine
         plugin._engine_errored = False
         plugin._session_id = "test_sid"
 
         plugin.post_llm_call(
-            user_message="你好",
-            assistant_response="好的",
-            conversation_history=[{"role": "user", "content": "你好"}],
+            user_message="查文件",
+            assistant_response="查完了",
+            conversation_history=[{"role": "user", "content": "查文件"}],
         )
 
+        # 先 flush
+        mock_engine.flush_tool_buffer.assert_called_once()
+        # 再 process_turn_async（不传 messages）
         mock_engine.process_turn_async.assert_called_once()
         args, kwargs = mock_engine.process_turn_async.call_args
-        assert "你好" in args
-        assert "好的" in args
+        assert "查文件" in args
+        assert "查完了" in args
+        # PR2: 不再传 messages 关键字参数
+        assert "messages" not in kwargs
 
     def test_skipped_when_errored(self):
         """引擎错误时跳过。"""
@@ -350,17 +356,20 @@ class TestPostLlmCall:
 
 
 class TestRegister:
-    """register() 注册 5 个钩子。"""
+    """register() 注册 8 个钩子。"""
 
-    def test_registers_five_hooks(self):
-        """register 注册 5 个生命周期钩子。"""
+    def test_registers_eight_hooks(self):
+        """register 注册 5 个生命周期 + 3 个工具轮数据采集钩子。"""
         ctx = MagicMock()
         register(ctx)
 
-        assert ctx.register_hook.call_count == 5
+        assert ctx.register_hook.call_count == 8
         hook_names = [call[0][0] for call in ctx.register_hook.call_args_list]
         assert "on_session_start" in hook_names
         assert "on_session_end" in hook_names
         assert "on_session_reset" in hook_names
         assert "pre_llm_call" in hook_names
         assert "post_llm_call" in hook_names
+        assert "post_api_request" in hook_names
+        assert "pre_tool_call" in hook_names
+        assert "post_tool_call" in hook_names

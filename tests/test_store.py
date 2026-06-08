@@ -448,10 +448,88 @@ def test_v5_write_turn_with_new_params(tmp_path):
 
 @pytest.mark.medium
 def test_v5_write_tool_group_stub(tmp_path):
-    """write_tool_group() stub 存在且 raise NotImplementedError
-    Steps: 调用 stub → NotImplementedError"""
-    db = tmp_path / "test_v5_stub.db"
+    """write_tool_group() 批量写入工具组
+    Steps: 写入 1 组 API（3 工具）→ 读出验证"""
+    db = tmp_path / "test_v5_tool_group.db"
     store = SQLiteStore(db_path=str(db))
-    with pytest.raises(NotImplementedError, match="PR2"):
-        store.write_tool_group("sid", 1, 1, [])
+    rows = [
+        # assistant{tc} 行
+        {"role": "assistant", "api_call_count": 1, "seq_index": 0,
+         "content": "我来查文件", "tool_calls_json": '[{"id":"c1","function":{"name":"read_file","arguments":"{\\"path\\":\\"/a\\"}"}}]',
+         "finish_reason": "tool_calls", "api_request_id": "req_001",
+         "l1_text": '{"group_intent":"查文件","group_result":"ok","tool_count":1,"state":"ok"}'},
+        # tool 行
+        {"role": "tool", "api_call_count": 1, "seq_index": 1,
+         "content": "file content", "tool_call_id": "c1", "tool_name": "read_file",
+         "status": "ok", "duration_ms": 150, "api_request_id": "req_001",
+         "l1_text": '{"tool_name":"read_file","result_summary":"file content","status":"ok"}'},
+    ]
+    result = store.write_tool_group("sid", 1, 1, rows)
+    assert result is True
+
+    records = store.read_session("sid")
+    assert len(records) == 2
+    # assistant{tc} 行 → role='assistant' → turn_type='dialogue'
+    assert records[0]["turn_type"] == "dialogue"
+    assert records[0]["api_call_count"] == 1
+    assert records[0]["tool_sub_index"] == 0  # mapped from seq_index
+    assert records[0]["tool_calls_json"] is not None
+    # tool 行 → role='tool' → turn_type='tool'
+    assert records[1]["turn_type"] == "tool"
+    assert records[1]["tool_call_id"] == "c1"
+    assert records[1]["status"] == "ok"
+    store.close()
+
+
+@pytest.mark.medium
+def test_v5_write_tool_group_multiple_api(tmp_path):
+    """write_tool_group 多 API 组写入
+    Steps: 写入 2 组 API（共 4 工具）→ 按 api_call_count 排序验证"""
+    db = tmp_path / "test_v5_multi_api.db"
+    store = SQLiteStore(db_path=str(db))
+    # 先写 user 行 (must exist for ordering)
+    store.write_turn("sid", 1, l0_text="hello", l1_text="{}", token_offset=0)
+    # API 组 1 (2 tools)
+    rows1 = [
+        {"role": "assistant", "api_call_count": 1, "seq_index": 0,
+         "content": "查文件", "tool_calls_json": "[]", "finish_reason": "tool_calls",
+         "api_request_id": "req_001", "l1_text": "{}"},
+        {"role": "tool", "api_call_count": 1, "seq_index": 1,
+         "content": "a.py", "tool_call_id": "c1", "tool_name": "read_file",
+         "status": "ok", "duration_ms": 100, "api_request_id": "req_001", "l1_text": "{}"},
+        {"role": "tool", "api_call_count": 1, "seq_index": 2,
+         "content": "b.py", "tool_call_id": "c2", "tool_name": "read_file",
+         "status": "ok", "duration_ms": 50, "api_request_id": "req_001", "l1_text": "{}"},
+    ]
+    store.write_tool_group("sid", 1, 1, rows1)
+    # API 组 2 (1 tool)
+    rows2 = [
+        {"role": "assistant", "api_call_count": 2, "seq_index": 0,
+         "content": "继续查", "tool_calls_json": "[]", "finish_reason": "tool_calls",
+         "api_request_id": "req_002", "l1_text": "{}"},
+        {"role": "tool", "api_call_count": 2, "seq_index": 1,
+         "content": "c.py", "tool_call_id": "c3", "tool_name": "search_files",
+         "status": "ok", "duration_ms": 80, "api_request_id": "req_002", "l1_text": "{}"},
+    ]
+    store.write_tool_group("sid", 1, 2, rows2)
+
+    records = store.read_session("sid")
+    # 1 user + 2 assistant{tc} + 3 tool = 6 rows
+    assert len(records) == 6
+    # 排序：user(api=0) → api=1 assistant → api=1 tool×2 → api=2 assistant → api=2 tool
+    assert records[0]["turn_type"] == "dialogue" and records[0]["api_call_count"] == 0
+    assert records[1]["api_call_count"] == 1 and records[1]["turn_type"] == "dialogue"
+    assert records[2]["api_call_count"] == 1 and records[2]["turn_type"] == "tool"
+    assert records[3]["api_call_count"] == 1 and records[3]["turn_type"] == "tool"
+    assert records[4]["api_call_count"] == 2 and records[4]["turn_type"] == "dialogue"
+    assert records[5]["api_call_count"] == 2 and records[5]["turn_type"] == "tool"
+    store.close()
+
+
+@pytest.mark.medium
+def test_v5_write_tool_group_readonly_skip(tmp_path):
+    """write_tool_group readonly 静默跳过"""
+    store = SQLiteStore(db_path=str(tmp_path / "test_v5_ro.db"), readonly=True)
+    result = store.write_tool_group("sid", 1, 1, [])
+    assert result is False
     store.close()

@@ -96,27 +96,43 @@ class TestToolTurnCStage:
     @patch('ca.ContextAssembler._call_llm_for_l1', return_value=('### 现象与问题\n- 无\n### 背景与约束\n- 无\n### 决策与方案\n- 无\n### 后续行动\n- 无\n<core_change>对话内容</core_change>', 'stop'))
     def test_TC_C_015_multiple_tool_calls(self, mock_llm, ca_engine):
         """C-stage 识别并拆分多个工具调用生成独立摘要"""
-        messages = [
-            {"role": "user", "content": "请帮我查天气和新闻"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"id": "call_1", "function": {"name": "get_weather", "arguments": "{}"}},
-                {"id": "call_2", "function": {"name": "get_news", "arguments": "{}"}}
-            ]},
-            {"role": "tool", "tool_call_id": "call_1", "content": '{"result":"晴"}'},
-            {"role": "tool", "tool_call_id": "call_2", "content": '{"result":"无新闻"}'},
-        ]
-        ca_engine.process_turn_async("", "", messages=messages)
+        from test_tool_buffer import MockAssistantMessage, MockToolCall
+
+        msg = MockAssistantMessage(
+            content="响应中",
+            tool_calls=[
+                MockToolCall(id="call_1", name="get_weather"),
+                MockToolCall(id="call_2", name="get_news"),
+            ],
+        )
+        ca_engine._on_api_response(
+            api_request_id="req_015", assistant_message=msg,
+            api_call_count=1, turn_index=1, finish_reason="tool_calls",
+        )
+        ca_engine._on_pre_tool_call(tool_call_id="call_1", tool_name="get_weather",
+                                      args={}, api_request_id="req_015")
+        ca_engine._on_pre_tool_call(tool_call_id="call_2", tool_name="get_news",
+                                      args={}, api_request_id="req_015")
+        ca_engine._on_post_tool_call(tool_call_id="call_1", tool_name="get_weather",
+                                       result='{"result":"晴"}', status="ok", duration_ms=50,
+                                       api_request_id="req_015")
+        ca_engine._on_post_tool_call(tool_call_id="call_2", tool_name="get_news",
+                                       result='{"result":"无新闻"}', status="ok", duration_ms=50,
+                                       api_request_id="req_015")
+
+        n = ca_engine.flush_tool_buffer(user_message="请帮我查天气和新闻")
+        assert n == 4  # 1 user + 1 assistant{tc} + 2 tool
+
+        ca_engine.process_turn_async("", "")
         ca_engine.wait_for_pending()
         cur = ca_engine.store.conn.execute(
-            "SELECT turn_type, tool_sub_index, l1_text FROM turn_cache "
-            "WHERE session_id=? AND turn_index=? ORDER BY tool_sub_index",
-            (TEST_SESSION, ca_engine._turn_counter)
+            "SELECT turn_type, seq_index, l1_text FROM turn_cache "
+            "WHERE session_id=? AND turn_index=1 ORDER BY api_call_count, seq_index",
+            (TEST_SESSION,),
         )
         rows = cur.fetchall()
         tool_recs = [r for r in rows if r[0] == 'tool']
         assert len(tool_recs) == 2
-        assert tool_recs[0][1] == 1
-        assert tool_recs[1][1] == 2
         for r in tool_recs:
             assert r[2] is not None
             json.loads(r[2])
@@ -176,20 +192,24 @@ class TestToolTurnCStage:
     @patch('ca.ContextAssembler._call_llm_for_l1', return_value=('### 现象与问题\n- 无\n### 背景与约束\n- 无\n### 决策与方案\n- 无\n### 后续行动\n- 无\n<core_change>对话</core_change>', 'stop'))
     def test_TC_C_020_store_and_cache(self, mock_llm, ca_engine):
         """工具轮摘要存入 turn_cache 并更新 AssemblyCache 工具轮字典"""
-        messages = [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"id": "c1", "function": {"name": "test", "arguments": "{}"}}
-            ]},
-            {"role": "tool", "tool_call_id": "c1", "content": '{"result":"ok"}'}
-        ]
-        ca_engine.process_turn_async("", "", messages=messages)
-        ca_engine.wait_for_pending()
-        cur = ca_engine.store.conn.execute(
-            "SELECT l1_text FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='tool'",
-            (TEST_SESSION, ca_engine._turn_counter)
+        from test_tool_buffer import MockAssistantMessage, MockToolCall
+
+        msg = MockAssistantMessage(
+            content="",
+            tool_calls=[MockToolCall(id="c1", name="test")],
         )
-        assert cur.fetchone() is not None
+        ca_engine._on_api_response(
+            api_request_id="req_020", assistant_message=msg,
+            api_call_count=1, turn_index=1, finish_reason="tool_calls",
+        )
+        ca_engine._on_post_tool_call(tool_call_id="c1", tool_name="test",
+                                       result='{"result":"ok"}', status="ok", duration_ms=1,
+                                       api_request_id="req_020")
+        n = ca_engine.flush_tool_buffer(user_message="hi")
+        assert n == 3  # 1 user + 1 assistant + 1 tool
+
+        ca_engine.process_turn_async("", "")
+        ca_engine.wait_for_pending()
         snap = ca_engine.cache.get_bm25_snapshot()
         assert snap is not None
 
@@ -237,15 +257,25 @@ class TestToolTurnCStage:
     @patch('ca.ContextAssembler._call_llm_for_l1', return_value=('### 现象与问题\n- 无\n### 背景与约束\n- 无\n### 决策与方案\n- 无\n### 后续行动\n- 无\n<core_change>对话</core_change>', 'stop'))
     def test_TC_C_025_unconditional_tool_summary(self, mock_llm, monkeypatch, ca_engine):
         """无条件摘要生成：组合关闭关键开关后工具轮摘要仍写入"""
+        from test_tool_buffer import MockAssistantMessage, MockToolCall
+
         monkeypatch.setattr('ca.config.Config.DEBUG_MODE', False)
-        messages = [
-            {"role": "user", "content": "go"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"id": "c", "function": {"name": "t", "arguments": "{}"}}
-            ]},
-            {"role": "tool", "tool_call_id": "c", "content": '{"result":"ok"}'}
-        ]
-        ca_engine.process_turn_async("", "", messages=messages)
+
+        msg = MockAssistantMessage(
+            content="",
+            tool_calls=[MockToolCall(id="c", name="t")],
+        )
+        ca_engine._on_api_response(
+            api_request_id="req_025", assistant_message=msg,
+            api_call_count=1, turn_index=1, finish_reason="tool_calls",
+        )
+        ca_engine._on_post_tool_call(tool_call_id="c", tool_name="t",
+                                       result='{"result":"ok"}', status="ok", duration_ms=1,
+                                       api_request_id="req_025")
+        n = ca_engine.flush_tool_buffer(user_message="go")
+        assert n == 3  # 1 user + 1 assistant + 1 tool
+
+        ca_engine.process_turn_async("", "")
         ca_engine.wait_for_pending()
         cnt = ca_engine.store.conn.execute(
             "SELECT COUNT(*) FROM turn_cache WHERE session_id=? AND turn_type='tool'", (TEST_SESSION,)
