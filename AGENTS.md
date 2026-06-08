@@ -4,7 +4,7 @@
 
 | 项       | 值                                                                        |
 | -------- | ------------------------------------------------------------------------- |
-| 版本     | v5.0-pr1 |
+| 版本     | v5.0-pr2 |
 | plugin.yaml | 声明 v4.5.1（未同步）                |
 | 部署方式 | 自包含独立副本                                                            |
 | 插件路径 | `~/.hermes/profiles/tester/plugins/ca_assembler/`                       |
@@ -15,7 +15,7 @@
 
 ## 注册接口
 
-`register(ctx)` 注册 5 个 Hermes 生命周期 hooks：
+`register(ctx)` 注册 8 个 Hermes hooks（5 生命周期 + 3 工具轮数据采集）：
 
 ```python
 def register(ctx) -> None:
@@ -24,6 +24,9 @@ def register(ctx) -> None:
     ctx.register_hook("on_session_reset", _on_session_reset)
     ctx.register_hook("pre_llm_call",     _on_pre_llm_call)
     ctx.register_hook("post_llm_call",    _on_post_llm_call)
+    ctx.register_hook("post_api_request", _on_post_api_request)
+    ctx.register_hook("pre_tool_call",    _on_pre_tool_call)
+    ctx.register_hook("post_tool_call",   _on_post_tool_call)
 ```
 
 ## Hook 分发函数
@@ -96,7 +99,7 @@ def _on_pre_llm_call(**kwargs: Any) -> Optional[str]:
 [~/1/5] terminal: 配置项 `context.engine` 为 compressor
 ```
 
-### `_on_post_llm_call` — 数据积累（C-stage）
+### `_on_post_llm_call` — 数据积累（C-stage，PR2 调整）
 
 ```python
 def _on_post_llm_call(**kwargs: Any) -> None:
@@ -111,10 +114,62 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 | `assistant_response`   | str  | LLM 的文本回复                   |
 | `conversation_history` | list | 本轮完整消息历史（含 tool 结果） |
 
-行为：异步调 `engine.process_turn_async(user_message, assistant_response, history_copy)`
+行为（PR2 职责分离）：
+1. **先同步 flush_tool_buffer()** — 将 `_tool_buffer` 中的增量采集数据写入 store
+2. **再异步 process_turn_async()** — 生成对话轮摘要（不传 messages 参数）
 `conversation_history` 传副本（列表拷贝），避免竞态。
+不再通过 `messages` 参数遍历全量 history 写工具行。
+
+### `_on_post_api_request` — 工具组结构捕获（PR2 新增）
+
+```python
+def _on_post_api_request(**kwargs: Any) -> None:
+```
+
+**kwargs**: `api_request_id`, `api_call_count`, `assistant_message`, `finish_reason`, `usage`, `session_id`
+
+行为：从 `assistant_message` 提取 `content`(thought) + `tool_calls` → 创建 `ToolGroupBuffer` 存入 `_tool_buffer[api_request_id]`。
+
+### `_on_pre_tool_call` — 工具预注册（PR2 新增）
+
+```python
+def _on_pre_tool_call(**kwargs: Any) -> None:
+```
+
+**kwargs**: `tool_name`, `args`, `tool_call_id`, `api_request_id`, `session_id`
+
+行为：在对应 buffer 中注册工具占位（status=pending）。buffer 不存在时 auto-create sentinel（api_call_count=999999）。
+
+### `_on_post_tool_call` — 工具结果填充（PR2 新增）
+
+```python
+def _on_post_tool_call(**kwargs: Any) -> None:
+```
+
+**kwargs**: `tool_name`, `args`, `result`, `tool_call_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, `error_message`, `session_id`
+
+行为：将工具执行结果填充到对应 buffer 中。Hermes 原始 status(`ok`/`error`/`blocked`/`cancelled`)透传。
 
 ## 变更历史
+
+### v5.0-pr2 — Buffer层 + 数据采集重定向（R2+R3+R4）（2026-06-22）
+
+基于技术方案（docs/tool-turn-refactor/）实施 PR2，完整 8 步实现。
+
+**关键变更**：
+- **ToolGroupBuffer 数据类**：`_tool_buffer: Dict[str, ToolGroupBuffer]`，无锁设计（Hermes 单线程模型）
+- **3 新 Hermes hook**：`post_api_request`(捕获结构) / `pre_tool_call`(预注册) / `post_tool_call`(填充结果)
+- **flush_tool_buffer()**：排序 buffer → write_tool_group → 清空，含结构化日志（≥5 条 `[CA]` 前缀）
+- **store.write_tool_group()**：完整实现（含指数退避重试），PR1 仅定义接口
+- **generate_group_summary()**：纯文本拼接工具组摘要 `{group_intent, group_result, tool_count, state}`，不调 LLM
+- **职责分离**：`process_turn_async` 移除 `messages` 参数；`_run_c_stage` 只写 user+final 行；`post_llm_call` 先 flush 再 process
+- **容错机制**：pre/post_tool_call 时 buffer 不存在 → auto-create sentinel(api_call_count=999999)；destroy 时 flush 悬挂 buffer
+- **Hermes 原始 status 透传**：`ok`/`error`/`blocked`/`cancelled`
+- **向后兼容**：现有测试适配 buffer 流程；`_extract_tool_calls` 保留为参考
+
+**测试**：新增 `test_tool_buffer.py`(15 个测试)，`test_store.py` 新增 3 个测试，`test_plugin.py` 更新 register 断言 + post_llm_call 顺序验证，`test_v440.py` 3 个工具轮测试迁移到 buffer 流程。**零新增回归**。
+
+**冲裁**：PR3（三级摘要+三级注入，R5+R6）按计划 defer 到后续迭代。
 
 ### v4.7.1 — L1 状态感知链路集成（2026-06-16）
 
@@ -404,6 +459,7 @@ print(water)
 
 | 文件 | 测试数 | 范围 |
 |------|--------|------|
+| `test_tool_buffer.py` | 15 | Buffer 层：ToolGroupBuffer(2) + _on_api_response(3) + _on_pre_tool_call(2) + _on_post_tool_call(3) + flush(4) + destroy(1) |
 | `test_c.py` | 25 | 对话轮 C‑stage：摘要生成、OODA 解析、状态标记、截断检测（v4.7.0）、DB 写入格式验证、配置参数 |
 | `test_a.py` | 20 | 对话轮 A‑stage：分层、双检索、RRF 融合、预算门控、截断保护、plan‑based 组装 |
 | `test_v440.py` | 40 | 工具轮 C‑stage(12) + A‑stage(8) + L‑stage(9) + Config等(11) |
