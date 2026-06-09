@@ -11,6 +11,7 @@ ca/__init__.py — ContextAssembler 主引擎 (v4.4.0 alpha)
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -1714,16 +1715,24 @@ class ContextAssembler:
                     else:
                         result = str(dict(list(parsed.items())[:2]))
             except (json.JSONDecodeError, TypeError):
-                pass
+                # Python repr(dict) fallback：单引号、True/False/None
+                try:
+                    parsed = ast.literal_eval(result)
+                    if isinstance(parsed, dict):
+                        for k in ("result", "output", "summary"):
+                            v = parsed.get(k)
+                            if v and isinstance(v, str):
+                                result = v
+                                break
+                        else:
+                            result = str(dict(list(parsed.items())[:2]))
+                except (ValueError, SyntaxError, TypeError):
+                    pass
         result = result.replace("/home/i1j", "~")
         count = data.get("tool_count", 0)
         state = data.get("state", "ok") or ""
-        thought = data.get("thought", "") or ""
         parts = []
-        if thought:
-            parts.append(f"[思考] {thought}")
-            # thought 已包含 intent，跳过重复的 intent
-        elif intent:
+        if intent:
             parts.append(intent)
         if result and (not intent or result != f"调用 {count} 个工具"):
             parts.append(f"→{result}")
@@ -1734,7 +1743,8 @@ class ContextAssembler:
         if state:
             text += f"，{state}"
         text += "）"
-        return text[:200]
+        # 不设总上限——thought（200）、result 各工具（60→上游已截）各自独立截断
+        return text
 
     def _compute_tail_start(self, messages):
         """从消息尾部反向累计对话消息的 token 数，找到对话 tail 保护区。

@@ -15,6 +15,7 @@ ca/tool_summarizer.py — 工具轮摘要规则引擎 (v4.4.0 alpha)
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -759,14 +760,32 @@ class ToolSummarizer:
                         # 没有任何文本字段 → 压缩为简短描述
                         s = str(dict(list(parsed.items())[:3]))
             except (json.JSONDecodeError, TypeError):
-                pass
+                # Python repr(dict) fallback：单引号、True/False/None
+                try:
+                    parsed = ast.literal_eval(s)
+                    if isinstance(parsed, dict):
+                        for key in ("result", "output", "summary", "message"):
+                            val = parsed.get(key)
+                            if val and isinstance(val, str):
+                                s = val
+                                break
+                        else:
+                            s = str(dict(list(parsed.items())[:3]))
+                except (ValueError, SyntaxError, TypeError):
+                    pass
         elif s.startswith("[") and s.endswith("]"):
             try:
                 parsed = json.loads(s)
                 if isinstance(parsed, list):
                     s = f"[{len(parsed)} items]"
             except (json.JSONDecodeError, TypeError):
-                pass
+                # Python repr(list) fallback：单引号、True/False/None
+                try:
+                    parsed = ast.literal_eval(s)
+                    if isinstance(parsed, list):
+                        s = f"[{len(parsed)} items]"
+                except (ValueError, SyntaxError, TypeError):
+                    pass
         s = s.replace("/home/i1j", "~")
         return s[:max_len]
 
