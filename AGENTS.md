@@ -150,109 +150,8 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 
 行为：将工具执行结果填充到对应 buffer 中。Hermes 原始 status(`ok`/`error`/`blocked`/`cancelled`)透传。
 
-## 变更历史
 
-### v5.0-pr3 — 三级摘要 + 三级注入（R5+R6）+ cache 新主键（2026-06-22）
 
-基于技术方案完整实施 PR3（8 步），实现三级摘要和三级注入。
-
-**关键变更**：
-- **`_rebuild_messages_from_cache` 版本路由**：v5 从新列（role/content/tool_calls_json/tool_call_id）重建消息，v4 从 l2_text JSON 重建。含向后兼容扩展（旧 l2_text JSON 数组在 content 中时自动展开）
-- **`TurnPlanEntry` 扩展**：新增 `api_call_count`/`seq_index` 字段，`as_dict()` 同步输出
-- **`_compute_turn_plan_v2` 三级判定**：新增工具组（`turn_type="tool_group"`）条目，从 cache `tool_group_l1_texts` 读取摘要
-- **`_build_messages_from_plan` 三级注入**：工具组条目注入 `[~/N/g]` 标记，调用 `_format_group_summary()` 格式化
-- **`_format_group_summary()`**：工具组 L1 JSON → 可读文本，格式 `工具组：intent→result（N个，state）`
-- **`_CA_TAG_RE` 更新**：`r'^\[~/\d+(?:/\d+|/g)?\]\s*'` 匹配三类标记
-- **`_deduplicate_messages` 适配**：注释更新三位格式 `[~/N/0]`/`[~/N/g]`/`[~/N/M]`
-- **`AssemblyCache` 工具组缓存**：新增 `tool_group_l1_texts`/`tool_group_l0_texts`，`CacheBuilder.build()` 检测 `tool_calls_json` 非空行关联到工具组
-- **`store.py` 适配**：`read_turn_texts`/`read_assemble_status`/`increment_backfill_attempts` 支持 `turn_type="tool_group"` 映射 role='assistant'
-
-**测试**：新增 `test_pr3_injection.py`（8 测试），覆盖版本路由(3)、三级判定注入(3)、cache 新主键(1)、端到端(1)。**零新增回归**。
-
-### v5.0-pr2 — Buffer层 + 数据采集重定向（R2+R3+R4）（2026-06-22）
-
-基于技术方案（docs/tool-turn-refactor/）实施 PR2，完整 8 步实现。
-
-**关键变更**：
-- **ToolGroupBuffer 数据类**：`_tool_buffer: Dict[str, ToolGroupBuffer]`，无锁设计（Hermes 单线程模型）
-- **3 新 Hermes hook**：`post_api_request`(捕获结构) / `pre_tool_call`(预注册) / `post_tool_call`(填充结果)
-- **flush_tool_buffer()**：排序 buffer → write_tool_group → 清空，含结构化日志（≥5 条 `[CA]` 前缀）
-- **store.write_tool_group()**：完整实现（含指数退避重试），PR1 仅定义接口
-- **generate_group_summary()**：纯文本拼接工具组摘要 `{group_intent, group_result, tool_count, state}`，不调 LLM
-- **职责分离**：`process_turn_async` 移除 `messages` 参数；`_run_c_stage` 只写 user+final 行；`post_llm_call` 先 flush 再 process
-- **容错机制**：pre/post_tool_call 时 buffer 不存在 → auto-create sentinel(api_call_count=999999)；destroy 时 flush 悬挂 buffer
-- **Hermes 原始 status 透传**：`ok`/`error`/`blocked`/`cancelled`
-- **向后兼容**：现有测试适配 buffer 流程；`_extract_tool_calls` 保留为参考
-
-**测试**：新增 `test_tool_buffer.py`(15 个测试)，`test_store.py` 新增 3 个测试，`test_plugin.py` 更新 register 断言 + post_llm_call 顺序验证，`test_v440.py` 3 个工具轮测试迁移到 buffer 流程。**零新增回归**。
-
-**冲裁**：PR3（三级摘要+三级注入，R5+R6）按计划 defer 到后续迭代。
-
-### v4.7.1 — L1 状态感知链路集成（2026-06-16）
-
-基于 v1.5.1 Final → v1.6 Final 迭代，新增状态前缀提取与结构化透传，对抗小模型"完成时态"幻觉：
-
-- **ca/post_process.py**：新增 `ItemState` 枚举（DONE/PLANNED/DISCUSSING/UNKNOWN）+ `STATE_PREFIX_REGEX`（含模块级 fail-fast assert）+ `_normalize_state()`（作用域隔离归一化）+ `parse_core_change_state()`（结构化透传，含管理动作降级）；标题统一"决策与共识"→"决策与方案"；`parse_v1_markdown_xml` 返回三元组 `(l1_dict, l0_text, core_state)`
-- **ca/prompts.py**：v1.6 Final 版本，`<example>` 标签 3 场景示例，人设"研发对话意图分析器"，优先级规则（已实施 > 计划 > 探讨），`【】`状态标签
-- **ca/ooda_parser.py**：`TITLE_ALIASES` 增加"决策与方案"
-- **ca/store.py**：新增 `_infer_legacy_state()`（文本自检推断历史状态）+ `MANAGEMENT_ACTION_KEYWORDS` 集成 + `format_previous_summary_for_prompt` 适配
-- **ca/__init__.py**：适配新签名；状态注入 `l1_dict["_state"]`，零 schema 变更
-- **管理动作关键词修复**（commit 0ee67e8）：匹配逻辑修复，含 AGENTS.md 同步
-- **所有测试文件**：标题统一 + 状态前缀场景 + prompt 检测更新
-
-### v5.0-pr1 — 存储重构 + 惰性迁移（2026-06-22）
-
-PR1 为工具轮数据重构的第一阶段，聚焦存储层重构（`ca/store.py`），为 PR2（数据采集重定向）+ PR3（三级注入）奠定基础。
-
-**关键变更**：
-
-- **v5 turn_cache schema**：新主键 `(session_id, turn_index, api_call_count, seq_index)`；消息独立列（`role, content, tool_call_id, tool_name, tool_calls_json, finish_reason`）；元数据列（`api_request_id, duration_ms, status, error_type, error_message, usage_json`）
-- **v4 向后兼容**：`turn_type` / `tool_sub_index` / `l2_text` 作为 `GENERATED ALWAYS AS STORED` 虚拟列保留至 PR2
-- **turn_plan PK 扩展**：含 `api_call_count` + `seq_index`，支持逐工具调度
-- **Readonly 模式**：`SQLiteStore(path, readonly=True)` 以 `?mode=ro` 打开 v4 旧库只读；`readonly=False` 打开 v5 新库读写
-- **版本路由**：`_readonly` 标志控制 v4/v5 查询路径——v5 用 `ORDER BY turn_index, api_call_count, seq_index` + `role` 过滤；v4 保留旧 ORDER BY + `turn_type` 过滤
-- **writable guard**：v4 DB 通过可写模式打开时 `RuntimeError` 阻断
-- **`write_tool_group()` stub**：定义接口契约（PR2 实现）
-
-**设计文档**：
-- `pr1-store-plan.md`：PR1 实现方案（4 视角 34 条意见全部闭环）
-- `pr1-review-decisions.md`：多视角审查裁决记录
-- `docs/tool-turn-refactor/tool-turn-refactor-technical-plan.md`：整体技术方案
-
-### v4.7.0 — L1 摘要系统重构（2026-06-15）
-
-全面吸收白皮书 v1.2 Gold Master 设计（`docs/ca-l1-refactor/ca-l1-whitepaper-v1.2-gm.md`），重构 L1 摘要生成链路：
-
-- **ca/post_process.py**（新增）：`parse_v1_markdown_xml` 防御性解析器 + `_safe_truncate` 智能截断 + `_json_to_v1_markdown` 格式转换
-- **ca/prompts.py**：替换为"研发对话意图分析器"人设，4 类 Markdown + `<core_change>` XML 标签
-- **ca/__init__.py**：新增 `L1TruncatedException`；`_call_llm_for_l1` 返回 `Tuple[str,str]`；截断检测下沉至 `_run_c_stage`；独立 `temperature`/`max_tokens`
-- **ca/config.py**：新增 `L1_TEMPERATURE`(0.3) + `L1_MAX_TOKENS`(800) + validate + reload
-- **ca/ooda_parser.py**：`TITLE_ALIASES` 扩展 4 类中文别名
-- **ca/store.py**：`format_previous_summary_for_prompt` 历史适配器
-- **ca/lstage.py**：同步新签名 + 截断检测
-- **ca/stats.py**：新增 4 个统计字段（truncated_fallback / parse_fallback_count / skipped_empty / l1_latency_ms）
-
-**设计哲学**：PDD (Prompt-Driven Development) — 模型负责语义理解和 Markdown 续写，Python 代码负责截断检测、格式清洗、边界校验、新旧数据兼容。
-
-### v4.6.0 — 话题拣选重构（2026-06-13）
-
-重构检索系统为话题分割 + 三级定级 + 检索迁移：
-
-- **ca/retrieval.py**：替换为话题分割引擎：Jaccard 分词聚类、形心与半径定级
-- **ca/ooda_parser.py**：OODA 分区 + TITLE_ALIASES 中文别名系统
-- **ca/config.py**：新增 6 个 Topic 配置项
-- **turn_plan 计算**：compute_turn_plan_v2() 基于话题级别的 Plan 分配
-- **Store 层**：新增 topic_group、turn_plan 存储、query_embedding 列
-- **Embedding 降级修复**：embed 失败抛异常走 None 降级（非伪向量）
-- **Embedding 超时快速降级**：EMBED_MAX_RETRIES 默认 2→0
-
-### v4.5.x — ToolTurn 结构化摘要
-
-工具轮结构化摘要系统：10 个结构化 handler + turn_type/tool_sub_index 双键设计。
-
-### v4.4.x — 初始版本
-
-基础三层管线（C-stage 摘要 → A-stage 组装 → L-stage 补全）+ DB 存储 + 去重 + 断路器。
 
 ## 存储结构
 
@@ -333,6 +232,7 @@ PR1 为工具轮数据重构的第一阶段，聚焦存储层重构（`ca/store.
 | `CA_L1_MAX_TOKENS` | 800 | L1 摘要生成最大 Token 数 |
 | `CA_PROTECT_TAIL_TOKENS` | 10000 | 对话轮尾区保护 Token 数 |
 | `CA_TOOL_TAIL_TURN_COUNT` | 2 | 工具轮尾区保留最近对话轮数 |
+| `CA_SYSTEM_TAIL_TURN_COUNT` | 2 | 系统尾区：最近 N 条系统消息原文透传，更早的截断为 L0 风格（v4.7 格式，优先断句截断） |
 | `CA_COMPRESSION_THRESHOLD` | 0.50 | 压缩警戒比值 |
 | `CA_LLM_THINK` | 未设置 | L1 LLM think 参数（1/0/true/false） |
 
@@ -543,6 +443,7 @@ print(water)
 | `tests/docs/testplan.md` | 完整测试计划文档，含需求追溯矩阵 |
 | `tests/docs/qa-bug-report.md` | QA 缺陷报告 |
 | `tests/docs/test-report.md` | 测试执行报告 |
+| `tests/docs/v5.0.0-test-architecture.md` | v5.0.0 测试体系架构（含覆盖矩阵、fixture、已知状态） |
 | `tests/docs/bugs/` | 逐个 Bug 分析文档（7 个） |
 
 ### 运行方式
@@ -607,6 +508,7 @@ Hermes 有两条完全独立的机制：
 
 | 文档 | 路径 | 内容 |
 |------|------|------|
+| 变更历史 | `docs/changelog.md` | 全版本变更记录（唯一权威源） |
 | 技术方案 | `docs/technical-plan.md` | 完整架构设计（已同步至 v4.7.1） |
 | 调试报告验证工作流 | `docs/ca-debug-report-fix-verification.md` | 修复验证流程、关键管线代码位置 |
 | CA→Reasonix 迁移分析 | `docs/ca-to-reasonix-analysis.md` | 引擎迁移与适配分析 |
