@@ -221,9 +221,9 @@ reasonix/internal/hook.(*Runner).PreToolUse
 
 | 文档 | 路径 | 内容 |
 |---|---|---|
-| CA v5 试验计划 | `docs/ca-v5-test-plan.md` | 缓存友好改进 + 参数调优 |
-| 调试报告验证工作流 | `docs/ca-debug-report-fix-verification.md` | 修复验证流程 |
-| 技术方案 | `docs/technical-plan.md` | CA 完整设计 |
+| CA v5 试验计划 | `../test-plans/ca-v5-test-plan.md` | 缓存友好改进 + 参数调优 |
+| 调试报告验证工作流 | `../debug/ca-debug-report-fix-verification.md` | 修复验证流程 |
+| 技术方案 | `technical-plan.md` | CA 完整设计 |
 
 ---
 

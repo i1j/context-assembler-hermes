@@ -1,9 +1,9 @@
 """
-ca/lstage.py — L‑stage 异步补全线程 (v4.4.0 alpha)
+ca/lstage.py — L‑stage 异步补全线程 (v5.0 tool_group)
 
 功能：
-- 对话轮与工具轮各自独立补全。
-- 补全对话轮时自动拆分工具调用为独立工具轮。
+- 对话轮补全 + 工具轮补全（tool_group 格式，no per-tool 条目）。
+- 补全对话轮时自动提取工具调用并回填为 tool_group。
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 from .config import Config
 from .post_process import robust_json_parse, clean_increment, parse_v1_markdown_xml
+from .tool_summarizer import ToolSummarizer
 from . import L1TruncatedException
 
 if TYPE_CHECKING:
@@ -81,13 +82,13 @@ class BackfillThread(threading.Thread):
             logger.debug("L‑stage %s backfilled %d turns", self.turn_type, count)
 
     def _backfill_dialogue(self, rec: Dict, l2_text: str):
+        """回填对话轮 L1，并提取工具调用回填为 tool_group。"""
         prev_l1 = self._get_prev_l1(rec["turn_index"])
         try:
             response_text, finish_reason = self.engine._call_llm_for_l1(prev_l1, l2_text)
         except L1TruncatedException as e:
             logger.warning("[CA-METRIC] ca.l1.truncated_fallback: turn=%d, finish_reason=truncated, len=%d",
                            rec["turn_index"], len(e.response_text))
-            # 截断降级：设 _assemble_status=1 留在待补全队列
             session_id = self.engine._session_id
             turn_index = rec["turn_index"]
             turn_type = rec["turn_type"]
@@ -124,99 +125,133 @@ class BackfillThread(threading.Thread):
             l0_emb = None
         self._update_record(rec, l0, l1_str, l0_emb, l1_emb)
 
-        # 拆分为工具轮
+        # 提取工具调用，回填 tool_group
+        self._backfill_tool_group(rec, l2_text)
+
+    def _backfill_tool_group(self, rec: Dict, l2_text: str):
+        """从 l2_text 中提取工具调用，回填为 tool_group 格式（v5）。"""
         try:
             msgs = json.loads(l2_text)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             return
         if not isinstance(msgs, list):
             return
         tool_turns = self.engine._extract_tool_calls(msgs)
-        for sub_index, turn in enumerate(tool_turns, start=1):
-            try:
-                tool_l1, tool_l0 = self.engine.tool_summarizer.summarize(
-                    turn["tool_call"], turn["tool_responses"]
-                )
-                try:
-                    tool_l1_emb = self.engine.embed_client.embed(json.dumps(tool_l1, ensure_ascii=False))
-                    tool_l0_emb = self.engine.embed_client.embed(tool_l0)
-                except Exception:
-                    tool_l1_emb = None
-                    tool_l0_emb = None
-                self.engine.store.write_turn(
-                    self.engine._session_id, rec["turn_index"],
-                    l0_text=tool_l0,
-                    l1_text=json.dumps(tool_l1, ensure_ascii=False),
-                    l0_embedding=tool_l0_emb,
-                    l1_embedding=tool_l1_emb,
-                    turn_type='tool', tool_sub_index=sub_index,
-                    l2_text=json.dumps(turn["l2_messages"], ensure_ascii=False),
-                    _assemble_status=0
-                )
-                self.engine.cache.add_tool_turn(
-                    rec["turn_index"], sub_index,
-                    tool_l0, json.dumps(tool_l1, ensure_ascii=False),
-                    tool_l0_emb, tool_l1_emb
-                )
-                self.engine.stats.tool_backfill_success += 1
-            except Exception as e:
-                logger.warning("L‑stage tool backfill failed for turn %d-%d: %s",
-                               rec["turn_index"], sub_index, e)
-                self.engine.stats.tool_backfill_failure += 1
-
-    def _backfill_tool(self, rec: Dict, l2_text: str):
-        try:
-            msgs = json.loads(l2_text)
-        except (json.JSONDecodeError, TypeError):
-            raise ValueError("L2 data is not valid JSON")
-        if not msgs or not isinstance(msgs, list):
-            raise ValueError("L2 data is not a non-empty list")
-        tool_turns = self.engine._extract_tool_calls(msgs)
         if not tool_turns:
-            raise ValueError("No tool calls found in L2 data")
+            return
+
+        session_id = self.engine._session_id
+        turn_idx = rec["turn_index"]
+        api_count = 1  # 补全场景不保留原始 api_call_count，统一为 1
+
+        per_tool_summaries = []
         for sub_index, turn in enumerate(tool_turns, start=1):
-            tool_l1, tool_l0 = self.engine.tool_summarizer.summarize(
-                turn["tool_call"], turn["tool_responses"]
-            )
+            tc_call = turn["tool_call"]
+            tc_responses = turn["tool_responses"]
             try:
-                tool_l1_emb = self.engine.embed_client.embed(json.dumps(tool_l1, ensure_ascii=False))
-                tool_l0_emb = self.engine.embed_client.embed(tool_l0)
+                tool_l1, tool_l0 = self.engine.tool_summarizer.summarize(tc_call, tc_responses)
+            except Exception as e:
+                logger.warning("ToolSummarizer failed during backfill turn %d-%d: %s",
+                               turn_idx, sub_index, e)
+                continue
+
+            try:
+                l1_emb = self.engine.embed_client.embed(json.dumps(tool_l1, ensure_ascii=False))
+                l0_emb = self.engine.embed_client.embed(tool_l0)
             except Exception:
-                tool_l1_emb = None
-                tool_l0_emb = None
+                l1_emb = None
+                l0_emb = None
+
+            tool_content = json.dumps([r.get("content", "") for r in tc_responses], ensure_ascii=False)
+            tc_id = tc_call.get("id", "")
+            tc_name = tc_call.get("function", {}).get("name", "")
+            tc_status = tool_l1.get("status", "ok")
+
+            # ① 写 tool 行（v5 格式）
             self.engine.store.write_turn(
-                self.engine._session_id, rec["turn_index"],
+                session_id, turn_idx,
                 l0_text=tool_l0,
                 l1_text=json.dumps(tool_l1, ensure_ascii=False),
-                l0_embedding=tool_l0_emb,
-                l1_embedding=tool_l1_emb,
-                turn_type='tool', tool_sub_index=sub_index,
-                l2_text=json.dumps(turn["l2_messages"], ensure_ascii=False),
-                _assemble_status=0
-            )
-            self.engine.cache.add_tool_turn(
-                rec["turn_index"], sub_index,
-                tool_l0, json.dumps(tool_l1, ensure_ascii=False),
-                tool_l0_emb, tool_l1_emb
+                l0_embedding=l0_emb,
+                l1_embedding=l1_emb,
+                api_call_count=api_count, seq_index=sub_index,
+                role='tool', content=tool_content,
+                tool_call_id=tc_id,
+                tool_name=tc_name,
+                status=tc_status,
+                _assemble_status=0,
             )
 
+            per_tool_summaries.append({
+                "tool_name": tc_name,
+                "l0": tool_l0,
+                "l1": json.dumps(tool_l1, ensure_ascii=False),
+                "status": tc_status,
+                "result_summary": tool_l1.get("result_summary", tool_content[:80]),
+            })
+
+        if not per_tool_summaries:
+            logger.warning("No tool summaries generated during backfill turn %d", turn_idx)
+            return
+
+        # ② 组摘要：找 assistant 消息（含 tool_calls 的那条）提取 thought
+        thought = ""
+        for m in msgs:
+            if m.get("role") == "assistant" and "tool_calls" in m:
+                thought = m.get("content", "") or ""
+                break
+        tool_results_for_summary = [
+            {"tool_name": s["tool_name"], "status": s["status"],
+             "result_summary": s["result_summary"][:80]}
+            for s in per_tool_summaries
+        ]
+        group_summary = ToolSummarizer.generate_group_summary(thought, tool_results_for_summary)
+
+        # ③ 组 L0
+        group_l0_parts = [s["l0"][:55] for s in per_tool_summaries[:5]]
+        group_l0 = " | ".join(group_l0_parts)
+        if len(per_tool_summaries) > 5:
+            group_l0 += "..."
+
+        # ④ tool_calls_json：从 tool_turns 重建
+        tool_defs = [t["tool_call"] for t in tool_turns]
+        tool_calls_json = json.dumps(tool_defs, ensure_ascii=False)
+
+        # ⑤ 写 assistant{tc} 行
+        self.engine.store.write_turn(
+            session_id, turn_idx,
+            l0_text=group_l0,
+            l1_text=json.dumps(group_summary, ensure_ascii=False),
+            l0_embedding=None, l1_embedding=None,
+            api_call_count=api_count, seq_index=0,
+            role='assistant', content=thought,
+            tool_calls_json=tool_calls_json,
+            finish_reason='tool_calls',
+            _assemble_status=0,
+        )
+
+        # ⑥ 更新 cache
+        self.engine.cache.add_tool_group(
+            turn_idx, api_count,
+            group_l0, json.dumps(group_summary, ensure_ascii=False),
+        )
+
+    def _backfill_tool(self, rec: Dict, l2_text: str):
+        """回填旧 per-tool 记录（legacy 兼容），转为 tool_group 格式。"""
+        self._backfill_tool_group(rec, l2_text)
+
     def _update_record(self, rec, l0, l1, l0_emb, l1_emb):
+        """更新对话轮记录（不更新工具轮——已由 _backfill_tool_group 处理）。"""
         session_id = self.engine._session_id
         turn_index = rec["turn_index"]
-        turn_type = rec["turn_type"]
-        sub_index = rec.get("tool_sub_index", 0)
         self.engine.store.write_turn(
             session_id, turn_index,
             l0_text=l0, l1_text=l1,
             l0_embedding=l0_emb, l1_embedding=l1_emb,
-            turn_type=turn_type, tool_sub_index=sub_index,
+            turn_type="dialogue", tool_sub_index=0,
             l2_text=rec.get("l2_text"), _assemble_status=0,
         )
-        if turn_type == "dialogue":
-            self.engine.cache.add_turn(turn_index, l0, l1, l0_emb, l1_emb)
-        else:
-            key = (turn_index, sub_index)
-            self.engine.cache.add_tool_turn(turn_index, sub_index, l0, l1, l0_emb, l1_emb)
+        self.engine.cache.add_turn(turn_index, l0, l1, l0_emb, l1_emb)
 
     def _handle_failure(self, rec: Dict):
         session_id = self.engine._session_id
@@ -235,7 +270,6 @@ class BackfillThread(threading.Thread):
                 turn_type=turn_type, tool_sub_index=sub_index,
                 l2_text=rec.get("l2_text"), _assemble_status=2,
             )
-            # 同时更新 backfill_attempts 计数
             self.engine.store.conn.execute(
                 "UPDATE turn_cache SET backfill_attempts=? WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?",
                 (new_attempts, session_id, turn_index, turn_type, sub_index)

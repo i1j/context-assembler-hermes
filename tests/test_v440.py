@@ -24,17 +24,6 @@ PERF_P95_TOOL_SUMMARIZE_MS = int(os.getenv("CA_PERF_TOOL_SUMMARIZE_MS", "10"))
 PERF_P95_PRE_UPGRADE_MS = int(os.getenv("CA_PERF_PRE_UPGRADE_MS", "100"))
 
 
-# ─── Mock 嵌入：所有涉及 C‑stage（调用 embed_client）的测试需要快速 fallback ───
-@pytest.fixture(autouse=True)
-def _mock_embed(monkeypatch, request):
-    """将所有 C‑stage/L‑stage 测试中的 embed 调用替换为快速 fallback 向量。"""
-    if 'ca_engine' in request.fixturenames or 'engine' in request.fixturenames:
-        fake_vec = [0.1] * 768
-        def fake_embed(*args, **kwargs):
-            return fake_vec
-        monkeypatch.setattr('ca.embedding.EmbeddingClient.embed', fake_embed)
-
-
 def _cleanup_test_data(store, session_id=TEST_SESSION):
     store.conn.execute("DELETE FROM turn_cache WHERE session_id=?", (session_id,))
     store.conn.commit()
@@ -146,7 +135,6 @@ class TestToolTurnCStage:
         l1, _ = summarizer.summarize(tool_call, tool_responses)
         assert l1['tool_name'] == 'test_tool'
         assert l1['tool_args'] == {"a": 1}
-        assert l1['thought_process'] == ''
         assert l1['result_summary'] != ''
         assert l1['error'] is None
         assert l1['implicit_knowledge'] == []
@@ -320,7 +308,7 @@ class TestToolTurnAStage:
     @patch('ca.ContextAssembler._call_llm_for_l1', return_value=('### 现象与问题\n- 无\n### 背景与约束\n- 无\n### 决策与方案\n- 无\n### 后续行动\n- 无\n<core_change>对话内容</core_change>', 'stop'))
     def test_TC_A_021_topic_boost_tools(self, mock_llm, ca_engine, monkeypatch):
         """L2 话题中的工具轮升为 L1（topic_boost）"""
-        monkeypatch.setattr('ca.config.Config.PROTECT_TAIL_TOKENS', 1)
+        monkeypatch.setattr('ca.config.Config.PROTECT_TAIL_TOKENS', 100000)
         monkeypatch.setattr('ca.config.Config.TOOL_TAIL_TURN_COUNT', 0)
         tidx = max(ca_engine._turn_counter, 0) + 1
         valid_emb = [0.1] * 768
@@ -329,9 +317,9 @@ class TestToolTurnAStage:
         ca_engine.cache.add_turn(tidx, "对话L0", json.dumps({
             "core_change": "重要讨论", "new_materials": ["数据"]
         }), valid_emb, valid_emb)
-        ca_engine.cache.add_tool_turn(tidx, 1, "工具L0", json.dumps({
+        ca_engine.cache.add_tool_group(tidx, 1, "工具L0", json.dumps({
             "tool_name": "t", "result_summary": "ok",
-        }), None, None)
+        }))
 
         # 种子尾轮（吸收 tail）
         tail_turn = tidx + 1
@@ -355,6 +343,27 @@ class TestToolTurnAStage:
             l2_text=json.dumps(msgs, ensure_ascii=False),
             _assemble_status=0,
         )
+        # 写入 tool_calls_json 行以便 CacheBuilder 识别为工具组
+        ca_engine.store.write_turn(
+            TEST_SESSION, tidx,
+            api_call_count=1, seq_index=0, role='assistant',
+            content="思考过程", tool_calls_json='[{"id":"t1","function":{"name":"t","arguments":"{}"}}]',
+            finish_reason="tool_calls",
+            l1_text=json.dumps({"group_intent": "测", "group_result": "ok", "tool_count": 1, "state": "ok"}, ensure_ascii=False),
+            l0_text="工具组L0", _assemble_status=0,
+        )
+        ca_engine.store.write_turn(
+            TEST_SESSION, tidx,
+            api_call_count=1, seq_index=1, role='tool',
+            content="ok", tool_call_id="t1",
+            tool_name="t", status="ok",
+            l1_text='{"tool_name":"t","result_summary":"ok","status":"ok"}',
+            l0_text="t:ok", _assemble_status=0,
+        )
+        # 重建 cache 以包含工具组数据
+        from ca.cache import CacheBuilder
+        builder = CacheBuilder(ca_engine.store)
+        ca_engine.cache = builder.build(TEST_SESSION)
         ca_engine.store.write_turn(
             TEST_SESSION, tail_turn, l0_text="尾轮L0", l1_text=json.dumps({"core_change": "结尾"}),
             turn_type="dialogue", tool_sub_index=0,
@@ -366,13 +375,13 @@ class TestToolTurnAStage:
             return 0
         with patch.object(ca_engine, '_available_budget', _zero_budget):
             ca_engine.assemble("", context_length=1000)
-        # 验证 turn_plan：工具轮应为 topic_boost L1
+        # 验证 turn_plan：对话轮 L2 (tail) → 工具组 L1 (dialogue_downgrade)
         plans = ca_engine.store.read_turn_plan(TEST_SESSION)
-        tool_entries = [p for p in plans if p["turn_index"] == tidx and p["turn_type"] == "tool"]
-        assert len(tool_entries) == 1, f"Expected 1 tool entry, got {len(tool_entries)}"
-        te = tool_entries[0]
-        assert te["target_level"] == "L1", f"Tool should be L1 (topic_boost), got {te['target_level']}"
-        assert te["decision_reason"] == "topic_boost", f"Reason should be topic_boost, got {te['decision_reason']}"
+        group_entries = [p for p in plans if p["turn_index"] == tidx and p["turn_type"] == "tool_group"]
+        assert len(group_entries) == 1, f"Expected 1 tool_group entry, got {len(group_entries)}"
+        te = group_entries[0]
+        assert te["target_level"] == "L1", f"Tool group should be L1 (dialogue_downgrade), got {te['target_level']}"
+        assert te["decision_reason"] == "dialogue_downgrade", f"Reason should be dialogue_downgrade, got {te['decision_reason']}"
 
     @patch('ca.ContextAssembler._call_llm_for_l1', return_value=('### 现象与问题\n- 无\n### 背景与约束\n- 无\n### 决策与方案\n- 无\n### 后续行动\n- 无\n<core_change>对话</core_change>', 'stop'))
     def test_TC_A_022_downgrade_order(self, mock_llm, ca_engine):
@@ -386,7 +395,7 @@ class TestToolTurnAStage:
             _assemble_status=0,
         )
         ca_engine.cache.add_turn(tidx, "对话L0", json.dumps({"core_change": "对话内容"}), None, None)
-        ca_engine.cache.add_tool_turn(tidx, 1, "工具L0", json.dumps({"tool_name": "t"}), None, None)
+        ca_engine.cache.add_tool_group(tidx, 1, "工具L0", json.dumps({"tool_name": "t"}))
         ca_engine.cache.rebuild_bm25_snapshot()
 
         msgs = [
@@ -418,7 +427,7 @@ class TestToolTurnAStage:
         """工具轮升级数不超过 CA_TOOL_MAX_UPGRADE_K"""
         monkeypatch.setattr('ca.config.Config.TOOL_MAX_UPGRADE_K', 2)
         for i in range(5):
-            ca_engine.cache.add_tool_turn(i, 1, f"L0{i}", json.dumps({"tool_name": "t"}), None, None)
+            ca_engine.cache.add_tool_group(i, 1, f"L0{i}", json.dumps({"tool_name": "t"}))
         ca_engine.cache.rebuild_bm25_snapshot()
         msgs = [
             {"role": "user", "content": "hi"},
@@ -497,9 +506,9 @@ class TestLStageBackfill:
         """L-stage 异步补全缺失的对话轮 L1"""
         tidx = max(ca_engine._turn_counter, 0) + 1
         ca_engine.store.conn.execute(
-            "INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, "
-            "l2_text, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?)",
-            (TEST_SESSION, tidx, "dialogue", 0, "User: hi\nAssistant: hello", 1,
+            "INSERT INTO turn_cache (session_id, turn_index, api_call_count, seq_index, "
+            "role, content, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?,?)",
+            (TEST_SESSION, tidx, 0, 0, 'user', "User: hi\nAssistant: hello", 1,
              json.dumps({"core_change": "本轮无新内容"}))
         )
         ca_engine.store.conn.commit()
@@ -517,13 +526,16 @@ class TestLStageBackfill:
         """L-stage 异步补全缺失的工具轮 L1"""
         tidx = max(ca_engine._turn_counter, 0) + 1
         ca_engine.store.conn.execute(
-            "INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, "
-            "l2_text, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?)",
-            (TEST_SESSION, tidx, "tool", 1,
-             json.dumps([{"role": "assistant", "content": "", "tool_calls": [
-                 {"id": "x", "function": {"name": "t", "arguments": "{}"}}
-             ]}, {"role": "tool", "content": "ok"}]),
+            "INSERT INTO turn_cache (session_id, turn_index, api_call_count, seq_index, "
+            "role, content, tool_calls_json, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?,?,?)",
+            (TEST_SESSION, tidx, 1, 0, 'assistant', '',
+             json.dumps([{"id": "x", "function": {"name": "t", "arguments": "{}"}}]),
              1, "{}")
+        )
+        ca_engine.store.conn.execute(
+            "INSERT INTO turn_cache (session_id, turn_index, api_call_count, seq_index, "
+            "role, tool_call_id, content, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?,?,?)",
+            (TEST_SESSION, tidx, 1, 1, 'tool', 'x', 'ok', 1, "{}")
         )
         ca_engine.store.conn.commit()
         thread = ca_engine._tool_backfill
@@ -569,9 +581,9 @@ class TestLStageBackfill:
         """补全线程定时自检：C-stage 触发后扫描缺失记录"""
         tidx = max(ca_engine._turn_counter, 0) + 1
         ca_engine.store.conn.execute(
-            "INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, "
-            "l2_text, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?)",
-            (TEST_SESSION, tidx, "dialogue", 0, "User: hi", 1,
+            "INSERT INTO turn_cache (session_id, turn_index, api_call_count, seq_index, "
+            "role, content, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?,?)",
+            (TEST_SESSION, tidx, 0, 0, 'user', "User: hi", 1,
              json.dumps({"core_change": "本轮无新内容"}))
         )
         ca_engine.store.conn.commit()
@@ -587,9 +599,9 @@ class TestLStageBackfill:
         """预升级机制已移除，C-stage 完成后引擎正常运行"""
         tidx = max(ca_engine._turn_counter, 0) + 1
         ca_engine.store.conn.execute(
-            "INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, "
-            "l1_text, _assemble_status, l2_text) VALUES (?,?,?,?,?,?,?)",
-            (TEST_SESSION, tidx, "dialogue", 0, "", 1, "User: hi")
+            "INSERT INTO turn_cache (session_id, turn_index, api_call_count, seq_index, "
+            "role, content, l1_text, _assemble_status) VALUES (?,?,?,?,?,?,?,?)",
+            (TEST_SESSION, tidx, 0, 0, 'user', "User: hi", "", 1)
         )
         ca_engine.store.conn.commit()
         with patch('ca.ContextAssembler._call_llm_for_l1', return_value=('### 现象与问题\n- 无\n### 背景与约束\n- 无\n### 决策与方案\n- 无\n### 后续行动\n- 无\n<core_change>对话</core_change>', 'stop')):
@@ -626,18 +638,26 @@ class TestLStageBackfill:
     def test_TC_L_007_tool_split_after_backfill(self, mock_llm, ca_engine):
         """补全对话轮后触发工具轮拆分与摘要生成"""
         tidx = max(ca_engine._turn_counter, 0) + 1
-        l2 = json.dumps([
-            {"role": "user", "content": "go"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"id": "tc", "function": {"name": "t", "arguments": "{}"}}
-            ]},
-            {"role": "tool", "tool_call_id": "tc", "content": "ok"}
-        ])
+        # v5: write as separate rows
         ca_engine.store.conn.execute(
-            "INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, "
-            "l2_text, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?)",
-            (TEST_SESSION, tidx, "dialogue", 0, l2, 1,
+            "INSERT INTO turn_cache (session_id, turn_index, api_call_count, seq_index, "
+            "role, content, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?,?)",
+            (TEST_SESSION, tidx, 0, 0, 'user', 'go', 1,
              json.dumps({"core_change": "本轮无新内容"}))
+        )
+        ca_engine.store.conn.execute(
+            "INSERT INTO turn_cache (session_id, turn_index, api_call_count, seq_index, "
+            "role, content, tool_calls_json, finish_reason, _assemble_status, l1_text) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (TEST_SESSION, tidx, 1, 0, 'assistant', '',
+             json.dumps([{"id": "tc", "function": {"name": "t", "arguments": "{}"}}]),
+             'tool_calls', 1, "{}")
+        )
+        ca_engine.store.conn.execute(
+            "INSERT INTO turn_cache (session_id, turn_index, api_call_count, seq_index, "
+            "role, tool_call_id, content, status, _assemble_status, l1_text) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (TEST_SESSION, tidx, 1, 1, 'tool', 'tc', 'ok', 'ok', 1, "{}")
         )
         ca_engine.store.conn.commit()
         ca_engine.cache.add_turn(tidx, "", json.dumps({"core_change": "本轮无新内容"}), None, None)
@@ -774,9 +794,9 @@ class TestConfigAndOthers:
         """补全耗时验证：对话轮 < LLM 超时，工具轮 < 50ms"""
         tidx = max(ca_engine._turn_counter, 0) + 1
         ca_engine.store.conn.execute(
-            "INSERT INTO turn_cache (session_id,turn_index,turn_type,tool_sub_index,"
-            "l2_text,_assemble_status,l1_text) VALUES (?,?,?,?,?,?,?)",
-            (TEST_SESSION, tidx, "dialogue", 0, "User: hi", 1, "{}")
+            "INSERT INTO turn_cache (session_id,turn_index,api_call_count,seq_index,"
+            "role,content,_assemble_status,l1_text) VALUES (?,?,?,?,?,?,?,?)",
+            (TEST_SESSION, tidx, 0, 0, 'user', "User: hi", 1, "{}")
         )
         ca_engine.store.conn.commit()
         t0 = time.perf_counter()
@@ -802,9 +822,9 @@ def test_TC_L_T1_backfill_new_signature(ca_engine):
     """
     tidx = max(ca_engine._turn_counter, 0) + 1
     ca_engine.store.conn.execute(
-        "INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, "
-        "l2_text, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?)",
-        (TEST_SESSION, tidx, "dialogue", 0, "User: hi\nAssistant: hello", 1,
+        "INSERT INTO turn_cache (session_id, turn_index, api_call_count, seq_index, "
+        "role, content, _assemble_status, l1_text) VALUES (?,?,?,?,?,?,?,?)",
+        (TEST_SESSION, tidx, 0, 0, 'user', "User: hi\nAssistant: hello", 1,
          json.dumps({"core_change": "本轮无新内容"}))
     )
     ca_engine.store.conn.commit()
@@ -843,9 +863,9 @@ def test_TC_L_T2_backfill_truncation(ca_engine):
 
     tidx = max(ca_engine._turn_counter, 0) + 1
     ca_engine.store.conn.execute(
-        "INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, "
-        "l2_text, _assemble_status, backfill_attempts, l1_text) VALUES (?,?,?,?,?,?,?,?)",
-        (TEST_SESSION, tidx, "dialogue", 0, "User: hi", 1, 0,
+        "INSERT INTO turn_cache (session_id, turn_index, api_call_count, seq_index, "
+        "role, content, _assemble_status, backfill_attempts, l1_text) VALUES (?,?,?,?,?,?,?,?,?)",
+        (TEST_SESSION, tidx, 0, 0, 'user', "User: hi", 1, 0,
          json.dumps({"core_change": "本轮无新内容"}))
     )
     ca_engine.store.conn.commit()

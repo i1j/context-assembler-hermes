@@ -1,5 +1,8 @@
 # ContextAssembler v4.3.4-hotfix3 软件需求与测试计划
 
+> ⚠️ **本文档对应 v4.3.4-hotfix3 版本。** v5.0.0 测试体系架构见
+> [`v5.0.0-test-architecture.md`](v5.0.0-test-architecture.md)
+
 **文档版本**：v4.3.4-hotfix3‑final‑r2
 **编制日期**：2026-05-27
 **对应设计文档**：ContextAssembler 详细设计文档 v4.3.4-hotfix3

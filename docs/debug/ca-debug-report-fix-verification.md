@@ -107,7 +107,7 @@ python -c "import sqlite3; conn = ..."        → 查运行时 DB 数据验证�
 | `set_system_overhead()` | `ca/__init__.py:715-718` | 已标记弃用，保留方法签名以防外部调用 |
 | 预算消耗 | `ca/__init__.py:712` | `used = system_tokens + head_tokens + tail_tokens + self._system_overhead` |
 
-> 详见 `docs/system-overhead-measurement-analysis.md`。
+> 详见 `../design/system-overhead-measurement-analysis.md`。
 
 ### 预算计算管线
 

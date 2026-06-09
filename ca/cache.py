@@ -171,15 +171,12 @@ class AssemblyCache:
             self._dirty = True
         self._submit_rebuild()
 
-    def add_tool_turn(self, turn_index, sub_index, l0_text, l1_text, l0_emb=None, l1_emb=None):
-        key = (turn_index, sub_index)
+    def add_tool_group(self, turn_index, api_call_count, l0_text, l1_text):
+        """增量更新工具组缓存。key=(turn_index, api_call_count) 支持一轮多组。"""
+        gkey = (turn_index, api_call_count)
         with self._lock:
-            self.tool_l0_texts[key] = l0_text
-            self.tool_l1_texts[key] = l1_text
-            if l0_emb is not None:
-                self.tool_l0_embeddings[key] = l0_emb
-            if l1_emb is not None:
-                self.tool_l1_embeddings[key] = l1_emb
+            self.tool_group_l0_texts[gkey] = l0_text
+            self.tool_group_l1_texts[gkey] = l1_text
             self._dirty = True
         self._submit_rebuild()
 
@@ -268,8 +265,8 @@ class AssemblyCache:
         with self._lock:
             return dict(self.tool_l1_texts), dict(self.tool_l0_texts)
 
-    def get_tool_group_snapshot_data(self) -> Tuple[Dict[int, str], Dict[int, str]]:
-        """获取工具组摘要数据。key 为 turn_index。"""
+    def get_tool_group_snapshot_data(self) -> Tuple[Dict[Tuple[int, int], str], Dict[Tuple[int, int], str]]:
+        """获取工具组摘要数据。key 为 (turn_index, api_call_count)。"""
         with self._lock:
             return dict(self.tool_group_l1_texts), dict(self.tool_group_l0_texts)
 
@@ -312,8 +309,10 @@ class CacheBuilder:
                         # PR3: 检测 assistant{tc} 行（有 tool_calls_json）→ 工具组缓存
                         tc_json = rec.get("tool_calls_json")
                         if tc_json:
-                            cache.tool_group_l1_texts[idx] = rec.get("l1_text", "")
-                            cache.tool_group_l0_texts[idx] = rec.get("l0_text", "")
+                            api_count = rec.get("api_call_count", 0)
+                            gkey = (idx, api_count)
+                            cache.tool_group_l1_texts[gkey] = rec.get("l1_text", "")
+                            cache.tool_group_l0_texts[gkey] = rec.get("l0_text", "")
                         else:
                             cache.l0_texts[idx] = rec.get("l0_text", "")
                             cache.l1_texts[idx] = rec.get("l1_text", "")

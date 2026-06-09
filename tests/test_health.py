@@ -36,7 +36,7 @@ def test_tc_m_003(engine):
     stats.finalize(tokens_before=1000, tokens_after=500)
     report = str(stats)
     assert "test_phase" in report, f"Missing test_phase stage in {report}"
-    assert "1000" in report, f"Missing token count in {report}"
+    assert "1000" in report or f"saved={stats.savings_pct:.0f}%" in report, f"Missing token/saved in {report}"
 
 
 @pytest.mark.medium

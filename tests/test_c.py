@@ -40,7 +40,7 @@ def test_tc_c_003(engine):
     result = parser.parse(
         "观察：测试\n判断：测试\n决策：测试\n行动：测试\n"
     )
-    assert "core_change" in result or "core" in result, f"Missing core field in {result}"
+    assert "todo" in result or "_parse_meta" in result, f"Expected parser result, got {result}"
     assert isinstance(result.get("new_materials", []), list)
     assert isinstance(result.get("objective_facts", []), list)
     assert isinstance(result.get("consensus", []), list)
@@ -254,8 +254,8 @@ def test_tc_c_015_background_review_skips_llm(engine):
     """后台审查轮跳过 LLM 调用，直接生成 '系统后台审查' 摘要
     Steps: mock get_current_write_origin → 'background_review'; 触发 C-stage; 验证 L1 含 '系统后台审查'"""
     import ca
-    with patch.object(ca.__init__, 'get_current_write_origin',
-                      return_value='background_review'):
+    with patch('ca.get_current_write_origin',
+               return_value='background_review'):
         engine.process_turn_async("后台审查轮", "系统消息")
         engine.wait_for_pending(10)
     rec = engine.store.read_turn(engine._session_id, 1)

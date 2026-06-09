@@ -261,7 +261,7 @@ class SQLiteStore:
             pass
 
     def _check_schema(self) -> None:
-        conn = self.conn
+        conn = self._local.conn
         try:
             row = conn.execute("SELECT value FROM _meta WHERE key='schema_version'").fetchone()
             if row:
@@ -744,7 +744,8 @@ class SQLiteStore:
 
     def read_turn_texts(self, session_id: str, turn_index: int,
                         turn_type: str = "dialogue",
-                        tool_sub_index: int = 0) -> Tuple[Optional[str], str, str]:
+                        tool_sub_index: int = 0,
+                        tool_group_api_count: Optional[int] = None) -> Tuple[Optional[str], str, str]:
         """返回该 turn 的 (l2_text, l1_text, l0_text) 三元组。
 
         l2_text 可能为 None（如果该 turn 未存储 L2），l1/l0 至少为空字符串。
@@ -765,7 +766,74 @@ class SQLiteStore:
         if turn_type == 'dialogue':
             role = 'user'
         elif turn_type == 'tool_group':
-            role = 'assistant'
+            # L2: 按 api_call_count 过滤重建该工具组的消息序列
+            if tool_group_api_count is not None:
+                all_rows = self.conn.execute(
+                    """SELECT role, content, tool_calls_json, tool_call_id,
+                              api_call_count, seq_index
+                       FROM turn_cache
+                       WHERE session_id=? AND turn_index=?
+                         AND role IN ('assistant', 'tool')
+                         AND api_call_count=?
+                       ORDER BY seq_index""",
+                    (session_id, turn_index, tool_group_api_count),
+                ).fetchall()
+            else:
+                all_rows = self.conn.execute(
+                    """SELECT role, content, tool_calls_json, tool_call_id,
+                              api_call_count, seq_index
+                       FROM turn_cache
+                       WHERE session_id=? AND turn_index=?
+                         AND role IN ('assistant', 'tool')
+                       ORDER BY api_call_count, seq_index""",
+                    (session_id, turn_index),
+                ).fetchall()
+
+            msgs = []
+            for r in all_rows:
+                r_role = r[0]
+                if r_role == 'assistant':
+                    msg = {"role": "assistant", "content": r[1] or ""}
+                    tcj = r[2]
+                    if tcj:
+                        try:
+                            defs = json.loads(tcj)
+                            msg["tool_calls"] = [
+                                {"id": d["id"], "type": "function",
+                                 "function": d.get("function", {})}
+                                for d in defs
+                            ]
+                        except (json.JSONDecodeError, TypeError, KeyError):
+                            pass
+                    msgs.append(msg)
+                elif r_role == 'tool':
+                    msgs.append({
+                        "role": "tool",
+                        "content": r[1] or "",
+                        "tool_call_id": r[3] or "",
+                    })
+
+            l2_text = json.dumps(msgs, ensure_ascii=False) if msgs else None
+
+            # l1/l0 从 assistant{tc} 行读（同 turn 多工具组需按 api_call_count 区分）
+            if tool_group_api_count is not None:
+                cur = self.conn.execute(
+                    """SELECT l1_text, l0_text
+                       FROM turn_cache
+                       WHERE session_id=? AND turn_index=? AND role='assistant' AND seq_index=0 AND api_call_count=?""",
+                    (session_id, turn_index, tool_group_api_count),
+                )
+            else:
+                cur = self.conn.execute(
+                    """SELECT l1_text, l0_text
+                       FROM turn_cache
+                       WHERE session_id=? AND turn_index=? AND role='assistant' AND seq_index=0""",
+                    (session_id, turn_index),
+                )
+            row = cur.fetchone()
+            l1 = row[0] or "" if row else ""
+            l0 = row[1] or "" if row else ""
+            return (l2_text, l1, l0)
         else:
             role = 'tool'
         cur = self.conn.execute(
@@ -793,7 +861,7 @@ class SQLiteStore:
             row = cur.fetchone()
             return row[0] if row else None
         # v5
-        role = 'user' if turn_type == 'dialogue' else 'tool'
+        role = 'user' if turn_type == 'dialogue' else ('assistant' if turn_type == 'tool_group' else 'tool')
         cur = self.conn.execute(
             """SELECT _assemble_status
                FROM turn_cache

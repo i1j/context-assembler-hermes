@@ -133,7 +133,9 @@ class TestBreakerStateCleanup:
         assert "random.txt" in remaining
         assert ".other_prefix_state_123.json" in remaining
         assert f".ca_assembler_state_{pid}.json" in remaining
-        assert len(remaining) == 3
+        # 过滤 ca_engine fixture 可能产生的 .db/.db-wal/.db-shm 文件
+        relevant = [n for n in remaining if not n.endswith(('.db', '.db-wal', '.db-shm'))]
+        assert len(relevant) == 3, f"Expected 3 relevant files, got {len(relevant)}: {relevant}"
 
     def test_cleanup_empty_dir_no_error(self, tmp_path):
         """空目录不报错。"""

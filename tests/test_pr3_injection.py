@@ -126,29 +126,27 @@ class TestTripleLevelInjection:
 
         # 重建消息
         messages = engine._rebuild_messages_from_cache()
-        # 构造 plan：对话轮(turn=1, dialogue) + 工具组(turn=1, tool_group) + 工具轮(turn=1, tool)
+        # 构造 plan：对话轮 + 工具组
         from ca import TurnPlanEntry
         plan = [
             TurnPlanEntry(turn_index=1, turn_type="dialogue",
                           target_level="L0", decision_reason="middle",
                           l2_tokens=10, summary_tokens=5, tokens_saved=5),
             TurnPlanEntry(turn_index=1, turn_type="tool_group",
+                          tool_sub_index=1,
                           api_call_count=1, seq_index=0,
-                          target_level="L1", decision_reason="retrieved",
-                          l2_tokens=10, summary_tokens=5, tokens_saved=5),
-            TurnPlanEntry(turn_index=1, turn_type="tool",
-                          api_call_count=1, seq_index=1,
-                          target_level="L0", decision_reason="middle",
+                          target_level="L1", decision_reason="dialogue_downgrade",
                           l2_tokens=10, summary_tokens=5, tokens_saved=5),
         ]
 
         result = engine._build_messages_from_plan(plan, messages)
         all_tags_str = " ".join(str(m.get("content","")) for m in result)
 
-        # 应包含工具组标记 [~/1/g]
-        assert "[~/1/g]" in all_tags_str, f"Missing [~/1/g] tag in {all_tags_str}"
-        # 工具组内容格式化正确
+        # 工具组 [~/1/1]（非尾区 L1 → 格式化组摘要）
+        assert "[~/1/1]" in all_tags_str, f"Missing [~/1/1] in {all_tags_str}"
         assert "工具组" in all_tags_str, f"Missing '工具组' in {all_tags_str}"
+        # 不应再有旧的 [~/N/g] 标记
+        assert "[~/1/g]" not in all_tags_str, f"Unexpected [~/1/g] tag in {all_tags_str}"
 
     def test_tool_group_plan_entry_in_compute(self, ca_engine):
         """_compute_turn_plan_v2 从 v5 数据生成 tool_group entry"""
@@ -208,6 +206,54 @@ class TestTripleLevelInjection:
         assert "工具组" in formatted
         assert "查文件" in formatted
         assert "1个" in formatted
+
+        # 含 thought 字段时也显示
+        group_l1_with_thought = json.dumps({
+            "group_intent": "查文件", "group_result": "aaa",
+            "tool_count": 1, "state": "ok",
+            "thought": "用户想查找文件"
+        }, ensure_ascii=False)
+        ft = engine._format_group_summary(group_l1_with_thought)
+        assert "[思考]" in ft
+        assert "用户想查找文件" in ft
+
+    def test_generate_group_summary(self):
+        """generate_group_summary 纯文本拼接，返回正确 schema"""
+        from ca.tool_summarizer import ToolSummarizer
+        thought = "我想查一下文件系统"
+        tool_results = [
+            {"tool_name": "read_file", "status": "ok", "result_summary": "找到文件"},
+            {"tool_name": "search_files", "status": "ok", "result_summary": "匹配3个"},
+        ]
+        result = ToolSummarizer.generate_group_summary(thought, tool_results)
+        assert result["group_intent"] == "我想查一下文件系统"
+        assert "找到文件" in result["group_result"] or "匹配" in result["group_result"]
+        assert result["tool_count"] == 2
+        assert result["state"] == "ok"
+        assert result.get("thought") == "我想查一下文件系统", f"thought 未保留: {result.get('thought')}"
+
+    def test_generate_group_summary_partial_error(self):
+        """generate_group_summary 有工具失败时 state=error"""
+        from ca.tool_summarizer import ToolSummarizer
+        tool_results = [
+            {"tool_name": "read_file", "status": "ok", "result_summary": "aaa"},
+            {"tool_name": "write_file", "status": "error", "result_summary": "权限不足"},
+        ]
+        result = ToolSummarizer.generate_group_summary("测试", tool_results)
+        assert result["state"] == "error"
+        assert result["tool_count"] == 2
+
+    def test_generate_group_summary_no_llm_call(self, ca_engine, monkeypatch):
+        """generate_group_summary 零 LLM 调用"""
+        from ca.tool_summarizer import ToolSummarizer
+        call_count = 0
+        def assert_no_call(*a, **kw):
+            nonlocal call_count
+            call_count += 1
+            return "", "stop"
+        monkeypatch.setattr(ca_engine, '_call_llm_for_l1', assert_no_call)
+        ToolSummarizer.generate_group_summary("thought", [{"tool_name": "t", "status": "ok", "result_summary": "ok"}])
+        assert call_count == 0, f"generate_group_summary 不应调 LLM, 实际调用 {call_count} 次"
 
 
 # ──────────────────────────────────────────────
@@ -289,4 +335,54 @@ class TestTripleInjectionEndToEnd:
         result = engine.assemble("测试", 50000)
         full_text = " ".join(str(m.get("content","")) for m in result)
 
-        assert "[~/1/g]" in full_text, f"Missing [~/1/g] in {full_text[:200]}"
+        # 工具组以完整消息序列展开（L2 尾区），原始 content 透传
+        assert "[~/1/g]" not in full_text, f"Unexpected [~/1/g] in {full_text[:200]}"
+        # 工具组 assistant thought（查文件）和 tool 结果（aaa）均在展开中
+        assert "查文件" in full_text, f"Missing tool group thought in {full_text[:200]}"
+        assert "aaa" in full_text, f"Missing tool group result in {full_text[:200]}"
+        # L2 tail 的对话轮以原文透传
+        assert "继续" in full_text, f"Missing dialogue content in {full_text[:200]}"
+
+    @patch('ca.ContextAssembler._call_llm_for_l1',
+           return_value=('### 现象与问题\n- 无\n### 背景与约束\n- 无\n### 决策与方案\n- 无\n### 后续行动\n- 无\n<core_change>对话</core_change>', 'stop'))
+    @pytest.mark.parametrize("label,n_api_groups,n_tools,expected_rows", [
+        ("single_group", 1, 3, 5),   # 1user + 1assistant{tc} + 3tool = 5 (_run_c_stage overwrites user)
+        ("multi_group",  2, 4, 7),   # 1user + 2assistant{tc} + 4tool = 7
+    ])
+    def test_end_to_end_row_count(self, mock_llm, ca_engine, label, n_api_groups, n_tools, expected_rows):
+        """flush + _run_c_stage 后总行数符合公式 (N+M+1)
+        
+        注意：_run_c_stage 不写独立的 final 行 (api=999999)，而是覆写 user 行 (api=0)。
+        因此 DB 总行数 = flush 写入量 = 1+N+M。
+        """
+        engine = ca_engine
+        # 清理旧数据
+        engine.store.conn.execute("DELETE FROM turn_cache")
+        # 通过 buffer 写入多组工具
+        for g in range(n_api_groups):
+            rid = f"req_rid_{g}"
+            tools_per_group = n_tools // n_api_groups + (1 if g < n_tools % n_api_groups else 0)
+            tools = [MockToolCall(id=f"c{g}_{t}", name="tool", arguments="{}")
+                     for t in range(tools_per_group)]
+            msg = MockAssistantMessage(content=f"group{g}", tool_calls=tools)
+            engine._on_api_response(
+                api_request_id=rid, assistant_message=msg,
+                api_call_count=g + 1, turn_index=1, finish_reason="tool_calls",
+            )
+            for t in tools:
+                engine._on_post_tool_call(
+                    tool_call_id=t.id, tool_name="tool",
+                    result="ok", status="ok", duration_ms=10,
+                    api_request_id=rid,
+                )
+        engine.flush_tool_buffer(user_message="测试")
+        engine.process_turn_async("测试", "")
+        engine.wait_for_pending(timeout=30)
+        total = engine.store.conn.execute(
+            "SELECT COUNT(*) FROM turn_cache"
+        ).fetchone()[0]
+        assert total == expected_rows, (
+            f"[{label}] Expected {expected_rows} rows "
+            f"(N={n_api_groups}, M={n_tools}), got {total}"
+        )
+

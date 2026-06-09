@@ -74,6 +74,10 @@ class Config:
     # 工具轮与对话轮功能不同——对话需要 20K token 尾区保护，
     # 但工具轮只需最近 2-3 轮的上下文即可。
     TOOL_TAIL_TURN_COUNT: ClassVar[int] = int(os.getenv("CA_TOOL_TAIL_TURN_COUNT", "2"))
+
+    # 系统消息尾区保护：只保留最近 N 条系统消息的原文，
+    # 更早的系统消息在汇编时截断为 L0 单行（≤100 字符）。
+    SYSTEM_TAIL_TURN_COUNT: ClassVar[int] = int(os.getenv("CA_SYSTEM_TAIL_TURN_COUNT", "2"))
     CONTEXT_LENGTH: ClassVar[int] = int(os.getenv("CA_CONTEXT_LENGTH", "50000"))
 
     # 压缩警戒比值：对齐 Hermes compression.threshold。
@@ -267,6 +271,7 @@ class Config:
             cls.L1_MAX_TOKENS = int(os.getenv("CA_L1_MAX_TOKENS", str(cls.L1_MAX_TOKENS)))
             cls.PROTECT_TAIL_TOKENS = int(os.getenv("CA_PROTECT_TAIL_TOKENS", str(cls.PROTECT_TAIL_TOKENS)))
             cls.TOOL_TAIL_TURN_COUNT = int(os.getenv("CA_TOOL_TAIL_TURN_COUNT", str(cls.TOOL_TAIL_TURN_COUNT)))
+            cls.SYSTEM_TAIL_TURN_COUNT = int(os.getenv("CA_SYSTEM_TAIL_TURN_COUNT", str(cls.SYSTEM_TAIL_TURN_COUNT)))
             cls.TOPIC_BOUNDARY_DISTANCE = float(os.getenv("CA_TOPIC_BOUNDARY_DISTANCE", str(cls.TOPIC_BOUNDARY_DISTANCE)))
             cls.COMPRESSION_THRESHOLD = float(os.getenv("CA_COMPRESSION_THRESHOLD", str(cls.COMPRESSION_THRESHOLD)))
             cls.CONTEXT_LENGTH = int(os.getenv("CA_CONTEXT_LENGTH", str(cls.CONTEXT_LENGTH)))

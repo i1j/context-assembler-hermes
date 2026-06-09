@@ -248,6 +248,7 @@ def test_TC_A_018_plan_based_assembly_writes_turn_plan(engine):
     msgs = [{"role": "user", "content": "第一条消息"},
             {"role": "assistant", "content": "回复1"}]
     seed_dialogue(engine, 1, msgs)
+    engine.cache.add_turn(1, "", "{}")
     result = engine.assemble("新问题", context_length=32000)
     # 验证 turn_plan 表
     plans = engine.store.read_turn_plan(engine._session_id)

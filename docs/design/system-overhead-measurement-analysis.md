@@ -200,3 +200,17 @@ default 20K: 71250 - (8000 + 2000 + 2500 + 20000) = ~39K 正预算 ✅
 | `ca/__init__.py` | 995-1050 | `_hard_truncation()` — 唯一的总输出截断 |
 | `ca/config.py` | 116,125 | `if False:` 屏蔽 Hermes 运行时查表 |
 | `ca/config.py` | 135-136 | 未知模型走 `CONTEXT_LENGTH=150000` |
+
+## 六、实测验证结论（2026-06-14）
+
+18 轮对话实测补充验证：
+
+| 观测项 | 结果 |
+|--------|------|
+| `_assemble_status=0` | 所有行均正常，无降级 |
+| budget 水位 | ~72K 预算 vs ~32K 使用，从未耗尽 |
+| `budget=0` 效果 | 仅跳过检索升级（`retriever.retrieve()` 不执行），不阻止 Middle L0 |
+| Middle L0 生成 | **永远发生，不受预算约束**——这是设计 |
+| `_system_overhead` | 默认 20K 仅作保守缓冲区，动态测量代码已移除 |
+
+**关键发现**：预算约束的瓶颈不在 `_system_overhead`，而在 `CONTEXT_LENGTH`。Middle L0 是硬性生成项，真正的输出上限由 `_hard_truncation()` 保障。

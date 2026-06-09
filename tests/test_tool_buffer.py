@@ -336,6 +336,35 @@ class TestFlushToolBuffer:
         engine.flush_tool_buffer(user_message="x")
         assert len(engine._tool_buffer) == 0
 
+    def test_flush_truncation_tool_call(self, ca_engine):
+        """finish_reason=length 时 flush 仍执行，写入 finish_reason 列"""
+        engine = ca_engine
+        msg = MockAssistantMessage(content="搜索中", tool_calls=[MockToolCall(id="c1", name="search")])
+        engine._on_api_response(
+            api_request_id="req_trunc", assistant_message=msg,
+            api_call_count=1, turn_index=1, finish_reason="length",
+        )
+        engine._on_post_tool_call(tool_call_id="c1", tool_name="search",
+                                   result="ok", status="ok", duration_ms=5,
+                                   api_request_id="req_trunc")
+        n = engine.flush_tool_buffer(user_message="搜索")
+        # 1user + 1assistant + 1tool = 3 rows
+        assert n == 3, f"Expected 3 rows (truncated flush), got {n}"
+        # 验证 assistant 行的 finish_reason 列 = "length"
+        rows = engine.store.conn.execute(
+            "SELECT role, finish_reason FROM turn_cache WHERE api_call_count=1 AND seq_index=0"
+        ).fetchall()
+        assistant_rows = [r for r in rows if r[0] == "assistant"]
+        assert len(assistant_rows) == 1
+        assert assistant_rows[0][1] == "length", f"Expected finish_reason='length', got {assistant_rows[0][1]}"
+
+    def test_flush_truncation_text_only(self, ca_engine):
+        """纯文本截断时 buffer 空，flush 返回 0"""
+        engine = ca_engine
+        assert len(engine._tool_buffer) == 0
+        n = engine.flush_tool_buffer(user_message="")
+        assert n == 0, f"Expected 0 rows from empty buffer, got {n}"
+
 
 class TestBufferCleanup:
     """Buffer 悬挂清理测试。"""
@@ -353,3 +382,28 @@ class TestBufferCleanup:
         engine.destroy()
         # destroy 后不应有遗留
         assert len(engine._tool_buffer) == 0
+
+    def test_destroy_flush_no_user_message(self, ca_engine):
+        """destroy() 清 buffer 时不传入 user_message → api_call_count==1 组无 user 行"""
+        engine = ca_engine
+        msg = MockAssistantMessage(content="x", tool_calls=[MockToolCall(id="c1", name="tool")])
+        engine._on_api_response(
+            api_request_id="req_des", assistant_message=msg,
+            api_call_count=1, turn_index=1, finish_reason="tool_calls",
+        )
+        engine._on_post_tool_call(tool_call_id="c1", tool_name="tool",
+                                   result="ok", status="ok", duration_ms=1,
+                                   api_request_id="req_des")
+        assert len(engine._tool_buffer) == 1
+        # destroy 调 flush 时不传 user_message
+        engine.destroy()
+        # 验证 DB：有 assistant{tc} + tool，无 user 行
+        rows = engine.store.conn.execute(
+            "SELECT role, api_call_count, seq_index FROM turn_cache ORDER BY api_call_count, seq_index"
+        ).fetchall()
+        user_rows = [r for r in rows if r[0] == "user"]
+        assert len(user_rows) == 0, f"Expected no user row when flush without user_message, got {len(user_rows)}"
+        assistant_rows = [r for r in rows if r[0] == "assistant"]
+        assert len(assistant_rows) == 1, "Expected 1 assistant{tc} row after destroy flush"
+        tool_rows = [r for r in rows if r[0] == "tool"]
+        assert len(tool_rows) == 1, "Expected 1 tool row after destroy flush"

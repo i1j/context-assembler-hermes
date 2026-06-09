@@ -648,26 +648,77 @@ class ContextAssembler:
                 )
                 total_rows += 1
 
-            # 收集工具结果用于 generate_group_summary
-            tool_results_for_summary = []
-            for tc_def in buf.tool_defs:
+            # ③ tool × M 行 (api=N, seq=1..M) — 先生成每个工具轮 L1/L0
+            per_tool_summaries = []
+            for seq_idx, tc_def in enumerate(buf.tool_defs, start=1):
                 tc_id = tc_def.get("id", "")
                 result_data = buf.results.get(tc_id, {})
-                tool_results_for_summary.append({
-                    "tool_name": tc_def.get("function", {}).get("name", ""),
-                    "status": result_data.get("status", "ok"),
-                    "result_summary": result_data.get("content", "")[:80],
+                tool_content = result_data.get("content", "")
+                tool_status = result_data.get("status", "ok")
+
+                try:
+                    l1_dict, l0_text = self.tool_summarizer.summarize(
+                        tc_def,
+                        [{"content": tool_content, "status": tool_status}]
+                    )
+                except Exception as e:
+                    logger.warning("[CA] ToolSummarizer failed for %s: %s, using fallback",
+                                   tc_def.get("function", {}).get("name", ""), e)
+                    l1_dict = {
+                        "tool_name": tc_def.get("function", {}).get("name", ""),
+                        "result_summary": tool_content[:80] if tool_content else "无返回数据",
+                        "status": tool_status,
+                        "_assemble_status": 0,
+                    }
+                    l0_text = l1_dict["tool_name"] + ": " + (tool_content[:60] if tool_content else "无返回")
+
+                per_tool_summaries.append({
+                    "tool_name": l1_dict.get("tool_name", tc_def.get("function", {}).get("name", "")),
+                    "l0": l0_text,
+                    "l1": json.dumps(l1_dict, ensure_ascii=False),
+                    "status": tool_status,
+                    "result_summary": l1_dict.get("result_summary", tool_content[:80]),
                 })
 
+            # 再写 tool 行
+            for seq_idx, tc_def in enumerate(buf.tool_defs, start=1):
+                s = per_tool_summaries[seq_idx - 1]
+                self.store.write_turn(
+                    self._session_id, turn_idx,
+                    l0_text=s["l0"],
+                    l1_text=s["l1"],
+                    l0_embedding=None, l1_embedding=None,
+                    token_offset=0,
+                    api_call_count=buf.api_call_count, seq_index=seq_idx,
+                    role='tool', content=buf.results.get(tc_def.get("id", ""), {}).get("content", ""),
+                    tool_call_id=tc_def.get("id", ""),
+                    tool_name=tc_def.get("function", {}).get("name", ""),
+                    status=s["status"],
+                    _assemble_status=0,
+                )
+                total_rows += 1
+
+            # ④ 用工具轮 L1 result_summary 拼组摘要，而非 raw content[:80]
+            tool_results_for_summary = [
+                {"tool_name": s["tool_name"], "status": s["status"],
+                 "result_summary": s["result_summary"][:80]}
+                for s in per_tool_summaries
+            ]
             group_summary = ToolSummarizer.generate_group_summary(
                 buf.thought, tool_results_for_summary
             )
 
-            # ③ assistant{tc} 行 (api=N, seq=0)
+            # 组 L0：拼接各工具 L0
+            group_l0_parts = [s["l0"][:55] for s in per_tool_summaries[:5]]
+            group_l0 = " | ".join(group_l0_parts)
+            if len(per_tool_summaries) > 5:
+                group_l0 += "..."
+
+            # ⑤ assistant{tc} 行 (api=N, seq=0)
             tool_calls_json = json.dumps(buf.tool_defs, ensure_ascii=False)
             self.store.write_turn(
                 self._session_id, turn_idx,
-                l0_text=group_summary.get("group_result", "工具组"),
+                l0_text=group_l0,
                 l1_text=json.dumps(group_summary, ensure_ascii=False),
                 l0_embedding=None, l1_embedding=None,
                 token_offset=0,
@@ -679,33 +730,11 @@ class ContextAssembler:
             )
             total_rows += 1
 
-            # ③ tool × M 行 (api=N, seq=1..M)
-            for seq_idx, tc_def in enumerate(buf.tool_defs, start=1):
-                tc_id = tc_def.get("id", "")
-                result_data = buf.results.get(tc_id, {})
-                tool_content = result_data.get("content", "")
-                tool_status = result_data.get("status", "ok")
-
-                per_tool_l1 = {
-                    "tool_name": tc_def.get("function", {}).get("name", ""),
-                    "result_summary": tool_content[:80] if tool_content else "无返回数据",
-                    "status": tool_status,
-                    "_assemble_status": 0,
-                }
-                self.store.write_turn(
-                    self._session_id, turn_idx,
-                    l0_text=per_tool_l1["tool_name"] + ": " + (tool_content[:60] if tool_content else "无返回"),
-                    l1_text=json.dumps(per_tool_l1, ensure_ascii=False),
-                    l0_embedding=None, l1_embedding=None,
-                    token_offset=0,
-                    api_call_count=buf.api_call_count, seq_index=seq_idx,
-                    role='tool', content=tool_content,
-                    tool_call_id=tc_id,
-                    tool_name=tc_def.get("function", {}).get("name", ""),
-                    status=tool_status,
-                    _assemble_status=0,
-                )
-                total_rows += 1
+            # ⑥ 同步更新内存缓存，供下一轮 A‑stage 组装使用
+            self.cache.add_tool_group(
+                turn_idx, buf.api_call_count,
+                group_l0, json.dumps(group_summary, ensure_ascii=False),
+            )
 
         # ④ 清空 buffer
         self._tool_buffer.clear()
@@ -884,11 +913,9 @@ class ContextAssembler:
 
         with stats.time_phase("get_snapshot"):
             l1_texts, l0_texts = self.cache.get_snapshot_data()
-            tool_l1_texts, tool_l0_texts = self.cache.get_tool_snapshot_data()
             tool_group_l1_texts, tool_group_l0_texts = self.cache.get_tool_group_snapshot_data()
 
         idx_to_turn = {i: msg.get("_turn_index", i) for i, msg in enumerate(messages)}
-        tool_key_map = self._build_tool_key_map(messages, idx_to_turn)
 
         # 先用 cache 中的 l1_embeddings（含对话轮 embedding）
         l1_embeddings = snapshot.l1_embeddings
@@ -929,24 +956,13 @@ class ContextAssembler:
             stats.topic_count = len(topic_data)
             stats.topic_retrieved_count = len(retrieved_topics)
 
-        # ── 工具轮独立检索（不变）──
-        with stats.time_phase("tool_retrieval"):
-            budget = self._available_budget(context_length, messages, tail_start, tool_tail_turns, idx_to_turn, tool_key_map)
-            retriever = Retriever(snapshot)
-            tool_upgrades_raw = retriever.retrieve_tools(user_message, query_embedding=q_emb, max_k=Config.TOOL_MAX_UPGRADE_K) if budget > 0 else []
-            tool_candidates = self._build_tool_candidates(
-                tool_upgrades_raw, tool_l1_texts, tool_l0_texts, tool_key_map
-            )
-            selected_tools = self._select_upgrades(tool_candidates, budget)
-            stats.tool_upgrade_count = len(selected_tools)
-
-        # ── 话题级 plan（含工具轮绑定）──
+        # ── 话题级 plan（含工具组绑定）──
         with stats.time_phase("plan"):
             plan = self._compute_turn_plan_v2(
-                messages, l1_texts, l0_texts, tool_l1_texts, tool_l0_texts,
+                messages, l1_texts, l0_texts,
                 tool_group_l1_texts, tool_group_l0_texts,
-                tail_start, tool_tail_turns, idx_to_turn, tool_key_map,
-                budget, turn_to_topic, topic_grades, topic_data, retrieved_topics, selected_tools
+                tail_start, tool_tail_turns, idx_to_turn, {},
+                0, turn_to_topic, topic_grades, topic_data, [], []
             )
             self.store.write_turn_plan(self._session_id, [e.as_dict() for e in plan])
 
@@ -964,7 +980,6 @@ class ContextAssembler:
 
 
     def _available_budget(self, context_length, messages, tail_start, tool_tail_turns, idx_to_turn, tool_key_map):
-        system_tokens = 0
         tail_tokens = 0
 
         i = 0
@@ -972,7 +987,6 @@ class ContextAssembler:
             msg = messages[i]
             role = msg.get("role", "user")
             if role == "system":
-                system_tokens += self._token_estimate(msg.get("content", ""))
                 i += 1
                 continue
 
@@ -993,6 +1007,16 @@ class ContextAssembler:
             if i >= tail_start:
                 tail_tokens += token
             i += 1
+
+        # 系统消息预算：最近 SYSTEM_TAIL_TURN_COUNT 条原文，更早的按 L0 截断计费
+        sys_msgs = [m for m in messages if m.get("role") == "system"]
+        tc = Config.SYSTEM_TAIL_TURN_COUNT
+        system_tokens = 0
+        for i, msg in enumerate(sys_msgs):
+            if tc > 0 and len(sys_msgs) - i > tc:
+                system_tokens += self._token_estimate(self._truncate_to_l0(msg.get("content", "")))
+            else:
+                system_tokens += self._token_estimate(msg.get("content", ""))
 
         used = system_tokens + tail_tokens
         return max(0, int(context_length * 0.95) - used)
@@ -1329,12 +1353,11 @@ class ContextAssembler:
     # ── 话题级 Plan 计算（v4.6.0）──
 
     def _compute_turn_plan_v2(self, messages, l1_texts, l0_texts,
-                               tool_l1_texts, tool_l0_texts,
                                tool_group_l1_texts, tool_group_l0_texts,
                                tail_start, tool_tail_turns, idx_to_turn, tool_key_map,
                                budget, turn_to_topic, topic_grades, topic_data,
                                retrieved_topics, selected_tools) -> List[TurnPlanEntry]:
-        """话题级拣选决策 + 工具轮绑定 + 工具组三级注入。
+        """话题级拣选决策 + 工具组绑定。
 
         对话轮决策规则：
           tail           → L2 (tail)
@@ -1343,12 +1366,11 @@ class ContextAssembler:
           L1 grade       → L1 (topic_baseline)
           L0 grade       → L0 (topic_degraded)
 
-        工具轮决策规则：
-          tool_tail                       → L2 (tail)
-          parent dialogue in L2 topic     → L1 (topic_boost)
-          retrieved + L1                  → L1 (retrieved)
-          retrieved + L0                  → L0 (retrieved)
-          else                            → L0 (middle)
+        工具组决策规则：
+          tail                           → L2 (tail)
+          parent dialogue L2 target      → L1 (dialogue_downgrade)
+          parent dialogue L1 target      → L0 (dialogue_downgrade)
+          parent dialogue L0 target      → skip
         """
         entries: List[TurnPlanEntry] = []
 
@@ -1397,97 +1419,77 @@ class ContextAssembler:
                 entry.decision_reason = "topic_degraded"
             entries.append(entry)
 
-        # ── 工具组（assistant{tc} 行）──
-        for turn_idx in sorted(tool_group_l1_texts.keys()):
-            l1 = tool_group_l1_texts.get(turn_idx) or ""
-            l0 = tool_group_l0_texts.get(turn_idx) or ""
-            d_l1 = l1_texts.get(turn_idx, "")
+        # ── 工具组（每轮可有多个，按 api_call_count 区分）──
+        # 先按 (turn_idx, api_count) 排序，再给每个工具组分配顺序 sub_index
+        sorted_groups = sorted(tool_group_l1_texts.keys(), key=lambda k: (k[0], k[1]))
+        group_idx_counter: Dict[int, int] = {}
+        for gkey in sorted_groups:
+            turn_idx, api_count = gkey
+            l1 = tool_group_l1_texts.get(gkey) or ""
+            l0 = tool_group_l0_texts.get(gkey) or ""
+
+            # 本轮内顺序号（1, 2, 3...）
+            group_idx_counter[turn_idx] = group_idx_counter.get(turn_idx, 0) + 1
+            sub_idx = group_idx_counter[turn_idx]
 
             sum_tk = self._token_estimate(l1) or self._token_estimate(l0 or "")
-            l2_tk = sum(self._token_estimate(m.get("content", ""))
-                       for m in messages if m.get("_turn_index", -1) == turn_idx)
 
             entry = TurnPlanEntry(turn_index=turn_idx, turn_type="tool_group",
-                                  api_call_count=1, seq_index=0,
-                                  l2_tokens=l2_tk, summary_tokens=sum_tk,
-                                  tokens_saved=max(0, l2_tk - sum_tk),
+                                  tool_sub_index=sub_idx,
+                                  api_call_count=api_count, seq_index=0,
+                                  l2_tokens=0, summary_tokens=sum_tk,
+                                  tokens_saved=0,
                                   budget_remaining=budget,
                                   topic_group=turn_to_topic.get(turn_idx))
 
-            if l1:
-                entry.target_level = "L1"
-                entry.decision_reason = "retrieved"
-                entry.rrf_score = 1.0
-            elif l0:
-                entry.target_level = "L0"
-                entry.decision_reason = "retrieved"
-            else:
-                entry.target_level = "L2"
-                entry.decision_reason = "retrieved"
-            entries.append(entry)
-
-        # ── 工具轮 ──
-        for key, l1 in sorted(tool_l1_texts.items(), key=lambda x: (x[0][0], x[0][1])):
-            l0 = tool_l0_texts.get(key) or ""
-            turn_idx = key[0]
+            # 尾区保护
             in_tail = turn_idx in tool_tail_turns
-
-            # 父对话轮所属 topic 是否 L2 级
-            parent_topic_id = turn_to_topic.get(turn_idx)
-            parent_topic_grade = topic_grades.get(parent_topic_id, "L0") if parent_topic_id is not None else "L0"
-
-            l2_tk = 0
-            for msg_idx, entries_map in tool_key_map.items():
-                for (ekey, tk) in entries_map:
-                    if ekey == key:
-                        l2_tk = tk
-                        break
-                if l2_tk > 0:
-                    break
-
-            sum_tk = self._token_estimate(l1) or self._token_estimate(l0 or "")
-
-            entry = TurnPlanEntry(turn_index=turn_idx, turn_type="tool",
-                                  tool_sub_index=key[1],
-                                  api_call_count=1, seq_index=key[1],
-                                  l2_tokens=l2_tk, summary_tokens=sum_tk,
-                                  tokens_saved=max(0, l2_tk - sum_tk),
-                                  budget_remaining=budget,
-                                  topic_group=parent_topic_id)
-
             if in_tail:
                 entry.target_level = "L2"
                 entry.decision_reason = "tail"
-            elif parent_topic_grade == "L2":
-                # 父 topic 整体 L2 → 工具轮升 L1
-                if l1:
-                    entry.target_level = "L1"
-                    entry.decision_reason = "topic_boost"
-                elif l0:
-                    entry.target_level = "L0"
-                    entry.decision_reason = "topic_boost"
-                else:
-                    entry.target_level = "L2"
-                    entry.decision_reason = "topic_boost"
-            elif key in selected_tools:
-                summary = l1 or l0
-                if summary:
-                    entry.target_level = "L1" if l1 else "L0"
-                    entry.decision_reason = "retrieved"
-                else:
-                    entry.target_level = "L2"
-                    entry.decision_reason = "retrieved"
-            elif l0:
-                entry.target_level = "L0"
-                entry.decision_reason = "middle"
             else:
-                entry.target_level = "L2"
-                entry.decision_reason = "middle"
+                # 非尾区：根据所属对话轮的摘要层级降一级
+                dialogue_entry = next(
+                    (e for e in entries if e.turn_index == turn_idx and e.turn_type == "dialogue"),
+                    None,
+                )
+                dialogue_level = dialogue_entry.target_level if dialogue_entry else "L0"
+                if dialogue_level == "L2":
+                    entry.target_level = "L1"
+                    entry.decision_reason = "dialogue_downgrade"
+                elif dialogue_level == "L1":
+                    entry.target_level = "L0"
+                    entry.decision_reason = "dialogue_downgrade"
+                else:  # L0 → 跳过工具组
+                    continue
             entries.append(entry)
 
         # 按对话原始顺序排序
         entries.sort(key=lambda e: (e.turn_index, 0 if e.turn_type == "dialogue" else 1, e.tool_sub_index))
         return entries
+
+    # ── 系统消息尾区处理 ──
+
+    @staticmethod
+    def _truncate_to_l0(text: str, max_chars: int = 100) -> str:
+        """将系统消息截断为 L0 风格（v4.7 格式）：优先在句号处断句，降级到逗号，最后硬截断。"""
+        if not text:
+            return ""
+        return _safe_truncate(text, max_chars)
+
+    def _system_msgs_for_assembly(self, messages):
+        """返回系统消息列表：最近 SYSTEM_TAIL_TURN_COUNT 条原文，更早的截断为 L0。"""
+        sys_msgs = [m for m in messages if m.get("role") == "system"]
+        tc = Config.SYSTEM_TAIL_TURN_COUNT
+        if tc <= 0:
+            return sys_msgs
+        result = []
+        for i, msg in enumerate(sys_msgs):
+            if len(sys_msgs) - i > tc:
+                result.append({"role": "system", "content": self._truncate_to_l0(msg.get("content", ""))})
+            else:
+                result.append(msg)
+        return result
 
     def _build_messages_from_plan(self, plan: List[TurnPlanEntry],
                                    messages: List[Dict]) -> List[Dict]:
@@ -1504,10 +1506,8 @@ class ContextAssembler:
         """
         result: List[Dict] = []
 
-        # 透传 system 消息
-        for msg in messages:
-            if msg.get("role") == "system":
-                result.append(msg)
+        # 透传 system 消息：最近 SYSTEM_TAIL_TURN_COUNT 条原文，更早的截断为 L0
+        result.extend(self._system_msgs_for_assembly(messages))
 
         # 记录 plan 覆盖的 (turn_index, turn_type) 组合
         covered: set = set()
@@ -1517,7 +1517,8 @@ class ContextAssembler:
 
             l2, l1, l0 = self.store.read_turn_texts(
                 self._session_id, entry.turn_index,
-                entry.turn_type, entry.tool_sub_index
+                entry.turn_type, entry.tool_sub_index,
+                tool_group_api_count=entry.api_call_count if entry.turn_type == "tool_group" else None
             )
             # 对话轮退化条目过滤：_assemble_status=1 → l0/l1 不可用，跳过注入
             # （仅检查 DB 记录条目的退化状态，不影响 add_turn 写入 cache 但未落库的用例）
@@ -1528,13 +1529,10 @@ class ContextAssembler:
                 )
                 if db_status == 1:  # ASSEMBLE_PENDING_BACKFILL
                     continue
-            is_tool = entry.turn_type == "tool"
-            is_tool_group = entry.turn_type == "tool_group"
+            is_tool_or_group = entry.turn_type in ("tool", "tool_group")
             prefix = f"[~/{entry.turn_index}"
-            if is_tool:
+            if is_tool_or_group:
                 prefix += f"/{entry.tool_sub_index}"
-            elif is_tool_group:
-                prefix += "/g"
             else:
                 prefix += "/0"
             prefix += "] "
@@ -1542,12 +1540,35 @@ class ContextAssembler:
             # 对话轮 L1 → 格式化为可读文本（替代原始 JSON 注入）
             l1_display = self._format_l1_for_display(l1) if entry.turn_type == "dialogue" else l1
 
-            # 工具组：用 _format_group_summary 格式化
-            if is_tool_group and l1:
-                group_display = self._format_group_summary(l1)
-                if group_display:
-                    result.append({"role": "assistant", "content": f"{prefix}{group_display}"})
-                    continue
+            # 工具组 L2：展开完整消息序列（assistant{tc} + tool × N），与对话轮 L2 一致
+            if entry.turn_type == "tool_group" and entry.target_level == "L2":
+                if l2:
+                    self._extend_with_l2(result, l2, entry.turn_index)
+                    # L2 展开后，标记该组原始 tool 消息已被覆盖，避免重复追加
+                    covered.add((entry.turn_index, "tool"))
+                elif l1:
+                    display = self._format_group_summary(l1)
+                    if display:
+                        result.append({"role": "assistant", "content": f"{prefix}{display}"})
+                elif l0:
+                    result.append({"role": "assistant", "content": f"{prefix}工具组：{l0}"})
+                continue
+
+            # 工具组 L1/L0：格式化组摘要 / 组L0
+            if entry.turn_type == "tool_group":
+                if entry.target_level == "L1" and l1:
+                    group_display = self._format_group_summary(l1)
+                    if group_display:
+                        result.append({"role": "assistant", "content": f"{prefix}{group_display}"})
+                    elif l0:
+                        result.append({"role": "assistant", "content": f"{prefix}{l0}"})
+                elif l0:
+                    result.append({"role": "assistant", "content": f"{prefix}工具组：{l0}"})
+                elif l1:
+                    group_display = self._format_group_summary(l1)
+                    if group_display:
+                        result.append({"role": "assistant", "content": f"{prefix}{group_display}"})
+                continue
 
             if entry.target_level == "L2":
                 # 保留原文
@@ -1622,23 +1643,46 @@ class ContextAssembler:
         except (json.JSONDecodeError, TypeError, AttributeError):
             return False
 
+    _L1_DEBUG_PATTERNS = (
+        "当前会话", "CA 注入", "CA插件", "CA 插件", "当前 CA",
+        "此会话", "本对话", "此对话",
+        "当前上下文", "当前注入", "ctx 中",
+        "完全无工具", "无工具组",
+    )
+
     def _format_l1_for_display(self, l1_text: str) -> str:
-        """将对话轮 L1 JSON 摘要格式化为可读文本，替代原始 JSON 注入。"""
+        """将对话轮 L1 JSON 摘要格式化为可读文本，替代原始 JSON 注入。
+
+        当 LLM 生成非 JSON 调试描述时（如"当前会话 CA 注入 ctx 中完全无工具组..."），
+        识别并返回空字符串，不泄漏原始文本。
+        """
         if not l1_text or not l1_text.strip():
             return l1_text
         try:
             data = json.loads(l1_text)
         except (json.JSONDecodeError, TypeError):
+            # 非 JSON → 检测是否为调试描述（LLM 错误输出）
+            for pat in self._L1_DEBUG_PATTERNS:
+                if pat in l1_text:
+                    return ""
             return l1_text
         core = data.get("core_change", "")
         if not core:
+            # JSON 格式但无有效核心内容 → 检测调试模式
+            for pat in self._L1_DEBUG_PATTERNS:
+                if pat in l1_text:
+                    return ""
             return l1_text
         lines = [core]
         for key in ("new_materials", "objective_facts"):
             items = data.get(key, [])
             if items:
-                joined = " | ".join(str(i)[:240] for i in items)
-                lines.append(f"  {joined}")
+                # 过滤占位符（LLM 写 "无"/"-"/"- 无" 等表示空）
+                real_items = [str(i)[:240] for i in items
+                              if str(i).strip() not in ("", "无", "-", "- 无", "无有效内容")]
+                if real_items:
+                    joined = " | ".join(real_items)
+                    lines.append(f"  {joined}")
         return "\n".join(lines)
 
     @staticmethod
@@ -1655,11 +1699,31 @@ class ContextAssembler:
         except (json.JSONDecodeError, TypeError):
             return ""
         intent = data.get("group_intent", "") or ""
+        # 防御性清理 result：防 raw JSON 和绝对路径泄漏
         result = data.get("group_result", "") or ""
+        if result.startswith("{"):
+            # 若 result 本身是 JSON，尝试提取文本字段
+            try:
+                parsed = json.loads(result)
+                if isinstance(parsed, dict):
+                    for k in ("result", "output", "summary"):
+                        v = parsed.get(k)
+                        if v and isinstance(v, str):
+                            result = v
+                            break
+                    else:
+                        result = str(dict(list(parsed.items())[:2]))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        result = result.replace("/home/i1j", "~")
         count = data.get("tool_count", 0)
         state = data.get("state", "ok") or ""
+        thought = data.get("thought", "") or ""
         parts = []
-        if intent:
+        if thought:
+            parts.append(f"[思考] {thought}")
+            # thought 已包含 intent，跳过重复的 intent
+        elif intent:
             parts.append(intent)
         if result and (not intent or result != f"调用 {count} 个工具"):
             parts.append(f"→{result}")
@@ -1690,7 +1754,7 @@ class ContextAssembler:
     def _hard_truncation(self, messages, context_length=32000):
         if not messages:
             return []
-        sys_msgs = [m for m in messages if m.get("role") == "system"]
+        sys_msgs = self._system_msgs_for_assembly(messages)
         groups = []
         i = 0
         while i < len(messages):

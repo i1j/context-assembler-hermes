@@ -20,6 +20,7 @@ import logging
 import re
 from collections import Counter
 from pathlib import Path
+from .post_process import _safe_truncate
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import Config
@@ -169,36 +170,46 @@ class ToolSummarizer:
             l1 = {
                 "tool_name": "terminal",
                 "tool_args": args,
-                "thought_process": thought,
                 "result_summary": result_summary,
                 "error": None,
                 "implicit_knowledge": [],
                 "next_action_hint": "",
                 "_assemble_status": 0,
             }
-            l0 = f"terminal: pytest ({', '.join(parts)}) — {el}s"[:100]
+            l0 = _safe_truncate(f"pytest ({', '.join(parts)}) — {el}s", 100)
             return l1, l0
 
-        # 检测终端错误输出
-        _ERROR_RE = re.compile(
-            r'(Traceback|Error:|Exception:|ModuleNotFound|ImportError|'
-            r'NotFound|No such file|Permission denied|syntax error|'
-            r'OperationalError|RuntimeError|ValueError|TypeError|'
-            r'failed|FAILED)',
-            re.IGNORECASE
-        )
-        has_error = any(_ERROR_RE.search(line) for line in non_empty)
-        error_flag = "[ERROR] " if has_error else ""
+        # exit_code 检测：优先靠 exit_code，不依赖文本正则
+        exit_code = None
+        for resp in tool_responses:
+            try:
+                raw = resp.get("content", "")
+                if isinstance(raw, str) and raw.startswith("{"):
+                    parsed = json.loads(raw)
+                    ec = parsed.get("exit_code")
+                    if ec is not None:
+                        exit_code = ec
+                        break
+            except (json.JSONDecodeError, AttributeError):
+                continue
 
         # 通用终端摘要 — L0 输出内容优先
         seen = set()
         key_lines = []
         for line in non_empty:
             stripped = line.strip()
+            # 去重
             if stripped in seen:
                 continue
             seen.add(stripped)
+            # 过滤分隔符
             if stripped in ("---", "```", "==="):
+                continue
+            # 过滤 raw JSON dict 碎片 (Hermes terminal 返回的 JSON 外壳)
+            if stripped.startswith('{"output"') or stripped.startswith('{"error"'):
+                continue
+            # 过滤内部注释
+            if stripped.startswith("[Subdirectory context discovered"):
                 continue
             key_lines.append(stripped)
             if len(key_lines) >= 5:
@@ -208,27 +219,31 @@ class ToolSummarizer:
         result_summary = f"[{cmd_short}] {body}" if cmd_short else body
         if len(result_summary) > 500:
             result_summary = result_summary[:497] + "…"
-        if error_flag:
-            result_summary = f"[ERROR] {result_summary}"
+
+        # error 标记完全基于 exit_code，stdout 中的错误文本不算
+        has_error = exit_code is not None and exit_code > 0
+        error_prefix = f"exit={exit_code}: " if has_error and exit_code else ""
 
         l1 = {
             "tool_name": "terminal",
             "tool_args": args,
-            "thought_process": thought,
             "result_summary": result_summary,
-            "error": error_flag.strip() or None,
+            "error": f"exit_code={exit_code}" if has_error else None,
             "implicit_knowledge": [],
             "next_action_hint": "",
             "_assemble_status": 0,
         }
 
-        # L0: 有输出内容则优先展示首个关键行，否则回退到行数
-        if key_lines and tool_label in ("t", "exc"):
-            cmd_part = cmd_short[:30].replace("\\n", " ")
-            out_part = key_lines[0][:50]
-            l0 = f"{error_flag}{tool_label}:{cmd_part} → {out_part}"[:100]
+        # L0 v4: 结果优先，省略命令文本，无 t: 前缀
+        if key_lines:
+            out_part = key_lines[0][:92]
+            l0 = _safe_truncate(f"{error_prefix}{out_part}", 100)
         else:
-            l0 = f"{error_flag}{tool_label}: {cmd_short[:60]} ({total_effective} lines)"[:100]
+            # 无有效输出时降级到 exit=N
+            if exit_code is not None:
+                l0 = f"exit={exit_code}"
+            else:
+                l0 = _safe_truncate(f"({total_effective} lines)", 100)
         return l1, l0
 
     def _summarize_execute_code(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
@@ -251,13 +266,12 @@ class ToolSummarizer:
                 output = str(c)[:200]
                 break
 
-        path_short = str(path)[:120] if path else "<unknown>"
+        path_short = self._sanitize_path(path)
         result_summary = output if output else f"write_file: {path_short}"
 
         l1 = {
             "tool_name": "write_file",
             "tool_args": args,
-            "thought_process": thought,
             "result_summary": result_summary,
             "error": None,
             "implicit_knowledge": [],
@@ -265,7 +279,7 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        l0 = f"write_file: {path_short}"[:100]
+        l0 = _safe_truncate(f"write_file: {path_short}", 100)
         return l1, l0
 
     def _summarize_patch(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
@@ -283,7 +297,7 @@ class ToolSummarizer:
                 output = str(c)[:200]
                 break
 
-        path_short = str(path)[:120] if path else "<unknown>"
+        path_short = self._sanitize_path(path)
         if output and "success" in output.lower():
             flag = " (replace_all)" if replace_all else ""
             result_summary = f"patch: {path_short}{flag}"
@@ -293,7 +307,6 @@ class ToolSummarizer:
         l1 = {
             "tool_name": "patch",
             "tool_args": args,
-            "thought_process": thought,
             "result_summary": result_summary,
             "error": None,
             "implicit_knowledge": [],
@@ -301,7 +314,7 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        l0 = f"patch: {path_short}"[:100]
+        l0 = _safe_truncate(f"patch: {path_short}", 100)
         return l1, l0
 
     def _summarize_read_file(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
@@ -312,7 +325,7 @@ class ToolSummarizer:
         limit = args.get("limit", "?")
         thought = tool_call_msg.get("content", "")
 
-        path_short = str(path)[:120] if path else "<unknown>"
+        path_short = self._sanitize_path(path)
 
         # 检查结果中是否包含行数信息
         total_lines = "?"
@@ -342,7 +355,6 @@ class ToolSummarizer:
         l1 = {
             "tool_name": "read_file",
             "tool_args": args,
-            "thought_process": thought,
             "result_summary": result_summary,
             "error": None,
             "implicit_knowledge": [],
@@ -353,7 +365,7 @@ class ToolSummarizer:
         # L0: 文件名 + 行数，压缩路径前缀
         fname = Path(path).name if path else "<unknown>"
         parent = str(Path(path).parent)[-25:] if path else ""
-        l0 = f"read_file: …{parent}/{fname} ({total_lines} lines)"[:100]
+        l0 = _safe_truncate(f"read_file: …{parent}/{fname} ({total_lines} lines)", 100)
         return l1, l0
 
     def _summarize_search_files(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
@@ -407,7 +419,6 @@ class ToolSummarizer:
         l1 = {
             "tool_name": "search_files",
             "tool_args": args,
-            "thought_process": thought,
             "result_summary": result_summary,
             "error": None,
             "implicit_knowledge": [],
@@ -415,7 +426,7 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        l0 = f"search_files: {pattern[:40]} → {total_count} hits"[:100]
+        l0 = _safe_truncate(f"search_files: {pattern[:40]} → {total_count} hits", 100)
         return l1, l0
 
     def _summarize_skills_list(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
@@ -447,7 +458,6 @@ class ToolSummarizer:
         l1 = {
             "tool_name": "skills_list",
             "tool_args": args,
-            "thought_process": thought,
             "result_summary": result_summary,
             "error": None,
             "implicit_knowledge": [],
@@ -455,7 +465,7 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        l0 = f"skills_list: {total} skills"[:100]
+        l0 = _safe_truncate(f"skills_list: {total} skills", 100)
         return l1, l0
 
     def _summarize_skill_view(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
@@ -484,7 +494,6 @@ class ToolSummarizer:
         l1 = {
             "tool_name": "skill_view",
             "tool_args": args,
-            "thought_process": thought,
             "result_summary": result_summary,
             "error": None,
             "implicit_knowledge": [],
@@ -492,7 +501,7 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        l0 = f"skill_view: {name_short}"[:100]
+        l0 = _safe_truncate(f"skill_view: {name_short}", 100)
         return l1, l0
 
     @staticmethod
@@ -547,7 +556,6 @@ class ToolSummarizer:
         l1 = {
             "tool_name": "skill_manage",
             "tool_args": args,
-            "thought_process": thought,
             "result_summary": result_summary,
             "error": error,
             "implicit_knowledge": [],
@@ -558,7 +566,7 @@ class ToolSummarizer:
         action = key_fields.get("action", "?")
         name = key_fields.get("name", "?")
         status = "error" if error else "ok"
-        l0 = f"skill_manage: {action} {name} ({status})"[:100]
+        l0 = _safe_truncate(f"skill_manage: {action} {name} ({status})", 100)
         return l1, l0
 
     def _summarize_memory(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
@@ -598,7 +606,6 @@ class ToolSummarizer:
         l1 = {
             "tool_name": "memory",
             "tool_args": args,
-            "thought_process": thought,
             "result_summary": result_summary,
             "error": error,
             "implicit_knowledge": [],
@@ -607,7 +614,7 @@ class ToolSummarizer:
         }
 
         status = "error" if error else "ok"
-        l0 = f"memory: {action} {target} ({status})"[:100]
+        l0 = _safe_truncate(f"memory: {action} {target} ({status})", 100)
         if content_preview and len(l0) + len(content_preview) + 5 <= 100:
             l0 += f" — {content_preview}"
         return l1, l0
@@ -675,15 +682,18 @@ class ToolSummarizer:
         else:
             for key in ["result", "summary", "message", "conclusion", "output"]:
                 if key in p0 and p0[key]:
-                    result_summary = p0[key]
+                    raw = p0[key]
+                    # 确保值为字符串，过滤 raw JSON dict/list
+                    if isinstance(raw, (dict, list)):
+                        raw = str(raw)
+                    result_summary = self._sanitize_summary_text(raw)
                     break
             if not result_summary and vip.get("status"):
-                result_summary = vip["status"]
+                result_summary = self._sanitize_summary_text(vip["status"])
 
         l1 = {
             "tool_name": tool_name,
             "tool_args": arguments,
-            "thought_process": thought,
             "result_summary": result_summary or "无返回数据",
             "error": error,
             "implicit_knowledge": [],
@@ -692,9 +702,7 @@ class ToolSummarizer:
         }
 
         core = l1["result_summary"] or l1.get("error") or "无返回数据"
-        l0 = f"{tool_name}: {core}"[:100]
-        if thought and len(thought) <= 30 and len(l0) + len(thought) + 11 <= 100:
-            l0 += f" (thinking: {thought})"
+        l0 = _safe_truncate(f"{tool_name}: {core}", 100)
 
         return l1, l0
 
@@ -721,6 +729,46 @@ class ToolSummarizer:
         if tail_len < 0:
             return text[:max_len] + "…"
         return text[:head_len] + "…" + text[-tail_len:]
+
+    @staticmethod
+    def _sanitize_path(path_str: str, max_len: int = 120) -> str:
+        """替换 HOME 路径为 ~ 防止绝对路径泄露。"""
+        if not path_str:
+            return ""
+        s = str(path_str).replace("/home/i1j", "~")
+        return s[:max_len]
+
+    @staticmethod
+    def _sanitize_summary_text(text: str, max_len: int = 200) -> str:
+        """清理 result_summary：确保为字符串、剥离 raw JSON 外壳、缩短路径。"""
+        if not text:
+            return ""
+        s = str(text)
+        # 如果值本身是 dict/list 的字符串化结果（raw JSON），尝试提取有意义内容
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, dict):
+                    # 提取常见文本字段
+                    for key in ("result", "output", "summary", "message"):
+                        val = parsed.get(key)
+                        if val and isinstance(val, str):
+                            s = val
+                            break
+                    else:
+                        # 没有任何文本字段 → 压缩为简短描述
+                        s = str(dict(list(parsed.items())[:3]))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        elif s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    s = f"[{len(parsed)} items]"
+            except (json.JSONDecodeError, TypeError):
+                pass
+        s = s.replace("/home/i1j", "~")
+        return s[:max_len]
 
     @staticmethod
     def generate_group_summary(thought: str,
@@ -783,4 +831,5 @@ class ToolSummarizer:
             "group_result": group_result,
             "tool_count": len(tool_results),
             "state": state,
+            "thought": (thought or "")[:200],
         }

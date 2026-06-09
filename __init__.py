@@ -51,14 +51,17 @@ def _on_session_start(**kwargs: Any) -> None:
     logger.info("[CA] _on_session_start called: session_id=%s kwargs_keys=%s", session_id, list(kwargs.keys()))
     if not session_id:
         return
-    plugin = CAContextAssemblerPlugin()
-    # Remove session_id from kwargs to avoid duplicate-arg error
-    # since on_session_start(self, session_id, **kwargs) takes it positionally
-    hook_kwargs = {k: v for k, v in kwargs.items() if k != "session_id"}
-    plugin.on_session_start(session_id, **hook_kwargs)
-    with _engines_lock:
-        _engines[session_id] = plugin
-        logger.info("[CA] _on_session_start: registered plugin for session %s (total engines: %d)", session_id, len(_engines))
+    try:
+        plugin = CAContextAssemblerPlugin()
+        # Remove session_id from kwargs to avoid duplicate-arg error
+        # since on_session_start(self, session_id, **kwargs) takes it positionally
+        hook_kwargs = {k: v for k, v in kwargs.items() if k != "session_id"}
+        plugin.on_session_start(session_id, **hook_kwargs)
+        with _engines_lock:
+            _engines[session_id] = plugin
+            logger.info("[CA] _on_session_start: registered plugin for session %s (total engines: %d)", session_id, len(_engines))
+    except Exception as exc:
+        logger.error("[CA] _on_session_start failed for session %s: %s", session_id, exc, exc_info=True)
 
 
 def _on_session_end(**kwargs: Any) -> None:
@@ -74,21 +77,24 @@ def _on_session_end(**kwargs: Any) -> None:
 def _on_session_reset(**kwargs: Any) -> None:
     session_id = kwargs.get("session_id", "")
     logger.info("[CA] _on_session_reset called: session_id=%s", session_id)
-    with _engines_lock:
-        if session_id:
-            plugin = _engines.pop(session_id, None)
-            instances = [plugin] if plugin else []
-        else:
-            # 没有 session_id 时（如全局 /reset），重置所有引擎
-            instances = list(_engines.values())
-            _engines.clear()
-    for p in instances:
-        if p is None:
-            continue
-        try:
-            p.on_session_reset()
-        except Exception:
-            pass
+    try:
+        with _engines_lock:
+            if session_id:
+                plugin = _engines.pop(session_id, None)
+                instances = [plugin] if plugin else []
+            else:
+                # 没有 session_id 时（如全局 /reset），重置所有引擎
+                instances = list(_engines.values())
+                _engines.clear()
+        for p in instances:
+            if p is None:
+                continue
+            try:
+                p.on_session_reset()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.error("[CA] _on_session_reset error: %s", exc)
 
 
 def _on_pre_llm_call(**kwargs: Any) -> Optional[str]:
@@ -232,9 +238,13 @@ def _write_state(state: Dict) -> None:
         _cleanup_stale_state_files()
     except OSError:
         pass
-    _state_file_path().parent.mkdir(parents=True, exist_ok=True)
-    with open(_state_file_path(), 'w') as f:
-        json.dump(state, f)
+    try:
+        path = _state_file_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(state, f)
+    except OSError as exc:
+        logger.warning("[CA] Failed to write breaker state (read-only filesystem?): %s", exc)
 
 
 def _record_failure() -> None:
@@ -305,7 +315,14 @@ class CAContextAssemblerPlugin:
             hermes_home = str(Path.home() / ".hermes")
 
         db_path = Path(hermes_home) / "ca_cache" / f"{session_id}.db"
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # 只读文件系统降级：使用临时目录
+            import tempfile
+            tmpdir = Path(tempfile.mkdtemp(prefix="ca_cache_"))
+            db_path = tmpdir / f"{session_id}.db"
+            logger.warning("[CA] ca_cache dir not writable, falling back to %s", db_path)
 
         try:
             self._engine = session_manager.get(session_id, str(db_path))

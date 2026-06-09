@@ -506,25 +506,14 @@ Hermes 有两条完全独立的机制：
 
 ## 相关文档
 
-| 文档 | 路径 | 内容 |
+所有文档按类别归档在 `docs/` 下：
+
+| 类别 | 目录 | 内容 |
 |------|------|------|
 | 变更历史 | `docs/changelog.md` | 全版本变更记录（唯一权威源） |
-| 技术方案 | `docs/technical-plan.md` | 完整架构设计（已同步至 v4.7.1） |
-| 调试报告验证工作流 | `docs/ca-debug-report-fix-verification.md` | 修复验证流程、关键管线代码位置 |
-| CA→Reasonix 迁移分析 | `docs/ca-to-reasonix-analysis.md` | 引擎迁移与适配分析 |
-| 部署调试记录（2026-06-19） | `docs/ca-deploy-debug-20260619.md` | 上下文注入质量修复记录 |
-| 自检报告 | `docs/ca-devtest-workflow-selfcheck-report.md` | DevTest 工作流自检报告 |
-| 工具轮重构分析 | `docs/tool-turn-refactor/tool-turn-refactor-analysis.md` | 工具轮重构设计分析 |
-| 工具轮重构需求 | `docs/tool-turn-refactor/tool-turn-refactor-req.md` | 工具轮重构需求规格 |
-| 工具轮重构测试需求 | `docs/tool-turn-refactor/tool-turn-refactor-test-req.md` | 工具轮重构测试策略 |
-| 话题拣选方案 | `docs/topic-based-picking-plan.md` | 话题拣选原始方案设计 |
-| L1 白皮书（GM） | `docs/ca-l1-refactor/ca-l1-whitepaper-v1.2-gm.md` | 外部设计文档，PDD 架构、解析器、适配器设计 |
-| L1 需求与方案 v2 | `docs/ca-l1-refactor/ca-l1-refactor-requirements-v2.md` | 需求规格、总体设计、测试策略 |
-| L1 实现方案 v2 | `docs/ca-l1-refactor/ca-l1-refactor-impl-plan-v2.md` | 实现策略、接口设计、13 步计划 |
-| L1 测试方案 v2 | `docs/ca-l1-refactor/ca-l1-refactor-test-plan-v2.md` | 分层策略、Mock 策略 |
-| 交叉评审（测试线） | `docs/cross-review-test-perspective.md` | 可测试性视角：10 项发现 |
-| 交叉评审（开发线） | `docs/cross-review-dev-perspective.md` | 需求覆盖视角：7 项发现 |
-| L0 摘要质量观察 | `ca-ctx-inspect/references/l0-summary-quality-observations.md` | 对话轮 L0 摘要质量实测 |
-| system_overhead 分析 | `docs/system-overhead-measurement-analysis.md` | 测量代码移除分析 |
-| CA v5 试验计划 | `docs/ca-v5-test-plan.md` | 缓存友好改进 + 参数自动调优试验方案 |
-| ToolSummarizer 结构改进 | `docs/tool-summary-improvements.md` | 10 handlers 清单 + 待改进/已排除 |
+| 设计 | `docs/design/` | 技术方案、话题拣选、系统分析、改进方案 |
+| 调试 | `docs/debug/` | 调试报告、修复验证、部署调试 |
+| 评审 | `docs/review/` | 交叉评审（开发线/测试线） |
+| 测试计划 | `docs/test-plans/` | 试验计划 |
+| L1 重构 | `docs/ca-l1-refactor/` | 白皮书、需求、方案、测试 |
+| 工具轮重构 | `docs/tool-turn-refactor/` | 分析、需求、技术方案、测试 |

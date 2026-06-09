@@ -1,5 +1,5 @@
 """Store 层测试（TC-S-*）v4.4.0 适配版"""
-import pytest, os, json, threading, time
+import pytest, os, json, sqlite3, threading, time
 from unittest.mock import patch
 from pathlib import Path
 
@@ -362,7 +362,6 @@ def test_v5_write_turn_plan_read_back(tmp_path):
 def test_v5_readonly_guard(tmp_path):
     """v5 writable store 不可打开 v4 DB: RuntimeError
     Steps: 创建 v4 格式 DB → SQLiteStore(readonly=False) → 首次连接报 RuntimeError"""
-    import sqlite3
     db = tmp_path / "test_v4.db"
     conn = sqlite3.connect(str(db))
     conn.execute("CREATE TABLE turn_cache (session_id TEXT, turn_index INTEGER, "
@@ -378,6 +377,8 @@ def test_v5_readonly_guard(tmp_path):
         _ = store.conn  # 首次连接触发 schema 检查
 
 
+@pytest.mark.skipif(sqlite3.sqlite_version_info < (3, 22, 0),
+                    reason="URI mode=ro requires SQLite >= 3.22.0")
 @pytest.mark.medium
 def test_v5_readonly_mode(tmp_path):
     """v4 DB readonly 模式可正常读取
@@ -527,6 +528,8 @@ def test_v5_write_tool_group_multiple_api(tmp_path):
 
 
 @pytest.mark.medium
+@pytest.mark.skipif(sqlite3.sqlite_version_info < (3, 22, 0),
+                    reason="URI mode=ro requires SQLite >= 3.22.0")
 def test_v5_write_tool_group_readonly_skip(tmp_path):
     """write_tool_group readonly 静默跳过"""
     store = SQLiteStore(db_path=str(tmp_path / "test_v5_ro.db"), readonly=True)
