@@ -1,171 +1,138 @@
-# ToolSummarizer 结构化摘要改进报告
+# ToolSummarizer 结构化摘要设计 v2
 
-**日期**: 2026-06-06  
-**来源**: 调试会话中基于实际注入数据的观察  
-**状态**: 进行中（已实现 10 个 handler，待改进 3 项）
+**日期**: 2026-06-09
+**版本**: v2（v1 发布于 2026-06-06，现重写以反映架构实况）
 
 ---
 
-## 一、已实现（10 handlers）
+## 核心架构
 
-### 1.1 结构化摘要 handler
+```
+Hermes tool 返回 JSON     ToolSummarizer handler      per-tool L0 + L1       group 层
+                         ┌───────────────────┐
+tool_1 raw content  →    │ _summarize_XXX    │ →  L0_1 + L1_1            ┐
+tool_2 raw content  →    │ _summarize_YYY    │ →  L0_2 + L1_2            ├ → group_l0
+tool_3 raw content  →    │ (通用 fallback)   │ →  L0_3 + L1_3            ┘   (L0_1 | L0_2 | L0_3)
+                         └───────────────────┘
+                                                     group_l1 + group_l0 → group 显示
+                                                     (L0：拼接；L1：_format_group_summary)
+```
 
-| # | handler | L0 改前示例 | L0 改后示例 | 说明 |
-|---|---------|------------|------------|------|
-| 1 | `_summarize_terminal` | `terminal: DB: 20260605...…L1: 13.4` | `terminal: find /home -name "*.py" (4 lines)` | 命令摘要 + 前5去重关键行。内置 pytest 检测 → `pytest: 8 passed, 2 skipped — 0.44s` |
-| 2 | `_summarize_execute_code` | 同 terminal 碎片 | `execute_code: from hermes_tools... (42 lines)` | 代理到 terminal handler，替换 tool_name |
-| 3 | `_summarize_write_file` | `write_file: 无返回数据` | `write_file: /home/i1j/test.txt` | 只保留文件路径 |
-| 4 | `_summarize_patch` | `patch: 无返回数据` | `patch: /home/i1j/tool_summarizer.py` | 目标文件 + replace_all 标记 |
-| 5 | `_summarize_read_file` | `read_file: {"content": "1|import pytest..."` | `read_file: /tmp/test.py` | 文件名 + 行数范围 |
-| 6 | `_summarize_search_files` | `search_files: {"total_count": 0}` | `search_files: *.py → 0 hits` | 查询模式 + 命中数 + 前3文件名 |
-| 7 | `_summarize_skill_manage` | `skill_manage: 失败` | `skill_manage: patch tester-workflow (error)` | 提取 action/name/file_path 关键参数；old_string/new_string 不进入 result_summary |
-| 8 | `_summarize_memory` | `memory: {"success": false, ...}` | `memory: replace memory (error)` | 提取 action/target/old_text；content 预览 80 字符 |
-| 9 | `_summarize_skills_list` | `skills_list: 无返回数据` | `skills_list: 3 skills (tester-workflow, ...)` | 提取技能名列表（前5） |
-| 10 | `_summarize_skill_view` | `skill_view: 无返回数据` | `skill_view: tester-workflow — 12 lines` | 技能名 + 行数 |
+**本质**: 工具组不是自上而下的变换，是自下而上的拼接。各层只是把下层的结果按工具顺序串联，不做额外截断或改写。
 
-### 1.2 架构设计
+---
 
-- **分发路径**: `summarize()` → `getattr(self, f"_summarize_{sanitized}", None)` → handler
-- **工具名标准化**: `.` 和 `-` 自动映射为 `_`（`read-file` → `_summarize_read_file`）
-- **失败兜底**: handler 异常时 `try/except` 回退到通用字段提取逻辑
-- **L-stage 自动生效**: `lstage.py` 第 110 行调 `tool_summarizer.summarize()`，同一入口
+## 分层职责
 
-### 1.3 关键设计决策
+### 第 0 层：Hermes 返回的 raw content
+
+每个工具调用返回 JSON 结构，已知字段包括：
+- `output` (terminal), `total_count` + `files` (search_files)
+- `bytes_written` + `dirs_created` (write_file)
+- `success` + `message` (skill_manage)
+- `todos` + `summary` (todo)
+- `content` + `total_lines` (read_file)
+
+**handler 从已知字段提取**，不做文本清洗。
+
+### 第 1 层：handler 构造单工具 L1 + L0
+
+**L1** 是结构化 JSON dict（存入 `turn_cache.l1_text`），用于组级格式化与未来检索：
+
+```python
+{"tool_name": "search_files", "result_summary": "8 hits [debug:8]",
+ "tool_args": {...}, "error": None, ...}
+```
+
+**L0** 是 ≤100 字符的文本（存入 `turn_cache.l0_text`），用于快速展示：
+
+```
+[tool_name]: {信息密度最大化的摘要}
+```
+
+### 第 2 层：buffer flush 拼组摘要
+
+`generate_group_summary()` 遍历组内工具，提取 `tool_name` + `status` + `result_summary`：
+
+```python
+group_result = "；".join([tr["result_summary"] for tr in tool_results[:3]])
+group_l0 = " | ".join([s["l0"] for s in per_tool_summaries[:5]])
+```
+
+**字符限制基于工具轮而非工具组。** 每个 handler 产出的 L0（≤100 字符）和 result_summary 已在 handler 层各自截断，组级只做 `[:3]` / `[:5]` 的数量限制，**不做二次截断**。
+
+### 第 3 层：注入显示（_format_group_summary）
+
+```python
+工具组：{intent}→{group_result}（{N}个，{state}）
+```
+
+**不包含 thought**（历史 AGENT 运行时状态，信息价值为零）。
+
+---
+
+## L0 信息密度原则
+
+每 token 必须传达有用信息。按优先级：
+
+1. **结果优先** — `exit=0` / `found 3 files` 而不是 `[cmd] ...`
+2. **省略命令文本** — L0 v4 原则，terminal 不讲 `[python3 -c "..."]`，只讲 `exit=N` 或关键输出
+3. **路径脱敏** — `/home/i1j/` → `~/`
+4. **去尾不掐头** — `read_file: …/ca/__init__.py (2017 lines)`，保留文件名
+5. **同类型折叠** — `search_files × 3` 优于 `search_files | search_files | search_files`
+6. **无 raw JSON / Python repr** — `{'total': 5, ...}` 或 `{"bytes_written": 2171}` 必须从字段提取
+
+---
+
+## Handler 清单（12 handlers）
+
+| # | Handler | Hermes 返回格式 | L0 格式 | L1 result_summary | 状态 |
+|---|---------|----------------|---------|-------------------|------|
+| 1 | `_summarize_terminal` | `{"output": "...", "exit_code": N}` | `exit=N` 或关键输出行 | 结果优先，无 `[{cmd}]` | ✅ v4 |
+| 2 | `_summarize_execute_code` | 同 terminal | `exit=N` 或关键输出行 | 跳转到 terminal | ✅ v4 |
+| 3 | `_summarize_write_file` | `{"bytes_written": N, "dirs_created": bool}` | `写入：{path}（{bytes_written} 字节）` | 提取 bytes_written + path | ✅ v4 |
+| 4 | `_summarize_patch` | `{"success": bool}` | `patch: {path}` | `patch: {path}(success/error)` | ✅ v4 |
+| 5 | `_summarize_read_file` | `{"content": "...", "total_lines": N}` | `read_file: …{fname} ({total_lines} lines)` | 文件名 + 行数 | ✅ v4 |
+| 6 | `_summarize_search_files` | `{"total_count": N, "files": [...], "matches": [...]}` | `search_files: {pattern} → {N} hits` | 命中数 + 目录分布 | ✅ v4 |
+| 7 | `_summarize_skills_list` | `{"skills": [{name, ...}]}` | `skills_list: {N} skills` | 技能名列表（前5） | ✅ v4 |
+| 8 | `_summarize_skill_view` | 直接 text | `skill_view: {name} — {N} lines` | 技能名 + 行数 | ✅ v4 |
+| 9 | `_summarize_skill_manage` | `{"success": bool, "message": str}` | `skill_manage: {action} {name} (ok/error)` | 提取 success + message | ✅ v4 |
+| 10 | `_summarize_memory` | `{"success": bool, "error": str}` | `memory: {action} {target} (ok/error)` | 提取 action/target/old_text | ✅ v4 |
+| 11 | `_summarize_skill_view` | 同 skill_view | — | — | ✅ v4 |
+| 12 | `_summarize_todo` | `{"todos": [...], "summary": {"total": N, ...}}` | `todo: N 项（M pending...）` | 提取 summary 计数 | ✅ v5.0 |
+
+**命名映射**：工具名中的 `.` / `-` 自动转为 `_`（如 `execute-code` → `_summarize_execute_code`），`summarize()` 通过 `getattr(self, f"_summarize_{sanitized}", None)` 分发。
+
+---
+
+## 组级显示格式
+
+统一通过 `_format_group_summary(l1_json)`：
+
+```
+工具组：{intent}→{tool_result}；{tool_result}（{N}个，{state}）
+```
+
+示例：
+```
+工具组：查文件→search_files: 8 hits [debug:8]；search_files: 4 hits [ca:4]（2个，ok）
+工具组：→exit=0（1个，ok）
+工具组：→todo: 5 项（4 pending, 1 in_progress）（1个，ok）
+工具组：搜索代码→search_files: *.md → 1 hits；search_files: debug* → 8 hits（2个，ok）
+```
+
+所有级别（L0/L1/L2 → L0 fallback）统一此格式，不再有 `工具组：{raw_l0}` 和 `工具组：{intent}→{result}` 两套形式。
+
+---
+
+## 设计决策
 
 | 问题 | 讨论 | 结论 |
 |------|------|------|
-| 指纹去重 TODO | 旧累积快照模式的遗留注释，独立切片架构下不适用 | ❌ 删除标签，不入跟踪 |
-| 失败工具 tool_args 截断 | 根因信息可能藏在 tool_args 中（如 memory 超容量原因） | ❌ 不截断 |
-| terminal 跨子轮碎片 | 经查是独立工具调用，不是同一输出的分片 | ❌ 撤回判断 |
-| 格式不统一（L1 JSON vs L0 文本） | L1/L0 不同抽象层级，正常设计 | ❌ 非问题 |
-| 参数重排 | 不在 tool_args 动顺序（原始数据），在 result_summary 白名单提取 | ✅ 通过 `_pick_key_fields()` 实现 |
-| pytest 输出结构化 | 检测 `passed` + `in X.Ys` 模式 | ✅ terminal handler 内建 |
-
----
-
-## 二、已发现但待改进（3 项）
-
-### 2.1 连续同工具空结果合并
-
-**现象**:
-```
-[~/38/1] search_files: {"total_count": 0}
-[~/38/2] search_files: {"total_count": 0}
-```
-
-两个连续 `search_files` 返回空，各自独立处理。LLM 不需要知道它搜了两次都空，一次就够了。
-
-**根因**: `ToolSummarizer.summarize()` 是逐调用调用的，没有跨调用上下文。当前架构每次 `summarize()` 只处理一条 tool_call + 对应的 tool_responses，不知道前一条的结果。
-
-**影响评估**: 低。偶发，且频繁空结果意味着工具调用在失败，LLM 看到一次就够了。
-
-**修复方向**:
-- 方案 A（CA 外部）: 在 A-stage 层合并连续同工具空结果 → 改 `__init__.py` 的 `_rebuild_messages()` 层
-- 方案 B（CA 内部）: handler 内缓存上一个结果，匹配时合并 → 引入状态，复杂且不保证正确
-- **推荐方案 A**: 在 A-stage 组装时去重（已有 `_deduplicate_messages` 机制）
-
-**状态**: ✅ 已修复（插件层 `pre_llm_call()` 合并连续相同摘要，8 行，不动核心引擎）
-
----
-
-#### 2.2 terminal 错误输出未突出标记 — ✅ 已修复
-
-**现象**:
-```
-[~/38/39] terminal: Traceback (most recent call last):\n  File "<string>",...te3.OperationalEr
-[~/38/48] terminal: Traceback (most recent call last):\n  File "<string>",...ModuleNotFoundEr
-```
-
-**修复**: `_summarize_terminal()` 内加 `_ERROR_RE` 正则检测关键词（Traceback/Error:/Exception/ModuleNotFound/ImportError/NotFound/failed/FAILED 等）。匹配时 `result_summary` 前缀 `[ERROR]`，L0 前缀 `[ERROR]`。
-
-**改前 → 改后**:
-```
-terminal: python3 -c "bad_code()" (3 lines)
-  result=[python3 -c] Traceback | File... | ModuleNotFound...
-```
-→
-```
-[ERROR] terminal: python3 -c "bad_code()" (3 lines)
-  result=[ERROR] [python3 -c] Traceback | File... | ModuleNotFound...
-  error=[ERROR]
-```
-
----
-
-#### 2.3 search_files 大量命中不显示分布 — ✅ 已修复
-
-**现象**:
-```
-[~/38/39] terminal: Traceback (most recent call last):\n  File "<string>",...te3.OperationalEr
-[~/38/48] terminal: Traceback (most recent call last):\n  File "<string>",...ModuleNotFoundEr
-[~/38/49] terminal: Invalid config for tool 'version', skipping...
-```
-
-当前 terminal handler 对正常输出和错误输出一视同仁，只取前 5 行去重。`Traceback`、`ModuleNotFoundError`、`ImportError` 等错误行不特殊标记。
-
-**影响评估**: 低。错误信息本身在前 5 行内，LLM 能看到错误类型。但 LLM 无法快速区分"这是错误"和"这是正常输出"，需要从头 parse。
-
-**修复方向**: `_summarize_terminal()` 内检测 `Traceback|Error:|Exception|ModuleNotFound|ImportError|NotFound|Invalid` 等关键词，匹配时 `result_summary` 前缀加 `[ERROR]`，LLD 前缀加 `[ERROR]`。
-
-```python
-# 检测 terminal 错误输出
-error_keywords = re.compile(
-    r'(Traceback|Error:|Exception:|ModuleNotFound|ImportError|'
-    r'NotFound|Invalid|Permission denied|No such file|syntax error)',
-    re.IGNORECASE
-)
-has_error = any(error_keywords.search(l) for l in non_empty)
-```
-
-**状态**: ⏳ 待改
-
----
-
-#### 2.3 search_files 大量命中不显示分布 — ✅ 已修复
-
-**现象**:
-```
-[~/38/55] search_files: {"total_count": 66, "matches": [...]}
-```
-
-`_summarize_search_files` 只取前 3 个文件名，66 个命中全貌不可见。LLM 不知道匹配分布在哪些目录。
-
-**修复**: `total_count > 3` 时解析所有文件路径，`Counter` 按文件所在目录名分组，取前 4 组填入 `result_summary`。命中 ≤3 时按原样展示文件名。
-
-```
-search_files: 66 matches [ca:30, tests:25, docs:11]
-search_files: 2 matches (a.py, b.py)       ← ≤3 时原样
-```
-
-**状态**: ✅ 已修复
-
----
-
-## 三、已排除（不进跟踪）
-
-| 问题 | 原因 |
-|------|------|
-| 指纹去重 | 架构过时 TODO，已删除 |
-| tool_args 截断 | 根因信息可能在其中 |
-| terminal 跨子轮碎片 | 查证是独立调用，非分片 |
-| 格式不一致 L1 vs L0 | 不同抽象层级的正常设计 |
-| 失败工具不展示参数 | 用户纠正：失败需看参数找原因 |
-
----
-
-## 四、当前 handler 清单（代码即文档）
-
-在 `ToolSummarizer` 类中增加新 handler 的步骤：
-
-1. 定义 `def _summarize_<tool_name>(self, tool_call_msg, tool_responses) -> Tuple[Dict, str]:`
-2. 返回标准 L1 dict + L0 字符串
-3. 工具名中的 `.` / `-` 自动映射（`execute-code` → `execute_code`）
-4. 异常时自动 fallback 到通用逻辑
-
-```python
-def _summarize_web_search(self, tool_call_msg, tool_responses):
-    """样例：web_search 结构化摘要"""
-    ...
-    return l1, l0
-# executor 自动发现，无需注册
-```
+| thought 在 L1 组显示 | 对历史认知无用，只是 AGENT 运行时状态 | ❌ 不展示 |
+| L1/L2 时 `text[:200]` | 各工具摘要已在 handler 各自截断，组级不应再追加总上限 | ❌ 不要 |
+| L0 组是否走 `_format_group_summary` | 统一显示格式；l1 与 l0 同时写入 cache，l1 一定存在 | ✅ 统一走 |
+| terminal result_summary 命令前缀 | 命令独占 60 字符，真实输出被截 | ❌ 结果优先 |
+| handler 内 JSON 提取 | 从已知字段提取，不做文本清洗 | ✅ 正确做法 |
+| Python repr fallback (`{'total': 5}`) | ast.literal_eval 处理 JSON 失败后的单引号 Python 语法 | ✅ fallback |
+| 组内同类型工具折叠 | `search_files × 3` 代替三次同工具 | ⏳ 未来改进 |

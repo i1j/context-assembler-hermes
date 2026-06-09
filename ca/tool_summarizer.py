@@ -216,13 +216,22 @@ class ToolSummarizer:
             if len(key_lines) >= 5:
                 break
 
-        body = " | ".join(key_lines) if key_lines else f"({total_effective} lines)"
-        result_summary = f"[{cmd_short}] {body}" if cmd_short else body
-        if len(result_summary) > 500:
-            result_summary = result_summary[:497] + "…"
-
+        body = " | ".join(key_lines) if key_lines else ""
         # error 标记完全基于 exit_code，stdout 中的错误文本不算
         has_error = exit_code is not None and exit_code > 0
+        # 结果优先：body 在前，cmd 降级到末尾
+        # 无 key_lines 时展示 cmd（有输出才有信息价值）
+        if key_lines:
+            error_symbol = f"exit={exit_code} " if has_error else ""
+            result_summary = f"{error_symbol}{body}"
+            if cmd_short:
+                result_summary += f" [{cmd_short}]"
+        elif cmd_short:
+            error_symbol = f"exit={exit_code} " if has_error else ""
+            result_summary = f"{error_symbol}({total_effective} lines) [{cmd_short}]"
+        else:
+            result_summary = f"({total_effective} lines)"
+
         error_prefix = f"exit={exit_code}: " if has_error and exit_code else ""
 
         l1 = {
@@ -259,16 +268,27 @@ class ToolSummarizer:
         path = args.get("path", args.get("file_path", ""))
         thought = tool_call_msg.get("content", "")
 
-        # 检查结果
+        # 检查结果 - 从 JSON 提取 bytes_written
         output = ""
+        byte_count = None
         for resp in tool_responses:
             c = resp.get("content", "")
             if c:
-                output = str(c)[:200]
+                output = str(c)
+                try:
+                    data = json.loads(output)
+                    byte_count = data.get("bytes_written")
+                except (json.JSONDecodeError, TypeError):
+                    pass
                 break
 
         path_short = self._sanitize_path(path)
-        result_summary = output if output else f"write_file: {path_short}"
+        if byte_count is not None:
+            result_summary = f"已写入: {path_short} ({byte_count} 字节)"
+        elif output:
+            result_summary = f"已写入: {path_short}"
+        else:
+            result_summary = f"已写入: {path_short}"
 
         l1 = {
             "tool_name": "write_file",
@@ -393,7 +413,10 @@ class ToolSummarizer:
                 total_count = data.get("total_count", 0)
                 files = data.get("files") or data.get("matches", [])
                 if isinstance(files, list):
-                    all_files = [str(f) for f in files]
+                    all_files = [
+                        f.get("path", str(f)) if isinstance(f, dict) else str(f)
+                        for f in files
+                    ]
                     matches = all_files[:3]
             except (json.JSONDecodeError, TypeError):
                 pass
@@ -535,6 +558,7 @@ class ToolSummarizer:
                 output = str(c)
                 break
 
+        message_content = ""
         if isinstance(output, str) and output and output[0] == "{":
             try:
                 data = json.loads(output)
@@ -542,6 +566,11 @@ class ToolSummarizer:
                     error = data.get("error", "未知错误")
                 elif "error" in data:
                     error = data["error"]
+                else:
+                    # success=True → 提取 message 字段
+                    msg = data.get("message", "")
+                    if msg:
+                        message_content = msg
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -551,8 +580,10 @@ class ToolSummarizer:
         key_str = ", ".join(f"{k}={v}" for k, v in key_fields.items())
         if error:
             result_summary = f"失败: {key_str} | err={error}"
+        elif message_content:
+            result_summary = f"成功: {key_str} — {message_content}"
         else:
-            result_summary = output[:300] if output else f"OK: {key_str}"
+            result_summary = f"OK: {key_str}"
 
         l1 = {
             "tool_name": "skill_manage",
@@ -618,6 +649,69 @@ class ToolSummarizer:
         l0 = _safe_truncate(f"memory: {action} {target} ({status})", 100)
         if content_preview and len(l0) + len(content_preview) + 5 <= 100:
             l0 += f" — {content_preview}"
+        return l1, l0
+
+    def _summarize_todo(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
+        """todo 结构化摘要：提取 summary 计数，避免 raw dict 泄漏。"""
+        args = tool_call_msg.get("function", {}).get("arguments", {})
+        thought = tool_call_msg.get("content", "")
+
+        output = ""
+        for resp in tool_responses:
+            c = resp.get("content", "")
+            if c:
+                output = str(c)
+                break
+
+        total = 0
+        pending = 0
+        in_progress = 0
+        completed = 0
+        cancelled = 0
+        items = []
+        if output:
+            try:
+                data = json.loads(output)
+                sm = data.get("summary", data)
+                total = sm.get("total", 0)
+                pending = sm.get("pending", 0)
+                in_progress = sm.get("in_progress", 0)
+                completed = sm.get("completed", 0)
+                cancelled = sm.get("cancelled", 0)
+                items = data.get("todos", [])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # 构建可读摘要
+        parts = []
+        if total:
+            if pending:
+                parts.append(f"{pending} pending")
+            if in_progress:
+                parts.append(f"{in_progress} in_progress")
+            if completed:
+                parts.append(f"{completed} completed")
+            if cancelled:
+                parts.append(f"{cancelled} cancelled")
+            summary_text = f"todo: {total} 项"
+            if parts:
+                summary_text += f"（{', '.join(parts)}）"
+        else:
+            summary_text = f"todo: {len(items)} 项"
+
+        result_summary = summary_text
+        error = None
+
+        l1 = {
+            "tool_name": "todo",
+            "tool_args": args,
+            "result_summary": result_summary,
+            "error": error,
+            "implicit_knowledge": [],
+            "next_action_hint": "",
+            "_assemble_status": 0,
+        }
+        l0 = _safe_truncate(summary_text, 100)
         return l1, l0
 
     def summarize(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
@@ -838,7 +932,7 @@ class ToolSummarizer:
         for tr in (tool_results or []):
             rs = tr.get("result_summary", "")
             if rs:
-                result_parts.append(rs[:60])
+                result_parts.append(rs)
         result_str = "；".join(result_parts[:3])
         if len(result_parts) > 3:
             result_str += "…"

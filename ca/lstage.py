@@ -202,13 +202,13 @@ class BackfillThread(threading.Thread):
                 break
         tool_results_for_summary = [
             {"tool_name": s["tool_name"], "status": s["status"],
-             "result_summary": s["result_summary"][:80]}
+             "result_summary": s["result_summary"]}
             for s in per_tool_summaries
         ]
         group_summary = ToolSummarizer.generate_group_summary(thought, tool_results_for_summary)
 
         # ③ 组 L0
-        group_l0_parts = [s["l0"][:55] for s in per_tool_summaries[:5]]
+        group_l0_parts = [s["l0"] for s in per_tool_summaries[:5]]
         group_l0 = " | ".join(group_l0_parts)
         if len(per_tool_summaries) > 5:
             group_l0 += "..."

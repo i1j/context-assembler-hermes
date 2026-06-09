@@ -702,7 +702,7 @@ class ContextAssembler:
             # ④ 用工具轮 L1 result_summary 拼组摘要，而非 raw content[:80]
             tool_results_for_summary = [
                 {"tool_name": s["tool_name"], "status": s["status"],
-                 "result_summary": s["result_summary"][:80]}
+                 "result_summary": s["result_summary"]}
                 for s in per_tool_summaries
             ]
             group_summary = ToolSummarizer.generate_group_summary(
@@ -710,7 +710,7 @@ class ContextAssembler:
             )
 
             # 组 L0：拼接各工具 L0
-            group_l0_parts = [s["l0"][:55] for s in per_tool_summaries[:5]]
+            group_l0_parts = [s["l0"] for s in per_tool_summaries[:5]]
             group_l0 = " | ".join(group_l0_parts)
             if len(per_tool_summaries) > 5:
                 group_l0 += "..."
@@ -1541,34 +1541,19 @@ class ContextAssembler:
             # 对话轮 L1 → 格式化为可读文本（替代原始 JSON 注入）
             l1_display = self._format_l1_for_display(l1) if entry.turn_type == "dialogue" else l1
 
-            # 工具组 L2：展开完整消息序列（assistant{tc} + tool × N），与对话轮 L2 一致
-            if entry.turn_type == "tool_group" and entry.target_level == "L2":
-                if l2:
+            # ── 工具组注入：统一格式化 ──
+            # L2 有原始消息 → 展开全量；否则统一走 _format_group_summary(l1)
+            # l1 不可用或格式化为空 → 降级到 raw l0
+            if entry.turn_type == "tool_group":
+                if entry.target_level == "L2" and l2:
                     self._extend_with_l2(result, l2, entry.turn_index)
-                    # L2 展开后，标记该组原始 tool 消息已被覆盖，避免重复追加
                     covered.add((entry.turn_index, "tool"))
-                elif l1:
-                    display = self._format_group_summary(l1)
+                else:
+                    display = self._format_group_summary(l1) if l1 else ""
+                    if not display and l0:
+                        display = l0
                     if display:
                         result.append({"role": "assistant", "content": f"{prefix}{display}"})
-                elif l0:
-                    result.append({"role": "assistant", "content": f"{prefix}工具组：{l0}"})
-                continue
-
-            # 工具组 L1/L0：格式化组摘要 / 组L0
-            if entry.turn_type == "tool_group":
-                if entry.target_level == "L1" and l1:
-                    group_display = self._format_group_summary(l1)
-                    if group_display:
-                        result.append({"role": "assistant", "content": f"{prefix}{group_display}"})
-                    elif l0:
-                        result.append({"role": "assistant", "content": f"{prefix}{l0}"})
-                elif l0:
-                    result.append({"role": "assistant", "content": f"{prefix}工具组：{l0}"})
-                elif l1:
-                    group_display = self._format_group_summary(l1)
-                    if group_display:
-                        result.append({"role": "assistant", "content": f"{prefix}{group_display}"})
                 continue
 
             if entry.target_level == "L2":
