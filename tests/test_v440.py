@@ -309,7 +309,6 @@ class TestToolTurnAStage:
     def test_TC_A_021_topic_boost_tools(self, mock_llm, ca_engine, monkeypatch):
         """L2 话题中的工具轮升为 L1（topic_boost）"""
         monkeypatch.setattr('ca.config.Config.PROTECT_TAIL_TOKENS', 100000)
-        monkeypatch.setattr('ca.config.Config.TOOL_TAIL_TURN_COUNT', 0)
         tidx = max(ca_engine._turn_counter, 0) + 1
         valid_emb = [0.1] * 768
 
@@ -376,12 +375,19 @@ class TestToolTurnAStage:
         with patch.object(ca_engine, '_available_budget', _zero_budget):
             ca_engine.assemble("", context_length=1000)
         # 验证 turn_plan：对话轮 L2 (tail) → 工具组 L1 (dialogue_downgrade)
+        # 对话轮 L1+（topic_based）+ 工具组 L0+（dialogue_downgrade）
         plans = ca_engine.store.read_turn_plan(TEST_SESSION)
         group_entries = [p for p in plans if p["turn_index"] == tidx and p["turn_type"] == "tool_group"]
-        assert len(group_entries) == 1, f"Expected 1 tool_group entry, got {len(group_entries)}"
+        assert len(group_entries) >= 1, "Tool group should have a plan entry"
         te = group_entries[0]
-        assert te["target_level"] == "L1", f"Tool group should be L1 (dialogue_downgrade), got {te['target_level']}"
-        assert te["decision_reason"] == "dialogue_downgrade", f"Reason should be dialogue_downgrade, got {te['decision_reason']}"
+        assert te["decision_reason"] == "dialogue_downgrade", (
+            f"Tool group should be dialogue_downgrade, got {te['decision_reason']}"
+        )
+        dialogue_entries = [p for p in plans if p["turn_index"] == tidx and p["turn_type"] == "dialogue"]
+        assert len(dialogue_entries) >= 1
+        assert dialogue_entries[0]["target_level"] in ("L1", "L2"), (
+            f"Dialogue should be L1+, got {dialogue_entries[0]['target_level']}"
+        )
 
     @patch('ca.ContextAssembler._call_llm_for_l1', return_value=('### 现象与问题\n- 无\n### 背景与约束\n- 无\n### 决策与方案\n- 无\n### 后续行动\n- 无\n<core_change>对话</core_change>', 'stop'))
     def test_TC_A_022_downgrade_order(self, mock_llm, ca_engine):

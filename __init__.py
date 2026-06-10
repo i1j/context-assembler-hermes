@@ -295,6 +295,8 @@ class CAContextAssemblerPlugin:
         self._engine_errored = False
         self._session_id = ""
         self._context_length: int = Config.CONTEXT_LENGTH
+        self._saved_history: Optional[Dict[int, str]] = None
+        self._saved_history_snapshot: Optional[List[Dict]] = None
 
     # ── 生命周期 ──
 
@@ -349,6 +351,8 @@ class CAContextAssemblerPlugin:
 
     def on_session_reset(self) -> None:
         """重置引擎状态（/new 或 /reset 时调用）。"""
+        self._saved_history = None
+        self._saved_history_snapshot = None
         if self._engine:
             self._engine.reset()
         self._engine_errored = False
@@ -357,11 +361,12 @@ class CAContextAssemblerPlugin:
     # ── Hooks ──
 
     def pre_llm_call(self, **kwargs: Any) -> Optional[str]:
-        """调用 CA 引擎的 assemble() 完整管线，从结果中提取上下文摘要文本。
+        """CA core entry: plan computation + 1:1 aligned context injection.
 
-        Hermes pre_llm_call hook 的返回契约是将文本注入到 user message 中。
-        assemble() 返回完整消息列表（含 Head/Middle/Tail 分层 + [~/N] 标记），
-        我们提取其中的 CA 摘要部分格式化为上下文文本返回。
+        Injection mode controlled by Config.HISTORY_INJECTION:
+          replace (default) - mutate conversation_history in-place
+          append           - return summary text injected into user message
+          off              - no injection, data accumulation only
         """
         if self._engine_errored or not self._engine:
             return None
@@ -372,42 +377,88 @@ class CAContextAssemblerPlugin:
 
         context_length = kwargs.get("context_length", self._context_length)
 
+        # 在引擎汇编前保存原始 conversation_history 快照，
+        # 供 _build_messages_from_plan 旁路从原始消息注入 L2 原文。
+        _orig_history = kwargs.get("conversation_history", [])
+        if isinstance(_orig_history, list) and _orig_history:
+            self._engine._original_messages = [dict(m) for m in _orig_history]
+        else:
+            self._engine._original_messages = None
+
         try:
-            assembled = self._engine.assemble(user_message, context_length)
+            result = self._engine._compute_assemble_plan(user_message, context_length)
         except Exception as exc:
-            logger.warning("assemble() failed: %s", exc)
+            logger.warning("_compute_assemble_plan() failed: %s", exc)
             return None
 
-        # 提取 CA 注入的摘要消息（[~/N] 标记），组装为上下文文本
-        parts: List[str] = []
-        for msg in assembled:
-            content = msg.get("content", "")
-            if isinstance(content, str) and content.startswith("[~/"):
-                parts.append(content)
+        conversation_history = kwargs.get("conversation_history", [])
+        if not isinstance(conversation_history, list):
+            return None
 
+        if not conversation_history:
+            return None
+
+        injection_mode = Config.HISTORY_INJECTION
+        if injection_mode == "off":
+            logger.info("[CA] pre_llm_call: injection disabled (off mode)")
+            return None
+
+        if injection_mode == "append":
+            logger.info("[CA] pre_llm_call: append mode")
+            return self._annotation_mode(result, conversation_history)
+
+        # replace (default)
+        logger.info("[CA] pre_llm_call: replace mode")
+        return self._mutation_mode(result, conversation_history)
+
+    def _annotation_mode(self, result, conversation_history: list) -> Optional[str]:
+        """annotation 模式：从 outcomes 提取非 None 文本拼接返回，不碰 history。"""
+        if isinstance(result, list):
+            return None  # degraded
+        outcomes = self._engine._build_aligned_outcomes(result.plan, conversation_history, bypass_turns=result.bypass_turns)
+        parts = [o for o in outcomes if o]
         if not parts:
             return None
+        return "\n\n".join(parts)
 
-        # 合并连续相同内容的 CA 摘要（剥离 [~/N/M] 前缀后比较），保留 xN 计数
-        merged: List[str] = []
-        count = 1
-        for p in parts:
-            text = p.split("] ", 1)[-1] if "] " in p else p
-            if merged:
-                last_text = merged[-1].split("] ", 1)[-1] if "] " in merged[-1] else merged[-1]
-                if text == last_text:
-                    count += 1
-                    continue
-                elif count > 1:
-                    merged[-1] += f" ×{count}"
-                    count = 1
-            merged.append(p)
-        if count > 1:
-            merged[-1] += f" ×{count}"
-        if len(merged) < len(parts):
-            logger.debug("[CA] merged %d → %d consecutive identical summaries", len(parts), len(merged))
+    def _mutation_mode(self, result, conversation_history: list) -> Optional[str]:
+        """mutation 模式：1:1 对齐 → 替换/跳过/保留 → 快照保存。"""
+        if isinstance(result, list):
+            # degraded: 不做事
+            self._saved_history_snapshot = None
+            return None
 
-        return "\n\n".join(merged)
+        # 1. 构建 1:1 outcomes
+        try:
+            outcomes = self._engine._build_aligned_outcomes(result.plan, conversation_history, bypass_turns=result.bypass_turns)
+        except Exception as exc:
+            logger.warning("_build_aligned_outcomes() failed: %s", exc)
+            return None
+
+        # 2. 保存完整快照（浅拷贝消息字典）
+        self._saved_history_snapshot = [{**m} for m in conversation_history]
+        self._saved_history = None
+
+        # 3. 应用 outcomes：替换 content 或移除行
+        replaced = 0
+        skipped = 0
+        # 从后往前处理，确保移除时索引不偏移
+        for i in range(len(outcomes) - 1, -1, -1):
+            outcome = outcomes[i]
+            if outcome is None:
+                continue  # 保留原文
+            if outcome == "":
+                del conversation_history[i]
+                skipped += 1
+            else:
+                conversation_history[i]["content"] = outcome
+                replaced += 1
+
+        logger.info(
+            "[CA] mutation: replaced %d + skipped %d outcomes",
+            replaced, skipped,
+        )
+        return None
 
     def post_llm_call(self, **kwargs: Any) -> None:
         """在 LLM 响应后处理该轮对话，构建未来上下文的摘要。
@@ -444,6 +495,29 @@ class CAContextAssemblerPlugin:
                 logger.info("[CA] post_llm_call: flushed %d tool rows to store", rows_written)
         except Exception as exc:
             logger.warning("[CA] post_llm_call: flush_tool_buffer error: %s", exc)
+
+        # Restore original history from mutation mode snapshot（快照全量恢复）
+        _snapshot = getattr(self, "_saved_history_snapshot", None)
+        if _snapshot is not None:
+            conversation_history.clear()
+            conversation_history.extend({**m} for m in _snapshot)
+            logger.info("[CA] post_llm_call: restored %d messages from snapshot", len(_snapshot))
+            self._saved_history_snapshot = None
+        else:
+            # fallback: 旧版 _saved_history 恢复（仅恢复 content）
+            _saved = getattr(self, "_saved_history", None)
+            if _saved:
+                _restored = 0
+                for msg in conversation_history or []:
+                    key = id(msg)
+                    if key in _saved:
+                        orig = _saved.pop(key)
+                        if msg.get("content") != orig:
+                            msg["content"] = orig
+                            _restored += 1
+                if _restored:
+                    logger.info("[CA] post_llm_call: restored %d original message contents (legacy)", _restored)
+                self._saved_history = None
 
         # 传副本给异步线程，避免列表被外部修改导致竞态
         history_copy = list(conversation_history) if conversation_history else []

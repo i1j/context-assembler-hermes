@@ -4,8 +4,9 @@
 
 | 项       | 值                                                                        |
 | -------- | ------------------------------------------------------------------------- |
-| 版本     | v5.0-pr3 |
-| plugin.yaml | 声明 v4.5.1（未同步）                |
+| 版本     | v5.1 |
+| 注入方式 | 1:1 对齐替换/跳过（无 `[~/N/M]` 标签），v5.1 bypass_turns 统一两路 |
+| plugin.yaml | v5.1（已同步）                    |
 | 部署方式 | 自包含独立副本                                                            |
 | 插件路径 | `~/.hermes/profiles/tester/plugins/ca_assembler/`                       |
 | 核心引擎 | `ca/` 子目录（入口 `ca/__init__.py` → `ContextAssembler`）         |
@@ -86,20 +87,76 @@ def _on_pre_llm_call(**kwargs: Any) -> Optional[str]:
 **返回值**: `Optional[str]`
 
 - 引擎不可用或出错 → 返回 `None`（不注入）
-- 调用 `engine.assemble(user_message, context_length)` 完整管线
-- 从返回消息列表中提取 `[~/N/0]` / `[~/N/M]` 标记（CA 摘要注入）
-- 多条摘要用 `\n\n` 拼接返回
-- Hermes 会将返回文本注入到 user message 中
+- 调用 `engine._compute_assemble_plan(user_message, context_length)` 获取 plan
+- 注入模式由 `Config.HISTORY_INJECTION` 控制（环境变量 `CA_HISTORY_INJECTION`）：
+  - **replace 模式（默认）**：调用 `_build_aligned_outcomes(plan, history)` 产生 1:1 对齐结果
+    → 原地替换/移除行，保存快照供 post_llm_call 恢复
+  - **append 模式**：调用 `_build_messages_from_plan` 拼接标签文本返回
+  - **off 模式**：返回 `None`，不注入（仅做数据积累）
+- **不再使用 `[~/N/M]` 标签**（mutation 模式）— 摘要直接以可读文本输出
 
-**返回格式示例**：
+#### 三路注入路径
 
+| 维度 | Replace 模式（默认） | Append 模式 | Off 模式 |
+|------|---------------------|-------------|----------|
+| 入口 | `_build_aligned_outcomes()` | `_build_messages_from_plan()` | — |
+| 输出与 history | 替换/移除 history 条目 | 摘要文本拼入 user message | 不动 history |
+| 标签 | 无标签 — 纯文本摘要 | 含 `[~/N/0]` 标签（annotation 旧格式） | — |
+| history 修改 | 原地替换 content / 移除行 | 不碰原始 history | 不碰 |
+| pre_llm_call 返回值 | `None`（mutation 通过浅拷贝传播） | 文本字符串拼接 | `None` |
+| 恢复 | post_llm_call 从 snapshot 全量恢复 | 无需恢复 | 无需恢复 |
+| 数据积累 (C-stage) | 正常进行 | 正常进行 | 正常进行 |
+| 适用场景 | 高压缩比，LLM 仅见汇编版 | 注入额外摘要，保留全量原文 | 仅用于数据采集，不改变上下文 |
+
+**行类型注射规则**（mutation 模式 v5.1，由 `_build_aligned_outcomes` 决策）：
+
+| history 行 | L2 | L1 | L0 |
+|---|---|---|---|
+| `user` | None（保留原文） | `_format_l1_for_display(l1)` | `l0_text` |
+| `assistant{tc}` | None（保留原文） | `_format_tool_group_assembly(l1)` | `_format_tool_group_assembly(l1/l0)` → 紧凑格式 |
+| `tool` | `""`（移除） | `""`（移除） | `""`（移除） |
+| `assistant_fin` | None | None | None |
+
+**返回值语义**：
+- `None` = 保留原文
+- `""` = 行将被移除（所有 tool 行均被删除）
+- `str` = 替换 content（无标签）
+
+**格式化函数**：
+
+| 函数 | 输入 | 输出示例 |
+|------|------|---------|
+| `_format_l1_for_display(l1_json)` | `{"core_change":"查了文件系统","new_materials":["文件A"], ...}` | `查了文件系统\n  文件A` |
+| `_format_tool_group_assembly(l1, history, turn_idx, gidx)` | `{"group_intent":"查文件","group_result":"aaa;x.py","tool_count":3,"state":"ok"}` + history 工具行 | `【工具组:查文件→aaa;x.py(3个,ok)】`<br>`  read_file: aaa ×2` |
+| `_format_group_summary(l1)` | **已弃用 v5.1** — 由 `_format_tool_group_assembly` 替代 | — |
+
+**×N 合并**：移入 `_format_tool_group_assembly` 内部。连续相同 tool_name+detail 的工具行在组内合并 → `read_file: aaa ×2`。`_merge_consecutive_tool_outcomes()` 不再被调用（保留供遗留测试引用）。
+
+**bypass_turns 数据流**（v5.1 新增）：
+- 在 `_compute_assemble_plan` 中计算最后 2 个对话轮的索引集合
+- 通过 `_AssemblePlanResult.bypass_turns` 字段传递给两端
+- `_build_aligned_outcomes`：bypass 轮的工具组无条件 L2（原文保留）
+- `_build_messages_from_plan`：bypass 轮跳过摘要注入，直接注入原始消息
+- **消除两路不一致**：原 `_build_messages_from_plan` 内部硬计算已被移除
+
+**bypass_turns 感知**（`_build_aligned_outcomes`）：
+- bypass 轮中 `entry.turn_index in _bypass_set` → 工具组 `assistant{tc}` 行保留原文（`None`）
+- 所有 `tool` 行不论 bypass 与否均被删除（`""`）
+
+**输出示例**（v5.1 mutation 模式注入后 conversation_history 变更）：
 ```
-[~/1/0] CA插件运行正常钩子路径完整
-[~/1/3] search_files: 无返回数据
-[~/1/5] terminal: 配置项 `context.engine` 为 compressor
+# 对话轮 L1 — user 行被替换
+user: "查了文件系统\n  文件A"
+# 工具组 L1 — assistant{tc} 行被替换（含全部工具详情）
+assistant{tc}: "【工具组:查文件→aaa;x.py(3个,ok)】
+  search: *.py → 3 hit
+  read_file: /tmp/test.py (60 lines) ×2"
+# tool 行全部删除（空字符串 → del conversation_history[i]）
+# final assistant — 保留原文
+assistant_fin: "文件内容已查到"
 ```
 
-### `_on_post_llm_call` — 数据积累（C-stage，PR2 调整）
+### `_on_post_llm_call` — 数据积累与快照恢复（C-stage）
 
 ```python
 def _on_post_llm_call(**kwargs: Any) -> None:
@@ -114,11 +171,15 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 | `assistant_response`   | str  | LLM 的文本回复                   |
 | `conversation_history` | list | 本轮完整消息历史（含 tool 结果） |
 
-行为（PR2 职责分离）：
-1. **先同步 flush_tool_buffer()** — 将 `_tool_buffer` 中的增量采集数据写入 store
-2. **再异步 process_turn_async()** — 生成对话轮摘要（不传 messages 参数）
+行为：
+1. **先同步 `flush_tool_buffer()`** — 将 `_tool_buffer` 中的增量采集数据写入 store
+2. **快照恢复** — 优先从 `_saved_history_snapshot` 全量还原 mutation 前的 history；fallback 到 `_saved_history` 按 `id(msg)` 逐条恢复
+3. **再异步 `process_turn_async()`** — 生成对话轮摘要
 `conversation_history` 传副本（列表拷贝），避免竞态。
-不再通过 `messages` 参数遍历全量 history 写工具行。
+
+**快照两层结构**：
+- `_saved_history_snapshot: Optional[List[Dict]]` — 完整消息列表快照，全量 clear+extend 恢复（PR3 新增，优先）
+- `_saved_history: Optional[Dict[int, str]]` — 旧式 `id(msg) → content` 映射，逐条恢复（向后兼容）
 
 ### `_on_post_api_request` — 工具组结构捕获（PR2 新增）
 
@@ -150,9 +211,6 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 
 行为：将工具执行结果填充到对应 buffer 中。Hermes 原始 status(`ok`/`error`/`blocked`/`cancelled`)透传。
 
-
-
-
 ## 存储结构
 
 ### DB 路径
@@ -163,7 +221,7 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 
 当前 profile 实际路径：`~/.hermes/profiles/tester/ca_cache/{session_id}.db`
 
-### turn_cache 表（v5.0 重构）
+### turn_cache 表（v5 schema）
 
 **主键**：`(session_id, turn_index, api_call_count, seq_index)`
 
@@ -194,9 +252,6 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 | `query_embedding` | BLOB | 用户消息嵌入向量 |
 | `_assemble_status` | INTEGER | 0=成功, 1=降级, 2=永久跳过 |
 | `backfill_attempts` | INTEGER | L-stage 尝试次数 |
-| `turn_type` | TEXT | 虚拟列（`GENERATED ALWAYS AS`，PR2 后移除） |
-| `tool_sub_index` | INTEGER | 虚拟列（`GENERATED ALWAYS AS seq_index`，PR2 后移除） |
-| `l2_text` | TEXT | 虚拟列（`GENERATED ALWAYS AS content`，PR2 后移除） |
 | `created_at` | TEXT | 创建时间戳 |
 
 **行类型速查**：
@@ -206,7 +261,7 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 | user | 0 | 0 | user | 用户输入 |
 | assistant{tc} | N（≥1） | 0 | assistant | 含 `tool_calls_json`，`finish_reason="tool_calls"` |
 | tool | N（≥1） | ≥1 | tool | 含 `tool_call_id`，`status` |
-| final assistant | 999999 | 0 | assistant | `finish_reason="stop"`
+| final assistant | 999999 | 0 | assistant | `finish_reason="stop"` |
 
 ### 存储特性
 
@@ -215,6 +270,19 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 - **全量嵌入**：成功时 l0 + l1 均为 4096 字节 BLOB
 - **所有 turn 独立存储**：40 条 subturn = 40 行 turn_cache
 - **WAL 模式**：Store 初始化时设置 PRAGMA journal_mode=WAL
+
+## 内存缓存结构（AssemblyCache）
+
+| 缓存 | Key 类型 | 说明 |
+|------|---------|------|
+| `l0_texts` | `Dict[int, str]` | 对话轮 L0 文本，key=turn_index |
+| `l1_texts` | `Dict[int, str]` | 对话轮 L1 JSON，key=turn_index |
+| `tool_l0_texts` | `Dict[Tuple[int,int], str]` | 个体工具 L0，key=(turn_index, seq_index) |
+| `tool_l1_texts` | `Dict[Tuple[int,int], str]` | 个体工具 L1 JSON，key=(turn_index, seq_index) |
+| `tool_group_l0_texts` | `Dict[Tuple[int,int], str]` | 工具组 L0，key=(turn_index, api_call_count) |
+| `tool_group_l1_texts` | `Dict[Tuple[int,int], str]` | 工具组 L1 JSON，key=(turn_index, api_call_count) |
+
+`add_tool_group()` 在 `flush_tool_buffer()` 末尾同步调用，保证缓存与 DB 一致。
 
 ## 关键环境变量
 
@@ -232,8 +300,10 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 | `CA_L1_MAX_TOKENS` | 800 | L1 摘要生成最大 Token 数 |
 | `CA_PROTECT_TAIL_TOKENS` | 10000 | 对话轮尾区保护 Token 数 |
 | `CA_TOOL_TAIL_TURN_COUNT` | 2 | 工具轮尾区保留最近对话轮数 |
-| `CA_SYSTEM_TAIL_TURN_COUNT` | 2 | 系统尾区：最近 N 条系统消息原文透传，更早的截断为 L0 风格（v4.7 格式，优先断句截断） |
+| `CA_SYSTEM_TAIL_TURN_COUNT` | 2 | 系统尾区：最近 N 条系统消息原文透传 |
 | `CA_COMPRESSION_THRESHOLD` | 0.50 | 压缩警戒比值 |
+| `CA_HISTORY_INJECTION` | `replace` | 注入模式：`replace`(mutation)/`append`(annotation)/`off`(仅数据积累) |
+| `CA_HISTORY_MUTATE` | (已弃用) | 2值开关，`1`→替换 `0`→追加。未设 `CA_HISTORY_INJECTION` 时兼容此旧变量 |
 | `CA_LLM_THINK` | 未设置 | L1 LLM think 参数（1/0/true/false） |
 
 ### 话题拣配配置（v4.6.0）
@@ -247,19 +317,26 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 | `CA_TOPIC_MAX_UPGRADE` | 10 | 检索升级最大 topic 数 |
 | `CA_TOPIC_BG_LEVEL` | `L0` | BG 话题固定级别 |
 
-## L1 摘要生成架构（v4.7.0 / v4.7.1）
+## L1 摘要生成架构
 
 ### 关键模块
 
 | 模块/文件 | 职责 |
 |-----------|------|
 | `ca/post_process.py` | 防御性解析器：`parse_v1_markdown_xml`(主入口)、`_safe_truncate`(智能截断)、`_json_to_v1_markdown`(格式转换)、`ItemState` 枚举、状态前缀提取 |
-| `ca/prompts.py` | `L1_GENERATION_PROMPT` — "研发对话意图分析器"人设，4 类 Markdown + `<core_change>` XML 标签 + `<example>` 场景示例 |
+| `ca/prompts.py` | `L1_GENERATION_PROMPT` — "研发对话意图分析器"人设 |
+| `ca/tool_summarizer.py` | `ToolSummarizer` 类：`summarize()` 按工具名分发, `generate_group_summary()` 组摘要 |
 | `ca/__init__.py :: _call_llm_for_l1` | LLM 调用，返回 `Tuple[str,str]`(response, finish_reason) |
-| `ca/__init__.py :: L1TruncatedException` | 截断异常类，携带 `response_text` 供降级回读 |
-| `ca/ooda_parser.py` | OODA 分区、TITLE_ALIASES 中文别名映射 |
-| `ca/store.py :: format_previous_summary_for_prompt` | DB JSON → 4 类 Markdown 适配器（含历史状态推断） |
-| `ca/config.py` | `L1_TEMPERATURE` + `L1_MAX_TOKENS` 热重载 |
+| `ca/__init__.py :: _compute_assemble_plan` | Plan 计算阶段（含 bypass_turns 生产） |
+| `ca/__init__.py :: _build_aligned_outcomes` | 1:1 对齐（mutation 模式入口，v5.1 新增 bypass_turns 感知） |
+| `ca/__init__.py :: _format_tool_group_assembly` | 工具组紧凑格式（v5.1 新增，替代 _format_group_summary） |
+| `ca/__init__.py :: _format_l1_for_display` | 对话轮 L1 JSON → 可读文本 |
+| `ca/__init__.py :: _format_group_summary` | **已弃用 v5.1** — 由 _format_tool_group_assembly 替代 |
+| `ca/__init__.py :: _format_single_tool` | 个体工具格式化（v5.1 保留供遗留引用，不再被生产调用） |
+| `ca/__init__.py :: _build_messages_from_plan` | 标签注入模式（annotation 模式/旧路径，v5.1 新增 bypass_turns 参数） |
+| `ca/ooda_parser.py` | OODA 分区、中文别名映射 |
+| `ca/store.py :: format_previous_summary_for_prompt` | DB JSON → Markdown 适配器 |
+| `ca/config.py` | 配置项热重载 |
 
 ### 数据流
 
@@ -269,27 +346,15 @@ def _on_post_tool_call(**kwargs: Any) -> None:
     ▼                                      ▼
 format_previous_summary_for_prompt()    parse_v1_markdown_xml()
     │                                      │
-    ├─ None/"无" → "无"                    ├─ 物理截断尾随噪音
-    ├─ JSON → _json_to_v1_markdown         ├─ 提取 <core_change>（含状态前缀）
-    │        → 4类 Markdown                ├─ 提取 OODA 4 类列表（通过 TITLE_ALIASES 映射）
-    └─ 纯文本 → 原样返回                   └─ 语义短路 + 状态提取 → (l1_dict, l0_text, core_state)
+    ├─ None/"无" → "无"                    ├─ 提取 <core_change>
+    ├─ JSON → _json_to_v1_markdown         ├─ 提取 OODA 4 类
+    └─ 纯文本 → 原样返回                   └─ 解析 → (l1_dict, l0_text, core_state)
            │                                      │
            ▼                                      ▼
     ┌──────────────────────────────────────────────┘
     ▼
 clean_increment() → DB (5类英key JSON，格式不变)
 ```
-
-### 截断检测机制
-
-截断检测在 `_run_c_stage` 调用层执行（v4.7.0 从 `_call_llm_for_l1` 内部下沉），双重校验：
-
-```
-finish_reason == 'length'           → 触发降级
-not response.strip().endswith('</core_change>') → 触发降级
-```
-
-任一触发 → 写 `_assemble_status=1` 待补全记录 → L-stage 异步重试（最多 3 次）。
 
 ## 断路器
 
@@ -322,19 +387,6 @@ n, emb = cur.fetchone()
 print(f'{n} rows, {emb} with embeddings')
 ```
 
-### 当前上下文是否在注入
-
-```python
-from ca import session_manager
-from pathlib import Path
-db_path = Path.home() / '.hermes/profiles/tester/ca_cache/{session_id}.db'
-engine = session_manager.get(session_id, str(db_path))
-result = engine.assemble("测试", 32000)
-ca_count = sum(1 for m in result
-    if isinstance(m.get("content",""), str) and m["content"].startswith("[~/")):
-print(f"{ca_count} CA summaries in assembled context")
-```
-
 ### Token 水位查询
 
 ```python
@@ -346,7 +398,6 @@ water = engine.debug_token_budget()
 print(water)
 ```
 
-**方法**：`engine.debug_token_budget(session_id="")` — 纯只读，不修改任何状态。
 **返回字段**：
 
 | 字段 | 类型 | 说明 |
@@ -359,111 +410,52 @@ print(water)
 
 ## 测试接口清单
 
-**测试总数**：362 条（活跃 271 条 + legacy 91 条）
+**测试总数**：386 条（活跃 295 条 + legacy 91 条）
 
 ### Fixtures（`tests/conftest.py`）
 
 | Fixture | Scope | 签名 | 说明 |
 |---------|-------|------|------|
 | `hardware_info` | session | `() -> dict` | CPU/内存信息，用于测试报告 |
-| `fd_checker` | function | `() -> FdWatcher` | 文件描述符泄漏检测，`.assert_no_leak(max_delta=10)` |
-| `ca_engine` | function | `(tmp_path) -> ContextAssembler` | 标准引擎实例，自动 mock embedding+LLM，teardown 执行 `.destroy()` |
-| `engine` | function | `(ca_engine) -> ContextAssembler` | `ca_engine` 别名，向后兼容 |
-| `_mock_embed` | function (autouse) | `(ca_engine) -> None` | 自动 mock `EmbeddingClient.embed` → `[0.1]*768` |
-| `_mock_llm` | function (autouse) | `() -> None` | 自动 mock `_call_llm_for_l1` → `('mock_response', 'stop')` |
+| `fd_checker` | function | `() -> FdWatcher` | 文件描述符泄漏检测 |
+| `ca_engine` | function | `(tmp_path) -> ContextAssembler` | 标准引擎实例，自动 mock embedding+LLM |
+| `engine` | function | `(ca_engine) -> ContextAssembler` | `ca_engine` 别名 |
+| `_mock_embed` | function (autouse) | `(ca_engine) -> None` | 自动 mock embed → `[0.1]*768` |
+| `_mock_llm` | function (autouse) | `() -> None` | 自动 mock L1 → `('mock_response', 'stop')` |
 
 ### 活跃测试文件
 
 | 文件 | 测试数 | 范围 |
 |------|--------|------|
-| `test_pr3_injection.py` | 8 | 三级摘要+注入：版本路由(3) + 三级判定/注入(3) + cache(1) + e2e(1) |
-| `test_tool_buffer.py` | 15 | Buffer 层：ToolGroupBuffer(2) + _on_api_response(3) + _on_pre_tool_call(2) + _on_post_tool_call(3) + flush(4) + destroy(1) |
-| `test_c.py` | 25 | 对话轮 C‑stage：摘要生成、OODA 解析、状态标记、截断检测（v4.7.0）、DB 写入格式验证、配置参数 |
-| `test_a.py` | 20 | 对话轮 A‑stage：分层、双检索、RRF 融合、预算门控、截断保护、plan‑based 组装 |
-| `test_v440.py` | 40 | 工具轮 C‑stage(12) + A‑stage(8) + L‑stage(9) + Config等(11) |
-| `test_v460.py` | 53 | 话题分割(9 类)：ComputeTopicGroups / ComputeTurnPlanV2 / GradeTopicsByRadius / IsBgTurn / JaccardTokens / TopicRetriever / QueryEmbedding / TopicConfig / V460Integration |
-| `test_config.py` | 11 | Config：环境变量解析、默认值、非法值回退、L1_TEMPERATURE/L1_MAX_TOKENS 热重载、边界校验 |
-| `test_parse_v1.py` | 27 | parse_v1_markdown_xml 全场景(16) + L1 提示词验证(2) + TruncatedException(1) + JSON→Markdown(3) + 截断边界(5) |
-| `test_store_adapter.py` | 10 | format_previous_summary_for_prompt 全场景（含历史状态推断） |
-| `test_store.py` | 12 | Store 层：读写 turn、turn_plan、BM25 tokens、分区清理、WAL 模式 |
-| `test_embedding.py` | 6 | Embedding 客户端：缓存、降级、fallback 不缓存 |
-| `test_plugin.py` | 28 | 插件断路器(4) + 生命周期(6) + pre_llm_call(4) + post_llm_call(3) + register(1) + BreakerStateCleanup(10) |
-| `test_circuit.py` | 7 | 断路器：失败计数、冷却恢复、状态持久化 |
-| `test_health.py` | 5 | 健康检查：引擎状态、DB 连接、缓存快照 |
-| `test_lifecycle.py` | 7 | 生命周期：reset、destroy、并发安全、接口完整性 |
-| `test_degradation.py` | 2 | 降级：LLM 失败后的规则摘要 |
-| `test_quality.py` | 7 | 质量评估（全部 stub/skip，需人工评审） |
-| `test_system.py` | 3 | 端到端（全部 skip，需 Ollama 环境） |
-
-### legacy 测试（留存备份，不在常规运行中）
-
-| 文件 | 测试数 | 说明 |
-|------|--------|------|
-| `legacy/test_dedup.py` | 26 | 去重：7 个测试类覆盖 system 豁免、全指纹、时序、配置、性能、调试 |
-| `legacy/test_c_stage.py` | 16 | C-stage 旧版降级/去重/LLM 超时 |
-| `legacy/test_a_stage.py` | 11 | A-stage 旧版分层/检索/预算 |
-| `legacy/test_smoke.py` | 19 | 冒烟测试：DB/解析/嵌入/BM25 |
-| `legacy/test_supplement_v3_2.py` | 8 | 补充测试：截断/异步/并发 |
-| `legacy/test_review_fixes.py` | 5 | 审查修复验证 |
-| `legacy/test_performance.py` | 2 | 性能基线 |
-| `legacy/test_ooda_parser.py` | 1 | OODA 解析成功率 |
-| `legacy/test_l1_gen_speed.py` | — | L1 生成速度测试（手动） |
-| `legacy/test_stress_real.py` | — | 真实压力测试（手动） |
-
-### 测试数据源（`tests/testcases/`）
-
-| 文件 | 格式 | 用途 |
-|------|------|------|
-| `ContextAssembler_testcases_v4.3.4.json` | `[{id, req, title, preconditions, steps, expected, ...}]` | 主测试用例定义，`generate_tests.py` 的输入源 |
-| `ContextAssembler_testcases_v1.2.json` | 同上 | 旧版 v1.2 用例集 |
-| `ContextAssembler_testcases_v1.3.json` | 同上 | 旧版 v1.3 用例集 |
-
-### 测试生成器（`tests/generate_tests.py`）
-
-| 入口 | 说明 |
-|------|------|
-| `main()` | CLI：`python generate_tests.py --json <path> --output-dir <dir>` |
-| `get_batch(tc_id)` | 按测试用例 ID 路由到对应测试批次 |
-
-### 测试数据目录
-
-| 路径 | 内容 |
-|------|------|
-| `tests/data/dialogues/short_dialogues.json` | 短对话 3 条 |
-| `tests/data/dialogues/medium_dialogues.json` | 中长度对话 |
-| `tests/data/dialogues/long_dialogues.json` | 长对话（A‑stage 爬坡测试） |
-| `tests/data/malformed_json/` | 120 个畸形 JSON 文件（容错测试） |
-| `tests/data/reference_summaries/v1.0/` | 50 份 L1 摘要参考标准（质量评估） |
-
-### 测试报告
-
-| 文件 | 内容 |
-|------|------|
-| `tests/test_execution_report_v4.3.4.json` | v4.3.4 执行记录：通过/失败/跳过统计，失败用例根因分析 |
-| `tests/docs/testplan.md` | 完整测试计划文档，含需求追溯矩阵 |
-| `tests/docs/qa-bug-report.md` | QA 缺陷报告 |
-| `tests/docs/test-report.md` | 测试执行报告 |
-| `tests/docs/v5.0.0-test-architecture.md` | v5.0.0 测试体系架构（含覆盖矩阵、fixture、已知状态） |
-| `tests/docs/bugs/` | 逐个 Bug 分析文档（7 个） |
+| `test_pr3_injection.py` | 8 | 三级摘要+注入 |
+| `test_aligned_outcomes.py` | 21 | 1:1 对齐注入 |
+| `test_tool_buffer.py` | 15 | Buffer 层 |
+| `test_c.py` | 25 | 对话轮 C‑stage |
+| `test_a.py` | 20 | 对话轮 A‑stage |
+| `test_v440.py` | 40 | 工具轮 C‑stage + A‑stage + L‑stage |
+| `test_v460.py` | 53 | 话题分割 |
+| `test_config.py` | 11 | Config |
+| `test_parse_v1.py` | 27 | parse_v1_markdown_xml |
+| `test_store_adapter.py` | 10 | format_previous_summary_for_prompt |
+| `test_store.py` | 12 | Store 层 |
+| `test_embedding.py` | 6 | Embedding 客户端 |
+| `test_plugin.py` | 31 | 插件断路器+生命周期+注入 |
+| `test_circuit.py` | 7 | 断路器 |
+| `test_health.py` | 5 | 健康检查 |
+| `test_lifecycle.py` | 7 | 生命周期 |
+| `test_degradation.py` | 2 | 降级 |
+| `test_quality.py` | 7 | 质量评估（全部 stub/skip） |
+| `test_system.py` | 3 | 端到端（全部 skip） |
 
 ### 运行方式
 
 ```bash
 # 运行全部活跃测试（需 ca_assembler 目录为 cwd）
 cd /home/i1j/.hermes/profiles/tester/plugins/ca_assembler
-python -m pytest tests/test_c.py tests/test_a.py tests/test_v440.py tests/test_v460.py tests/test_config.py tests/test_parse_v1.py tests/test_store_adapter.py tests/test_store.py tests/test_embedding.py tests/test_plugin.py tests/test_circuit.py tests/test_health.py tests/test_lifecycle.py tests/test_degradation.py tests/test_quality.py tests/test_system.py -v -p no:cacheprovider -o "addopts="
+python -m pytest tests/test_pr3_injection.py tests/test_aligned_outcomes.py tests/test_tool_buffer.py tests/test_c.py tests/test_a.py tests/test_v440.py tests/test_v460.py tests/test_config.py tests/test_parse_v1.py tests/test_store_adapter.py tests/test_store.py tests/test_embedding.py tests/test_plugin.py tests/test_circuit.py tests/test_health.py tests/test_lifecycle.py tests/test_degradation.py tests/test_quality.py tests/test_system.py -v -p no:cacheprovider -o "addopts="
 
 # 单文件
 python -m pytest tests/test_c.py -v -p no:cacheprovider -o "addopts="
-
-# 按类/函数
-python -m pytest tests/test_c.py -v -k 'test_tc_c_T1' -p no:cacheprovider -o "addopts="
-
-# legacy 测试单独
-python -m pytest tests/legacy/ -v -p no:cacheprovider -o "addopts="
-
-# 全部测试（含 legacy）
-python -m pytest tests/ tests/legacy/ -v -p no:cacheprovider -o "addopts="
 ```
 
 ## 预算实测结论（2026-06-14）
@@ -482,7 +474,7 @@ python -m pytest tests/ tests/legacy/ -v -p no:cacheprovider -o "addopts="
 
 Hermes 有两条完全独立的机制：
 
-1. **Plugin hooks** → `plugins.enabled` 中的 `ca_assembler`。通过 `register()` 注册的 5 个 hook 回调工作。
+1. **Plugin hooks** → `plugins.enabled` 中的 `ca_assembler`。通过 `register()` 注册的 8 个 hook 回调工作。
 2. **Context engine** → `context.engine` 配置项。只从仓库 `plugins/context_engine/` 子目录加载引擎，与用户 profile 的 `plugins/ca_assembler/` 毫无关系。
 
 **`context.engine` 设成什么、是否回退，都不影响 CA 插件的工作。**
@@ -492,10 +484,12 @@ Hermes 有两条完全独立的机制：
 | 差异点                 | source 项目                       | 当前部署                              |
 | ---------------------- | --------------------------------- | ------------------------------------- |
 | 代码位置               | `~/projects/context-assembler/` | `plugins/ca_assembler/` 自包含副本  |
-| `register()`         | 不存在                            | 已添加，注册 5 个 hooks               |
+| `register()`         | 不存在                            | 已添加，注册 8 个 hooks               |
 | `_state_file_path()` | `Path.home() / ".hermes"`       | `get_hermes_home()`（profile 感知） |
 | `sys.path`           | 无特殊处理                        | 本地 `ca/` 子目录优先               |
 | 激活方式               | `context.engine: ca_assembler`  | `plugins.enabled: [ca_assembler]`   |
+| `_build_aligned_outcomes` | 不存在                        | 已实现，mutation 模式主要入口        |
+| 注入方式               | 标签注入 `[~/N/0]`             | 无标签 1:1 对齐替换（mutation 模式） |
 
 ## 脚本工具
 
@@ -516,4 +510,4 @@ Hermes 有两条完全独立的机制：
 | 评审 | `docs/review/` | 交叉评审（开发线/测试线） |
 | 测试计划 | `docs/test-plans/` | 试验计划 |
 | L1 重构 | `docs/ca-l1-refactor/` | 白皮书、需求、方案、测试 |
-| 工具轮重构 | `docs/tool-turn-refactor/` | 分析、需求、技术方案、测试 |
+| 工具轮重构 | `docs/design/` | 分析文档（tool-turn-refactor-analysis.md）、技术方案（technical-plan.md） |

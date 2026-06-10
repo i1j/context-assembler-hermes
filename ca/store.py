@@ -847,6 +847,32 @@ class SQLiteStore:
             return (None, "", "")
         return (row[0], row[1] or "", row[2] or "")
 
+    def read_tool_rows_for_group(self, session_id: str, turn_index: int,
+                                  api_call_count: int) -> List[Dict]:
+        """读取一个工具组内各工具行的 l1/l0 摘要。
+
+        返回列表，每项含 seq_index、l1_text、l0_text、tool_name、status。
+        按 seq_index 升序。
+        """
+        cur = self.conn.execute(
+            """SELECT seq_index, l1_text, l0_text, tool_name, status, content
+               FROM turn_cache
+               WHERE session_id=? AND turn_index=? AND api_call_count=? AND role='tool'
+               ORDER BY seq_index""",
+            (session_id, turn_index, api_call_count),
+        )
+        rows = []
+        for r in cur.fetchall():
+            rows.append({
+                "seq_index": r[0],
+                "l1_text": r[1] or "",
+                "l0_text": r[2] or "",
+                "tool_name": r[3] or "",
+                "status": r[4] or "",
+                "content": r[5] or "",
+            })
+        return rows
+
     def read_assemble_status(self, session_id: str, turn_index: int,
                               turn_type: str = "dialogue",
                               tool_sub_index: int = 0) -> Optional[int]:

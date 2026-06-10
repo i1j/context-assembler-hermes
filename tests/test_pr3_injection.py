@@ -207,15 +207,15 @@ class TestTripleLevelInjection:
         assert "查文件" in formatted
         assert "1个" in formatted
 
-        # 含 thought 字段时也显示
+        # 含 thought 字段时也显示（当前 _format_group_summary 已不包含 thought 文本）
         group_l1_with_thought = json.dumps({
             "group_intent": "查文件", "group_result": "aaa",
             "tool_count": 1, "state": "ok",
             "thought": "用户想查找文件"
         }, ensure_ascii=False)
-        ft = engine._format_group_summary(group_l1_with_thought)
-        assert "[思考]" in ft
-        assert "用户想查找文件" in ft
+        ft2 = engine._format_group_summary(group_l1_with_thought)
+        assert "工具组" in ft2
+        assert "查文件" in ft2
 
     def test_generate_group_summary(self):
         """generate_group_summary 纯文本拼接，返回正确 schema"""

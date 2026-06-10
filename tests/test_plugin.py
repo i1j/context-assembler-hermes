@@ -276,22 +276,31 @@ class TestPreLlmCall:
         assert result is None
 
     def test_extracts_ca_markers_from_assemble(self):
-        """从 assemble 结果中提取 [~/N/0] 标记。"""
+        """从 _compute_assemble_plan + _build_aligned_outcomes 正常返回。"""
         plugin = CAContextAssemblerPlugin()
         mock_engine = MagicMock()
-        mock_engine.assemble.return_value = [
-            {"role": "assistant", "content": "[~/1/0] 摘要A"},
-            {"role": "assistant", "content": "[~/2/1] search: ok"},
-            {"role": "user", "content": "普通消息（不应提取）"},
+        # 模拟 _compute_assemble_plan 返回正常结果
+        from ca import TurnPlanEntry, _AssemblePlanResult
+        plan = [
+            TurnPlanEntry(turn_index=1, turn_type="dialogue",
+                          target_level="L1", decision_reason="middle",
+                          l2_tokens=10, summary_tokens=5, tokens_saved=5),
         ]
+        result = _AssemblePlanResult(plan=plan, messages=[], stats=MagicMock(), tokens_before=10)
+        mock_engine._compute_assemble_plan.return_value = result
+        mock_engine._build_aligned_outcomes.return_value = ["对话摘要", None]
         plugin._engine = mock_engine
         plugin._engine_errored = False
 
-        result = plugin.pre_llm_call(user_message="查询", context_length=32000)
-        assert result is not None
-        assert "[~/1/0] 摘要A" in result
-        assert "[~/2/1] search: ok" in result
-        assert "普通消息" not in result
+        result = plugin.pre_llm_call(user_message="查询", context_length=32000,
+                                     conversation_history=[
+                                         {"role": "user", "content": "查询"},
+                                         {"role": "assistant", "content": "结果"},
+                                     ])
+        # mutation mode 返回 None（history 已原地替换）
+        assert result is None
+        # 验证 _build_aligned_outcomes 被调用
+        mock_engine._build_aligned_outcomes.assert_called_once()
 
     def test_assemble_failure_returns_none(self):
         """assemble 失败时返回 None。"""
@@ -350,6 +359,83 @@ class TestPostLlmCall:
 
         plugin.post_llm_call(user_message="", assistant_response="", conversation_history=[])
         mock_engine.process_turn_async.assert_not_called()
+
+
+class TestSnapshotRestore:
+    """post_llm_call 快照恢复测试。"""
+
+    def test_restores_content_after_replace(self):
+        """替换内容后 snapshot 能恢复原始内容。"""
+        plugin = CAContextAssemblerPlugin()
+        mock_engine = MagicMock()
+        plugin._engine = mock_engine
+        plugin._engine_errored = False
+        plugin._session_id = "test_sid"
+
+        history = [
+            {"role": "user", "content": "查文件"},
+            {"role": "assistant", "content": "好的", "finish_reason": "stop"},
+        ]
+        # 模拟 _mutation_mode 设的快照
+        plugin._saved_history_snapshot = [{**m} for m in history]
+        # mutation_mode 已经修改了 content
+        history[0]["content"] = "替换摘要"
+        history[1]["content"] = "替换回复"
+
+        # post_llm_call 应恢复
+        plugin.post_llm_call(
+            user_message="查文件",
+            assistant_response="好的",
+            conversation_history=history,
+        )
+        assert history[0]["content"] == "查文件", f"Expected original, got {history[0]['content']}"
+        assert history[1]["content"] == "好的", f"Expected original, got {history[1]['content']}"
+        assert plugin._saved_history_snapshot is None, "Snapshot should be cleared"
+
+    def test_restores_skipped_rows(self):
+        """被移除的行在 snapshot 恢复后应返回。"""
+        plugin = CAContextAssemblerPlugin()
+        mock_engine = MagicMock()
+        plugin._engine = mock_engine
+        plugin._engine_errored = False
+        plugin._session_id = "test_sid"
+
+        history = [
+            {"role": "user", "content": "查文件"},
+            {"role": "assistant", "tool_calls": [{}], "content": "thought"},
+        ]
+        plugin._saved_history_snapshot = [{**m} for m in history]
+        # mutation_mode 移除了 assistant{tc} 行
+        del history[1]
+
+        plugin.post_llm_call(
+            user_message="查文件",
+            assistant_response="好的",
+            conversation_history=history,
+        )
+        assert len(history) == 2, f"Expected 2 messages restored, got {len(history)}"
+        assert history[1]["role"] == "assistant", "tool_calls row should be restored"
+        assert "tool_calls" in history[1], "tool_calls should be restored"
+
+    def test_legacy_saved_history_fallback(self):
+        """无 snapshot 时使用旧 _saved_history fallback。"""
+        plugin = CAContextAssemblerPlugin()
+        mock_engine = MagicMock()
+        plugin._engine = mock_engine
+        plugin._engine_errored = False
+        plugin._session_id = "test_sid"
+
+        msg = {"role": "user", "content": "被替换的内容"}
+        history = [msg]
+        plugin._saved_history = {id(msg): "查文件原文"}
+
+        plugin.post_llm_call(
+            user_message="查文件",
+            assistant_response="好的",
+            conversation_history=history,
+        )
+        assert msg["content"] == "查文件原文", f"Expected restored, got {msg['content']}"
+        assert plugin._saved_history is None
 
 
 # ============================================================================

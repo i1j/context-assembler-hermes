@@ -1,8 +1,9 @@
 name: ca_assembler
-version: 4.5.1
+version: 5.1
 description: >
-  ContextAssembler v4.5.1 — Hermes 插件，增量 L0/L1/L2 分层摘要 + plan-based 消息组装 +
-  工具轮结构化摘要（10 个结构化 handler）+ L‑stage 异步补全 + 全指纹去重（原位标记）。
+  ContextAssembler v5.1 — Hermes 插件，增量 L0/L1/L2 分层摘要 + plan-based 消息组装 +
+  工具轮结构化摘要（10 个结构化 handler）+ L‑stage 异步补全 + 全指纹去重（原位标记）
+  + replace 模式注入重构（bypass_turns 统一、_format_tool_group_assembly、独立工具行消除）。
 pip_dependencies:
   - numpy
   - urllib3
@@ -35,9 +36,6 @@ config_schema:
   context_length:
     type: integer
     default: 50000
-  protect_tail_tokens:
-    type: integer
-    default: 10000
   tool_max_upgrade_k:
     type: integer
     default: 3

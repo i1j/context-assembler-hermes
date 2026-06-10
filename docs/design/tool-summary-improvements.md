@@ -135,4 +135,117 @@ group_l0 = " | ".join([s["l0"] for s in per_tool_summaries[:5]])
 | terminal result_summary 命令前缀 | 命令独占 60 字符，真实输出被截 | ❌ 结果优先 |
 | handler 内 JSON 提取 | 从已知字段提取，不做文本清洗 | ✅ 正确做法 |
 | Python repr fallback (`{'total': 5}`) | ast.literal_eval 处理 JSON 失败后的单引号 Python 语法 | ✅ fallback |
-| 组内同类型工具折叠 | `search_files × 3` 代替三次同工具 | ⏳ 未来改进 |
+|| 组内同类型工具折叠 | `search_files × 3` 代替三次同工具 | ⏳ 未来改进 |
+
+---
+
+## Hermes 原生工具响应结构（不含 CA）
+
+> **补注**（2026-06-10）：本节澄清 Hermes agent loop 原生层面的工具响应构成，说明 CA 与 Hermes 的边界。
+
+### Agent Loop 内工具响应流程
+
+```
+LLM 返回 assistant{content(thought), tool_calls:[{name, args}]}
+↓
+agent loop 提取 tool_calls
+↓↓ (for each tool)
+handle_function_call(function_name, function_args)
+↓ 执行具体工具逻辑（读文件、查搜索、跑命令等）
+↓ 返回 JSON 字符串（完整的原始响应）
+↓
+messages.append({
+    "role": "tool",
+    "content": "{完整的原始 JSON}",
+    "tool_call_id": "call_xxx",
+    "tool_name": "read_file",
+})
+↓
+下一轮 API call 将 messages[]（含 tool 响应）传给 LLM
+```
+
+**关键点：** 不经过 CA 时，LLM 直接看到工具的完整原始输出。Hermes 不对工具响应做摘要或按类型区分处理。唯一的硬上限是 `file_read_max_chars=100K`（字符数，非 token 数），超出会被截断。
+
+### Hermes 持久化层：state.db
+
+Hermes 有自己的 SQLite 持久化 `state.db`（`SessionDB`），消息表 schema：
+
+```sql
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,          -- 'user' / 'assistant' / 'tool' / 'system'
+    content TEXT,                -- 原始消息全文 JSON/文本
+    tool_call_id TEXT,           -- 仅 role='tool' 时有值
+    tool_calls TEXT,             -- assistant 的 tool_calls 定义 JSON
+    tool_name TEXT,              -- 仅 role='tool' 时有值
+    timestamp REAL NOT NULL,
+    token_count INTEGER,
+    finish_reason TEXT,
+    reasoning TEXT,
+    active INTEGER DEFAULT 1
+);
+```
+
+| 特性 | 值 |
+|------|-----|
+| 目的 | 会话管理、/resume、/history、FTS5 搜索 |
+| 摘要处理 | ❌ 无，原始 content 原样存入 |
+| 按工具类型区分 | ❌ 无，全部混在 content 字段 |
+| token 估算 | `token_count` 列（估算值，非精确） |
+| 生命周期 | 永不过期（由 active/archived 标记控制） |
+
+**CA 不写 state.db**（解耦原则）。两者是独立的持久化路径。
+
+### CA 层的工具响应存储：turn_cache
+
+CA 通过 3 个工具采集 hooks（pre/post_tool_call + post_api_request）增量捕获工具响应，存入自己的 `ca_cache/{session_id}.db`：
+
+```sql
+-- turn_cache 表（v5 schema）
+CREATE TABLE turn_cache (
+    session_id TEXT NOT NULL,
+    turn_index INTEGER NOT NULL,       -- 对话轮次
+    api_call_count INTEGER NOT NULL,   -- API 调用序号（工具组标识）
+    seq_index INTEGER NOT NULL,         -- 组内消息序号
+    role TEXT NOT NULL,                 -- 'user' / 'assistant' / 'tool'
+    content TEXT,                       -- 原始消息（同 state.db 语义）
+    tool_call_id TEXT,
+    tool_name TEXT,                     -- 按此字段分发 handler
+    tool_calls_json TEXT,
+    finish_reason TEXT,
+    l0_text TEXT DEFAULT '',            -- 极简摘要（~60 字符）
+    l1_text TEXT DEFAULT '',            -- 结构化 JSON 摘要
+    l0_embedding BLOB,                  -- L0 嵌入向量
+    l1_embedding BLOB,                  -- L1 嵌入向量
+    ...
+);
+```
+
+| 特性 | 值 |
+|------|-----|
+| 目的 | CA 的上下文组装与摘要分层 |
+| 摘要处理 | ✅ 三级（content/l1_text/l0_text） |
+| 按工具类型区分 | ✅ 通过 `tool_name` 字段 + ToolSummarizer handler 分发 |
+| handler 分支 | 12 个 handler（read_file / terminal / write_file / patch / search_files / memory / skill_view / skill_manage / skills_list / execute_code / todo / 通用 fallback） |
+| 生命周期 | 按 session 组织，session 结束后保留供后续检索 |
+
+### 对比总结
+
+| 维度 | Hermes state.db | CA turn_cache | 关系 |
+|------|----------------|---------------|------|
+| 存什么 | 完整会话（所有 role） | 完整会话（所有 role）+ 摘要 | 数据冗余（各自独立） |
+| tool 摘要 | 无 | 12 个 handler 按类型分支 | CA 是增强层 |
+| 按类型区分 | 无 | tool_name 级区分 + handler 级分支 | CA 提供此能力 |
+| 用途 | 会话管理/搜索 | 上下文组装/预算控制 | 互补 |
+| 写入机制 | agent loop 每次 API 调用后 | Hook 采集（pre/post_tool_call + post_api_request）/ 异步摘要 | CA 旁路采集 |
+| 写入时机 | 每次 LLM API call 后 | 增量采集（tool） + 异步处理（dialogue） | CA 可与 agent loop 并发 |
+
+### 对"历史记忆表"问题的直接回答
+
+**Hermes 层：** 有持久化历史表（`state.db.messages`），但不按工具类型做区别处理——所有 `role='tool'` 的消息的原始 JSON 原样存入 `content` 字段，与 user/assistant 消息混在同表同列。
+
+**CA 层：** 有独立的历史表（`turn_cache`），除原始 content 外额外维护 l1_text（结构化 JSON 摘要）和 l0_text（极简文本），通过 `tool_name` 列 + ToolSummarizer handler 分发实现按工具类型的不同侧重摘要。
+
+**不经过 CA 时，** 模型永远看到原始 500 行文件内容的 JSON，没有摘要层，没有按类型区分。
+|

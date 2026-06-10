@@ -80,6 +80,23 @@ class Config:
     SYSTEM_TAIL_TURN_COUNT: ClassVar[int] = int(os.getenv("CA_SYSTEM_TAIL_TURN_COUNT", "2"))
     CONTEXT_LENGTH: ClassVar[int] = int(os.getenv("CA_CONTEXT_LENGTH", "50000"))
 
+    # 历史上下文汇编模式（v6 history injection）：
+    # "replace"（默认）→ mutation 模式：pre_llm_call 原地替换 conversation_history
+    #   摘要 → LLM 仅见汇编版（省 Token）→ post_llm_call 从 _saved_history 恢复
+    #   原始 content。全量原文通过 save/restore 旁路安全过 LLM 调用。
+    # "append"       → annotation 模式：保留 conversation_history 原文不变，
+    #   摘要文本作为字符串返回，由 Hermes 注入 user message。
+    # "off"          → 不注入：CA 仅做数据积累（C-stage），不碰 history
+    #
+    # 向后兼容：CA_HISTORY_MUTATE=1 → replace, CA_HISTORY_MUTATE=0 → append
+    _RAW = os.getenv("CA_HISTORY_INJECTION", "")
+    if not _RAW:
+        _RAW = "replace" if os.getenv("CA_HISTORY_MUTATE", "1") == "1" else "append"
+    if _RAW not in ("replace", "append", "off"):
+        logger.warning("Invalid CA_HISTORY_INJECTION=%r, falling back to 'replace'", _RAW)
+        _RAW = "replace"
+    HISTORY_INJECTION: ClassVar[str] = _RAW
+
     # 压缩警戒比值：对齐 Hermes compression.threshold。
     # context_length = model_window × threshold（触发压缩的预算上限）。
     COMPRESSION_THRESHOLD: ClassVar[float] = float(os.getenv("CA_COMPRESSION_THRESHOLD", "0.50"))
@@ -275,6 +292,13 @@ class Config:
             cls.TOPIC_BOUNDARY_DISTANCE = float(os.getenv("CA_TOPIC_BOUNDARY_DISTANCE", str(cls.TOPIC_BOUNDARY_DISTANCE)))
             cls.COMPRESSION_THRESHOLD = float(os.getenv("CA_COMPRESSION_THRESHOLD", str(cls.COMPRESSION_THRESHOLD)))
             cls.CONTEXT_LENGTH = int(os.getenv("CA_CONTEXT_LENGTH", str(cls.CONTEXT_LENGTH)))
+            _raw = os.getenv("CA_HISTORY_INJECTION", "")
+            if not _raw:
+                _raw = "replace" if os.getenv("CA_HISTORY_MUTATE", "1") == "1" else "append"
+            if _raw not in ("replace", "append", "off"):
+                logger.warning("Invalid CA_HISTORY_INJECTION=%r in reload, falling back to 'replace'", _raw)
+                _raw = "replace"
+            cls.HISTORY_INJECTION = _raw
             cls.TOOL_PRE_UPGRADE_COUNT = int(os.getenv("CA_TOOL_PRE_UPGRADE_COUNT", str(cls.TOOL_PRE_UPGRADE_COUNT)))
             cls.TOOL_MAX_UPGRADE_K = int(os.getenv("CA_TOOL_MAX_UPGRADE_K", str(cls.TOOL_MAX_UPGRADE_K)))
             cls.TOOL_PRE_UPGRADE_WINDOW = int(os.getenv("CA_TOOL_PRE_UPGRADE_WINDOW", str(cls.TOOL_PRE_UPGRADE_WINDOW)))

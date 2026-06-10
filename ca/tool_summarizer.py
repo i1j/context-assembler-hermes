@@ -896,8 +896,19 @@ class ToolSummarizer:
             {"group_intent": str, "group_result": str,
              "tool_count": int, "state": "ok"|"error"|"blocked"|"cancelled"}
         """
-        # 1. group_intent：截取 thought 首句（≤80 字符）
+        # 1. group_intent：截取 thought 首句（≤80 字符）；无 thought 时用工具名前缀
         intent = (thought or "").strip().split("\n")[0][:80]
+        if not intent:
+            unique_tools = list(dict.fromkeys(
+                tr.get("tool_name", "?") for tr in (tool_results or [])
+            ))
+            tool_list = ", ".join(unique_tools[:3])
+            if unique_tools:
+                intent = f"调用 {tool_list}"
+                if len(unique_tools) > 3:
+                    intent += " 等工具"
+            else:
+                intent = "工具调用"
 
         # 2. group_result：汇总各工具 result_summary
         ok_count = 0
@@ -933,11 +944,15 @@ class ToolSummarizer:
             rs = tr.get("result_summary", "")
             if rs:
                 result_parts.append(rs)
-        result_str = "；".join(result_parts[:3])
-        if len(result_parts) > 3:
-            result_str += "…"
 
-        group_result = f"调用 {len(tool_results)} 个工具" if not result_str else result_str
+        # 单工具组的 group_result 不重复工具细节——由工具行独占
+        if len(tool_results) <= 1:
+            group_result = f"调用 {len(tool_results)} 个工具"
+        else:
+            result_str = "；".join(result_parts[:3])
+            if len(result_parts) > 3:
+                result_str += "…"
+            group_result = result_str if result_str else f"调用 {len(tool_results)} 个工具"
 
         return {
             "group_intent": intent,
