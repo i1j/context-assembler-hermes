@@ -148,17 +148,14 @@ class Config:
         window: Optional[int] = None
 
         # 1. Hermes 运行时（同一进程，缓存命中时极快）
-        # [2026-06-05 调试屏蔽] 避免 Hermes hook 传入过小的 context_length
-        if False:
-            try:
-                from agent.model_metadata import get_model_context_length
-                window = get_model_context_length(model_name, base_url="")
-            except Exception:
-                pass
+        try:
+            from agent.model_metadata import get_model_context_length
+            window = get_model_context_length(model_name, base_url="")
+        except Exception:
+            pass
 
         # 2. 自己的已知模型表（离线/单元测试时）
-        # [2026-06-14 调试屏蔽] 强制走兜底 CONTEXT_LENGTH，用 fallback 值测试预算
-        if False:
+        if window is None:
             window = cls._MODEL_CONTEXT_WINDOW.get(model_name)
             if window is None:
                 for key, val in cls._MODEL_CONTEXT_WINDOW.items():

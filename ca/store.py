@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS turn_cache (
     token_offset  INTEGER NOT NULL DEFAULT 0,
     query_embedding BLOB,
 
+    -- 业务分类（NULL=普通对话, bg_review=后台审查）
+    biz_category   TEXT,
+
     -- 装配状态
     _assemble_status INTEGER NOT NULL DEFAULT 0,
     backfill_attempts INTEGER NOT NULL DEFAULT {INITIAL_BACKFILL_ATTEMPTS},
@@ -116,6 +119,9 @@ CREATE TABLE IF NOT EXISTS turn_plan (
 
     -- 预算快照
     budget_remaining INTEGER,
+
+    -- 业务分类（NULL=普通对话, bg_review=后台审查）
+    biz_category    TEXT,
 
     -- 后期扩展：话题归并
     topic_group    INTEGER,
@@ -379,6 +385,7 @@ class SQLiteStore:
         error_type: Optional[str] = None,
         error_message: Optional[str] = None,
         usage_json: Optional[str] = None,
+        biz_category: Optional[str] = None,
     ) -> bool:
         if self._readonly:
             logger.warning("write_turn called on readonly store, skipping")
@@ -405,12 +412,12 @@ class SQLiteStore:
                         role, content, tool_call_id, tool_name, tool_calls_json, finish_reason,
                         api_request_id, duration_ms, status, error_type, error_message, usage_json,
                         l0_text, l1_text, l0_embedding, l1_embedding, bm25_tokens, token_offset,
-                        query_embedding, _assemble_status, backfill_attempts)
+                        query_embedding, biz_category, _assemble_status, backfill_attempts)
                        VALUES (:session_id, :turn_index, :api_call_count, :seq_index,
                                :role, :content, :tool_call_id, :tool_name, :tool_calls_json, :finish_reason,
                                :api_request_id, :duration_ms, :status, :error_type, :error_message, :usage_json,
                                :l0_text, :l1_text, :l0_embedding, :l1_embedding, :bm25_tokens, :token_offset,
-                               :query_embedding, :_assemble_status, :backfill_attempts)""",
+                               :query_embedding, :biz_category, :_assemble_status, :backfill_attempts)""",
                     {
                         "session_id": session_id,
                         "turn_index": turn_index,
@@ -435,6 +442,7 @@ class SQLiteStore:
                         "bm25_tokens": json.dumps(bm25_tokens, ensure_ascii=False) if bm25_tokens else None,
                         "token_offset": token_offset,
                         "query_embedding": None,
+                        "biz_category": biz_category,
                         "_assemble_status": _assemble_status,
                         "backfill_attempts": INITIAL_BACKFILL_ATTEMPTS,
                     },
@@ -488,12 +496,12 @@ class SQLiteStore:
                         role, content, tool_call_id, tool_name, tool_calls_json, finish_reason,
                         api_request_id, duration_ms, status, error_type, error_message, usage_json,
                         l0_text, l1_text, l0_embedding, l1_embedding, bm25_tokens, token_offset,
-                        query_embedding, _assemble_status, backfill_attempts)
+                        query_embedding, biz_category, _assemble_status, backfill_attempts)
                        VALUES (:session_id, :turn_index, :api_call_count, :seq_index,
                                :role, :content, :tool_call_id, :tool_name, :tool_calls_json, :finish_reason,
                                :api_request_id, :duration_ms, :status, :error_type, :error_message, :usage_json,
                                :l0_text, :l1_text, :l0_embedding, :l1_embedding, :bm25_tokens, :token_offset,
-                               :query_embedding, :_assemble_status, :backfill_attempts)""",
+                               :query_embedding, :biz_category, :_assemble_status, :backfill_attempts)""",
                     {
                         "session_id": session_id,
                         "turn_index": vals["turn_index"],
@@ -518,6 +526,7 @@ class SQLiteStore:
                         "bm25_tokens": json.dumps(vals["bm25_tokens"], ensure_ascii=False) if vals["bm25_tokens"] else None,
                         "token_offset": vals["token_offset"],
                         "query_embedding": None,
+                        "biz_category": vals.get("biz_category"),
                         "_assemble_status": vals["_assemble_status"],
                         "backfill_attempts": vals.get("backfill_attempts", INITIAL_BACKFILL_ATTEMPTS),
                     },
@@ -656,6 +665,16 @@ class SQLiteStore:
             (session_id,),
         ).fetchone()
         return row[0] if row[0] is not None else -1
+
+    def read_turn_biz_categories(self, session_id: str) -> Dict[int, str]:
+        """返回 session 中所有对话轮的 {turn_index: biz_category}。"""
+        cur = self.conn.execute(
+            """SELECT turn_index, biz_category FROM turn_cache
+               WHERE session_id=? AND role='user' AND api_call_count=0 AND seq_index=0
+               AND biz_category IS NOT NULL""",
+            (session_id,),
+        )
+        return {row[0]: row[1] for row in cur}
 
     def list_session_ids(self) -> List[str]:
         now = time.time()
@@ -915,8 +934,9 @@ class SQLiteStore:
                    (session_id, turn_index, api_call_count, seq_index, turn_type,
                     target_level, decision_reason,
                     l2_tokens, summary_tokens, tokens_saved,
-                    rrf_score, upgrade_rank, budget_remaining, topic_group)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rrf_score, upgrade_rank, budget_remaining, topic_group,
+                    biz_category)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(session_id,
                   e["turn_index"],
                   e.get("api_call_count", 0 if e.get("turn_type", "dialogue") == "dialogue" else 1),
@@ -925,7 +945,7 @@ class SQLiteStore:
                   e["target_level"], e["decision_reason"],
                   e.get("l2_tokens", 0), e.get("summary_tokens", 0), e.get("tokens_saved", 0),
                   e.get("rrf_score"), e.get("upgrade_rank"), e.get("budget_remaining"),
-                  e.get("topic_group")) for e in entries]
+                  e.get("topic_group"), e.get("biz_category")) for e in entries]
             )
             conn.commit()
             return True
@@ -1132,12 +1152,12 @@ class SQLiteStore:
                             role, content, tool_call_id, tool_name, tool_calls_json, finish_reason,
                             api_request_id, duration_ms, status, error_type, error_message, usage_json,
                             l0_text, l1_text, l0_embedding, l1_embedding, bm25_tokens, token_offset,
-                            query_embedding, _assemble_status, backfill_attempts)
+                            query_embedding, biz_category, _assemble_status, backfill_attempts)
                            VALUES (:session_id, :turn_index, :api_call_count, :seq_index,
                                    :role, :content, :tool_call_id, :tool_name, :tool_calls_json, :finish_reason,
                                    :api_request_id, :duration_ms, :status, :error_type, :error_message, :usage_json,
                                    :l0_text, :l1_text, :l0_embedding, :l1_embedding, :bm25_tokens, :token_offset,
-                                   :query_embedding, :_assemble_status, :backfill_attempts)""",
+                                   :query_embedding, :biz_category, :_assemble_status, :backfill_attempts)""",
                         {
                             "session_id": session_id,
                             "turn_index": turn_index,
@@ -1162,6 +1182,7 @@ class SQLiteStore:
                             "bm25_tokens": json.dumps(row.get("bm25_tokens"), ensure_ascii=False) if row.get("bm25_tokens") else None,
                             "token_offset": row.get("token_offset", 0),
                             "query_embedding": None,
+                            "biz_category": row.get("biz_category"),
                             "_assemble_status": row.get("_assemble_status", 0),
                             "backfill_attempts": row.get("backfill_attempts", 0),
                         },
