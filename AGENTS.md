@@ -410,53 +410,50 @@ print(water)
 
 ## 测试接口清单
 
-**测试总数**：386 条（活跃 295 条 + legacy 91 条）
+**测试总数**：430 条（活跃 339 条 + legacy 91 条）
 
-### Fixtures（`tests/conftest.py`）
-
-| Fixture | Scope | 签名 | 说明 |
-|---------|-------|------|------|
-| `hardware_info` | session | `() -> dict` | CPU/内存信息，用于测试报告 |
-| `fd_checker` | function | `() -> FdWatcher` | 文件描述符泄漏检测 |
-| `ca_engine` | function | `(tmp_path) -> ContextAssembler` | 标准引擎实例，自动 mock embedding+LLM |
-| `engine` | function | `(ca_engine) -> ContextAssembler` | `ca_engine` 别名 |
-| `_mock_embed` | function (autouse) | `(ca_engine) -> None` | 自动 mock embed → `[0.1]*768` |
-| `_mock_llm` | function (autouse) | `() -> None` | 自动 mock L1 → `('mock_response', 'stop')` |
-
-### 活跃测试文件
-
-| 文件 | 测试数 | 范围 |
-|------|--------|------|
-| `test_pr3_injection.py` | 8 | 三级摘要+注入 |
-| `test_aligned_outcomes.py` | 21 | 1:1 对齐注入 |
-| `test_tool_buffer.py` | 15 | Buffer 层 |
-| `test_c.py` | 25 | 对话轮 C‑stage |
-| `test_a.py` | 20 | 对话轮 A‑stage |
-| `test_v440.py` | 40 | 工具轮 C‑stage + A‑stage + L‑stage |
-| `test_v460.py` | 53 | 话题分割 |
-| `test_config.py` | 11 | Config |
-| `test_parse_v1.py` | 27 | parse_v1_markdown_xml |
-| `test_store_adapter.py` | 10 | format_previous_summary_for_prompt |
-| `test_store.py` | 12 | Store 层 |
-| `test_embedding.py` | 6 | Embedding 客户端 |
-| `test_plugin.py` | 31 | 插件断路器+生命周期+注入 |
-| `test_circuit.py` | 7 | 断路器 |
-| `test_health.py` | 5 | 健康检查 |
-| `test_lifecycle.py` | 7 | 生命周期 |
-| `test_degradation.py` | 2 | 降级 |
-| `test_quality.py` | 7 | 质量评估（全部 stub/skip） |
-| `test_system.py` | 3 | 端到端（全部 skip） |
-
-### 运行方式
+运行方法：
 
 ```bash
-# 运行全部活跃测试（需 ca_assembler 目录为 cwd）
+# 活跃测试（不含 legacy，推荐）
 cd /home/i1j/.hermes/profiles/tester/plugins/ca_assembler
 python -m pytest tests/test_pr3_injection.py tests/test_aligned_outcomes.py tests/test_tool_buffer.py tests/test_c.py tests/test_a.py tests/test_v440.py tests/test_v460.py tests/test_config.py tests/test_parse_v1.py tests/test_store_adapter.py tests/test_store.py tests/test_embedding.py tests/test_plugin.py tests/test_circuit.py tests/test_health.py tests/test_lifecycle.py tests/test_degradation.py tests/test_quality.py tests/test_system.py -v -p no:cacheprovider -o "addopts="
 
-# 单文件
-python -m pytest tests/test_c.py -v -p no:cacheprovider -o "addopts="
+# 全量（含 legacy 和已知失败）
+python -m pytest tests/ -q -p no:cacheprovider -o "addopts="
+
+# 最近结果
+# 活跃: 315 passed, 4 failed（test_a.py 标签注入/annotation 断言，既存）, 20 skipped
+# 全量: 378 passed, 31 failed, 20 skipped, 1 error（legacy 相关，非活跃管线问题）
 ```
+
+### 文档与源码差异
+
+| 差异点 | source 项目 | 当前部署 |
+|--------|------------|---------|
+| 代码位置 | `~/projects/context-assembler/` | `plugins/ca_assembler/` 自包含副本 |
+| `register()` | 不存在 | 已添加，注册 8 个 hooks |
+| `_state_file_path()` | `Path.home() / ".hermes"` | `get_hermes_home()`（profile 感知） |
+| `sys.path` | 无特殊处理 | 本地 `ca/` 子目录优先 |
+| 激活方式 | `context.engine: ca_assembler` | `plugins.enabled: [ca_assembler]` |
+| `_build_aligned_outcomes` | 不存在 | 已实现，mutation 模式主要入口 |
+| 注入方式 | 标签注入 `[~/N/0]` | 无标签 1:1 对齐替换（mutation 模式） |
+| `bg_review A-stage` | 不支持 | gate 跳过，C-stage 写 biz_category |
+
+### 调试记录
+
+| 日期 | 文件 | 内容 |
+|------|------|------|
+| 2026-06-11 | `docs/debug/debug-20260611-state-db-pollution-fix.md` | state DB 内容确认 + 实装：CA post_llm_call 就地恢复 content（不碰 hermes-agent），切断污染循环 |
+| 2026-06-11 | `docs/debug/debug-20260611-biz-category-implementation.md` | biz_category 双向嵌入 + 脆弱点修复实装验证 |
+| 2026-06-11 | `docs/debug/debug-20260611-bypass-design-evolution.md` | bypass 设计演进 + biz_category 实施路径 |
+| 2026-06-10 | `docs/debug/debug-20260610-180k-context-breakdown-fix.md` | 180K 上下文崩溃根因链 + 三修复 |
+| 2026-06-10 | `docs/debug/debug-20260610-20k-dialogue-tail-refactoring.md` | 20K 对话尾区三区模型重设计 |
+| 2026-06-09 | `docs/debug/debug-20260609-tool-group-l2-reconstruction.md` | 工具组 L2 重构 + 验证 |
+| 2026-06-09 | `docs/debug/debug-20260609-tool-group-architecture.md` | 工具组架构设计 |
+| 2026-06-07 | `docs/debug/ca-deploy-debug-20260607.md` | 首次部署调试 |
+
+### 脚本工具
 
 ## 预算实测结论（2026-06-14）
 

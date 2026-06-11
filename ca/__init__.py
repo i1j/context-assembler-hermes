@@ -976,10 +976,19 @@ class ContextAssembler:
 
         # ── 20K 对话保护区计算 ──
         # 从 l1_texts（只含 dialogue turn）取轮序，跳过最后 3 个旁路轮，
-        # 从倒数第 4 个起向前累计 l2_tokens（仅对话内容，不含 tool/tool_calls）。
-        # biz_category 感知：bg_review 轮不占用旁路配额。
         _dialogue_turns = sorted(l1_texts.keys())
         _biz_cats = self.store.read_turn_biz_categories(self._session_id)
+
+        # ── 从摘要索引中移除 bg_review 轮 ──
+        # bg_review 不走话题分级/预算/plan，直接原文透传。
+        # 其 content 在 conversation_history 中已是原始消息（A-stage gate 不突变）。
+        if _biz_cats:
+            _bg_ts = set(_biz_cats.keys())
+            l1_texts = {t: v for t, v in l1_texts.items() if t not in _bg_ts}
+            l0_texts = {t: v for t, v in l0_texts.items() if t not in _bg_ts}
+            tool_group_l1_texts = {k: v for k, v in tool_group_l1_texts.items() if k[0] not in _bg_ts}
+            tool_group_l0_texts = {k: v for k, v in tool_group_l0_texts.items() if k[0] not in _bg_ts}
+
         _real_turns = [t for t in _dialogue_turns if t not in _biz_cats]
         _bypass_skip = min(3, len(_real_turns))
         _tail_protected_turns: Set[int] = set()
@@ -1049,13 +1058,9 @@ class ContextAssembler:
                     e.biz_category = _biz_cats[e.turn_index]
             self.store.write_turn_plan(self._session_id, [e.as_dict() for e in plan])
 
-        # ── 最后 3 个真实对话轮 + 全部 bg_review 轮旁路 ──
-        _bypass_turns: Set[int] = set(_biz_cats.keys())  # bg_review 轮全量旁路
-        _real_plan_entries = [e for e in plan
-                              if e.turn_type == "dialogue"
-                              and e.turn_index not in _biz_cats]
-        for _entry in _real_plan_entries[-3:]:
-            _bypass_turns.add(_entry.turn_index)
+        # ── 最后 3 个对话轮旁路（bg_review 已从 plan 过滤，无需特判）──
+        _dialogue_entries = [e for e in plan if e.turn_type == "dialogue"]
+        _bypass_turns: Set[int] = {e.turn_index for e in _dialogue_entries[-3:]}
 
         return _AssemblePlanResult(plan, messages, stats, tokens_before, _bypass_turns)
 

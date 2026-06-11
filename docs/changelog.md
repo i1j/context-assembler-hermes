@@ -536,5 +536,11 @@ v4.2                  v4.3 → v4.3-s1 → v4.3-s2    v4.3.1 → v4.3.1 修订
 | 2026-06-08 | L1 状态感知链路 | `【】` 状态前缀 + 归一化，对抗小模型&quot;完成时态&quot;幻觉 | v4.7.1 |
 | 2026-06-09 | v5 turn_cache schema 重构 | 消息独立列替代 l2_text JSON，工具轮逐工具调度 | v5.0-pr1 |
 | 2026-06-09 | ToolGroupBuffer 替代消息遍历 | 实时 buffer 采集替代 post_llm_call 全量遍历 | v5.0-pr2 |
-|| 2026-06-09 | 三级注入标记 `[~/N/g]` | 工具组独立于对话轮注入，格式统一三位标记 | v5.0-pr3 |
+||| 2026-06-09 | 三级注入标记 `[~/N/g]` | 工具组独立于对话轮注入，格式统一三位标记 | v5.0-pr3 |
+||| 2026-06-10 | bypass 尾区保护 | `_bypass_skip=3`，保护最后 2 完整对话轮 + 当前 Q | v5.1 |
+||| 2026-06-11 | bg_review 独立管道 | C-stage 正常积累，A-stage 从摘要索引移除 | v5.1 |
+||| 2026-06-11 | state DB 污染切断 | post_llm_call 共享 dict 就地恢复 | v5.1 |
+||| 2026-06-11 | biz_category 实装 | 双表加列 + C-stage 写/A-stage 消费 | v5.1 |
+||| 2026-06-12 | tool 行 content 清空 | content→单空格，94 行 340K chars → 94 chars | v5.1 |
+||| 2026-06-12 | bg_review 内容清空 + 尾区保护 | mutation 循环内按位置边界保护尾区 bg_review | v5.1 |
 || 2026-06-09 | 工具组 L2：thought 原文 → 完整消息序列展开 | `_extend_with_l2` 替代只提 thought；covered 集加 `(turn_idx, "tool")` 防重复；L1 fallback 用 `_format_group_summary` 替代 raw JSON `l1_display` | v5.0-pr3 |

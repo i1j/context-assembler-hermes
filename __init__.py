@@ -24,6 +24,13 @@ if str(_plugin_dir) not in sys.path:
 from ca import session_manager
 from ca.config import Config
 
+# ── bg_review 检测（当前轮类型识别，用于跳过 A-stage 组装）──
+try:
+    from tools.skill_provenance import get_current_write_origin
+except ImportError:
+    def get_current_write_origin() -> str:
+        return "unknown"
+
 logger = logging.getLogger(__name__)
 
 # ── 模块级引擎注册表（session_id → plugin 实例）──
@@ -107,6 +114,15 @@ def _on_pre_llm_call(**kwargs: Any) -> Optional[str]:
     if plugin._engine_errored:
         logger.info("[CA] _on_pre_llm_call: plugin errored for session %s", session_id)
         return None
+
+    # ── bg_review 轮跳过 A-stage 组装 ──
+    # bg_review agent 的 conversation_history 是父 agent 的消息快照（完整原文），
+    # CA 压缩会破坏 bg_review 的审查判断（需原文评估是否值得存 memory/skill）。
+    # C-stage 继续积累数据（写 biz_category 供后续轮过滤）。
+    if get_current_write_origin() == "background_review":
+        logger.info("[CA] _on_pre_llm_call: background_review, skip A-stage assembly")
+        return None
+
     logger.info("[CA] _on_pre_llm_call: session=%s calling assemble()", session_id)
     return plugin.pre_llm_call(**kwargs)
 
@@ -424,6 +440,21 @@ class CAContextAssemblerPlugin:
     def _mutation_mode(self, result, conversation_history: list) -> Optional[str]:
         """mutation 模式：1:1 对齐 → 替换/跳过/保留 → 快照保存。"""
         if isinstance(result, list):
+            if Config.DEBUG_MODE:
+                import json, os, time as _time
+                _dump = os.environ.get("CA_DEBUG_DUMP", "").strip()
+                if _dump and _dump.lower() not in ("0", "false", "no"):
+                    try:
+                        _log_path = os.path.join(
+                            _dump if os.path.isabs(_dump) else "/tmp",
+                            f"ca_degraded_{self._session_id}_{int(_time.time())}.json",
+                        )
+                        os.makedirs(os.path.dirname(_log_path), exist_ok=True)
+                        with open(_log_path, "w") as _f:
+                            json.dump({"result_type": "list", "len": len(result), "conv_h_len": len(conversation_history)}, _f)
+                        logger.info("[CA] debug degraded dump: %s", _log_path)
+                    except Exception as _e:
+                        logger.warning("[CA] debug degraded dump failed: %s", _e)
             # degraded: 不做事
             self._saved_history_snapshot = None
             return None
@@ -439,25 +470,76 @@ class CAContextAssemblerPlugin:
         self._saved_history_snapshot = [{**m} for m in conversation_history]
         self._saved_history = None
 
-        # 3. 应用 outcomes：替换 content 或移除行
+        # 预备：读 bg_review turn 集合
+        _bg_ts = set()
+        try:
+            _biz_cats = self._engine.store.read_turn_biz_categories(self._session_id)
+            if _biz_cats:
+                _bg_ts = {t for t, c in _biz_cats.items() if c == "bg_review"}
+        except Exception:
+            pass
+
+        # 计算尾区边界：按非 bg_review 对话轮计数，最后 2 轮 + 当前 Q 保留
+        # （数字非 biz 对话 turn，到倒数第 3 个非 bg_review 对话 user 消息为止）
+        _tail_boundary = 0
+        if _bg_ts:
+            _dialogue_count = 0
+            for i in range(len(conversation_history) - 1, -1, -1):
+                msg = conversation_history[i]
+                if msg.get("role") == "user":
+                    _turn = msg.get("_turn_index")
+                    if _turn is not None and _turn not in _bg_ts:
+                        _dialogue_count += 1
+                        if _dialogue_count >= 3:
+                            _tail_boundary = i + 1
+                            break
+
+        # 3. 应用 outcomes：替换 content 或清空行
         replaced = 0
         skipped = 0
-        # 从后往前处理，确保移除时索引不偏移
+        _bg_cleared = 0
+        _fallback_turn = 0
         for i in range(len(outcomes) - 1, -1, -1):
             outcome = outcomes[i]
+            msg = conversation_history[i]
             if outcome is None:
-                continue  # 保留原文
+                # 后台对话轮（非尾区）→ 清空；尾区或其他 → 保留原文
+                if _bg_ts and msg.get("role") != "system":
+                    _turn = msg.get("_turn_index")
+                    if _turn is None and msg["role"] == "user":
+                        _fallback_turn += 1
+                        _turn = _fallback_turn
+                    if _turn in _bg_ts and i < _tail_boundary:
+                        msg["content"] = " "
+                        _bg_cleared += 1
+                continue
             if outcome == "":
-                del conversation_history[i]
+                msg["content"] = " "
                 skipped += 1
             else:
-                conversation_history[i]["content"] = outcome
+                msg["content"] = outcome
                 replaced += 1
 
         logger.info(
-            "[CA] mutation: replaced %d + skipped %d outcomes",
-            replaced, skipped,
+            "[CA] mutation: replaced %d + skipped %d + bg_cleared %d outcomes",
+            replaced, skipped, _bg_cleared,
         )
+
+        if Config.DEBUG_MODE:
+            import json, os, time as _time
+            _dump = os.environ.get("CA_DEBUG_DUMP", "").strip()
+            if _dump and _dump.lower() not in ("0", "false", "no"):
+                try:
+                    _log_path = os.path.join(
+                        _dump if os.path.isabs(_dump) else "/tmp",
+                        f"ca_mutation_{self._session_id}_{int(_time.time())}.json",
+                    )
+                    os.makedirs(os.path.dirname(_log_path), exist_ok=True)
+                    with open(_log_path, "w") as _f:
+                        json.dump(conversation_history, _f, indent=2, ensure_ascii=False)
+                    logger.info("[CA] debug mutation dump: %s (%d messages)", _log_path, len(conversation_history))
+                except Exception as _e:
+                    logger.warning("[CA] debug mutation dump failed: %s", _e)
         return None
 
     def post_llm_call(self, **kwargs: Any) -> None:
@@ -496,12 +578,32 @@ class CAContextAssemblerPlugin:
         except Exception as exc:
             logger.warning("[CA] post_llm_call: flush_tool_buffer error: %s", exc)
 
-        # Restore original history from mutation mode snapshot（快照全量恢复）
+        # Restore original history from mutation mode snapshot（快照内容就地恢复）
+        # 就地改 conv_h[i]["content"] → 共享 dict 引用传播回 messages[i]["content"]
+        # 确保 _persist_session(messages, ...) 写入原始内容而非 CA 突变版到 state DB
         _snapshot = getattr(self, "_saved_history_snapshot", None)
         if _snapshot is not None:
-            conversation_history.clear()
-            conversation_history.extend({**m} for m in _snapshot)
-            logger.info("[CA] post_llm_call: restored %d messages from snapshot", len(_snapshot))
+            _n_restored = 0
+            # 1) 就地恢复 content（共享 dict 引用 → 传播到 messages）
+            for i, orig_dict in enumerate(_snapshot):
+                if i >= len(conversation_history):
+                    break
+                orig_content = orig_dict.get("content")
+                ch = conversation_history[i]
+                if ch.get("content") != orig_content:
+                    ch["content"] = orig_content
+                    _n_restored += 1
+            # 2) 补回被删除的行（snapshot 更长时，从 snapshot 追加）
+            #    实际运行时 conv_h = list(messages) 不会比 snapshot 短，
+            #    但测试中可能通过 del 模拟删除，行级补全保证测试兼容。
+            _n_appended = 0
+            if len(conversation_history) < len(_snapshot):
+                _extra = _snapshot[len(conversation_history):]
+                conversation_history.extend({**m} for m in _extra)
+                _n_appended = len(_extra)
+            if _n_restored > 0 or _n_appended > 0:
+                logger.info("[CA] post_llm_call: in-place restored %d + appended %d from snapshot",
+                           _n_restored, _n_appended)
             self._saved_history_snapshot = None
         else:
             # fallback: 旧版 _saved_history 恢复（仅恢复 content）
