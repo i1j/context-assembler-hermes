@@ -2,17 +2,17 @@
 
 ## 部署快照
 
-| 项       | 值                                                                        |
-| -------- | ------------------------------------------------------------------------- |
-| 版本     | v5.1 |
-| 注入方式 | 1:1 对齐替换/跳过（无 `[~/N/M]` 标签），v5.1 bypass_turns 统一两路 |
-| plugin.yaml | v5.1（已同步）                    |
-| 部署方式 | 自包含独立副本                                                            |
-| 插件路径 | `~/.hermes/profiles/tester/plugins/ca_assembler/`                       |
-| 核心引擎 | `ca/` 子目录（入口 `ca/__init__.py` → `ContextAssembler`）         |
-| 插件适配 | `plugins/ca_assembler/__init__.py`（入口 `CAContextAssemblerPlugin`） |
-| 启用方式 | `plugins.enabled: [ca_assembler, ...]`                                  |
-| 源项目   | `~/projects/context-assembler/`（已分化，含独有修复）                   |
+| 项          | 值                                                                                |
+| ----------- | --------------------------------------------------------------------------------- |
+| 版本        | v5.2                                                                              |
+| 注入方式    | 1:1 对齐替换（mutation）+独立 tool 标签（v5.2），v5.2 bypass_turns 感知 tool_plan |
+| plugin.yaml | v5.2（待同步）                                                                    |
+| 部署方式    | 自包含独立副本                                                                    |
+| 插件路径    | `~/.hermes/profiles/tester/plugins/ca_assembler/`                               |
+| 核心引擎    | `ca/` 子目录（入口 `ca/__init__.py` → `ContextAssembler`）                 |
+| 插件适配    | `plugins/ca_assembler/__init__.py`（入口 `CAContextAssemblerPlugin`）         |
+| 启用方式    | `plugins.enabled: [ca_assembler, ...]`                                          |
+| 源项目      | `~/projects/context-assembler/`（已分化，含独有修复）                           |
 
 ## 注册接口
 
@@ -84,74 +84,33 @@ def _on_pre_llm_call(**kwargs: Any) -> Optional[str]:
 | `user_message`   | str  | 用户输入文本                                            |
 | `context_length` | int  | 上下文 Token 窗口上限（默认 `Config.CONTEXT_LENGTH`） |
 
-**返回值**: `Optional[str]`
+**返回值**: `Optional[str]`，详见 [v5.2 注入规则分析](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md#3-tool_plan-注入重构v52)。
 
-- 引擎不可用或出错 → 返回 `None`（不注入）
-- 调用 `engine._compute_assemble_plan(user_message, context_length)` 获取 plan
-- 注入模式由 `Config.HISTORY_INJECTION` 控制（环境变量 `CA_HISTORY_INJECTION`）：
-  - **replace 模式（默认）**：调用 `_build_aligned_outcomes(plan, history)` 产生 1:1 对齐结果
-    → 原地替换/移除行，保存快照供 post_llm_call 恢复
-  - **append 模式**：调用 `_build_messages_from_plan` 拼接标签文本返回
-  - **off 模式**：返回 `None`，不注入（仅做数据积累）
-- **不再使用 `[~/N/M]` 标签**（mutation 模式）— 摘要直接以可读文本输出
+注入模式由 `Config.HISTORY_INJECTION` 控制：
 
-#### 三路注入路径
+| 模式 | 入口 | 效果 | pre_llm_call 返回值 | 恢复 |
+|------|------|------|-------------------|------|
+| **replace**（默认） | `_build_aligned_outcomes`+tool_plan | 替换 content，tool 行独立摘要 | `None`（浅拷贝传播） | snapshot 全量恢复 |
+| **append** | `_build_messages_from_plan`+tool_plan | 摘要拼入 user message | 文本字符串 | 无需 |
+| **off** | — | 仅数据积累 | `None` | 无需 |
 
-| 维度 | Replace 模式（默认） | Append 模式 | Off 模式 |
-|------|---------------------|-------------|----------|
-| 入口 | `_build_aligned_outcomes()` | `_build_messages_from_plan()` | — |
-| 输出与 history | 替换/移除 history 条目 | 摘要文本拼入 user message | 不动 history |
-| 标签 | 无标签 — 纯文本摘要 | 含 `[~/N/0]` 标签（annotation 旧格式） | — |
-| history 修改 | 原地替换 content / 移除行 | 不碰原始 history | 不碰 |
-| pre_llm_call 返回值 | `None`（mutation 通过浅拷贝传播） | 文本字符串拼接 | `None` |
-| 恢复 | post_llm_call 从 snapshot 全量恢复 | 无需恢复 | 无需恢复 |
-| 数据积累 (C-stage) | 正常进行 | 正常进行 | 正常进行 |
-| 适用场景 | 高压缩比，LLM 仅见汇编版 | 注入额外摘要，保留全量原文 | 仅用于数据采集，不改变上下文 |
-
-**行类型注射规则**（mutation 模式 v5.1，由 `_build_aligned_outcomes` 决策）：
+**行类型注射规则**（replace 模式 v5.2）：
 
 | history 行 | L2 | L1 | L0 |
 |---|---|---|---|
-| `user` | None（保留原文） | `_format_l1_for_display(l1)` | `l0_text` |
-| `assistant{tc}` | None（保留原文） | `_format_tool_group_assembly(l1)` | `_format_tool_group_assembly(l1/l0)` → 紧凑格式 |
-| `tool` | `""`（移除） | `""`（移除） | `""`（移除） |
+| `user` | None | `_format_l1_for_display(l1)` | `l0_text` |
+| `assistant{tc}` | None | `_format_tool_group_assembly(l1)` — 仅 header | `l0_text` |
+| `tool` | 摘要文本（tool_plan L1） | 摘要文本（tool_plan L0） | `""`（占位） |
 | `assistant_fin` | None | None | None |
 
-**返回值语义**：
-- `None` = 保留原文
-- `""` = 行将被移除（所有 tool 行均被删除）
-- `str` = 替换 content（无标签）
+**tool_plan 规则**：`_compute_tool_plan_v2`，parent 级别-1（L2→L1, L1→L0, L0→skip）。不持久化。
 
-**格式化函数**：
+**bg_review 填充**：从 DB 读取，对话轮 L1/L0，工具轮仅 L0，无标签。三字段 `(api_call_count, seq_index, role)` 匹配保护。
 
-| 函数 | 输入 | 输出示例 |
-|------|------|---------|
-| `_format_l1_for_display(l1_json)` | `{"core_change":"查了文件系统","new_materials":["文件A"], ...}` | `查了文件系统\n  文件A` |
-| `_format_tool_group_assembly(l1, history, turn_idx, gidx)` | `{"group_intent":"查文件","group_result":"aaa;x.py","tool_count":3,"state":"ok"}` + history 工具行 | `【工具组:查文件→aaa;x.py(3个,ok)】`<br>`  read_file: aaa ×2` |
-| `_format_group_summary(l1)` | **已弃用 v5.1** — 由 `_format_tool_group_assembly` 替代 | — |
-
-**×N 合并**：移入 `_format_tool_group_assembly` 内部。连续相同 tool_name+detail 的工具行在组内合并 → `read_file: aaa ×2`。`_merge_consecutive_tool_outcomes()` 不再被调用（保留供遗留测试引用）。
-
-**bypass_turns 数据流**（v5.1 新增）：
-- 在 `_compute_assemble_plan` 中计算最后 2 个对话轮的索引集合
-- 通过 `_AssemblePlanResult.bypass_turns` 字段传递给两端
-- `_build_aligned_outcomes`：bypass 轮的工具组无条件 L2（原文保留）
-- `_build_messages_from_plan`：bypass 轮跳过摘要注入，直接注入原始消息
-- **消除两路不一致**：原 `_build_messages_from_plan` 内部硬计算已被移除
-
-**bypass_turns 感知**（`_build_aligned_outcomes`）：
-- bypass 轮中 `entry.turn_index in _bypass_set` → 工具组 `assistant{tc}` 行保留原文（`None`）
-- 所有 `tool` 行不论 bypass 与否均被删除（`""`）
-
-**输出示例**（v5.1 mutation 模式注入后 conversation_history 变更）：
-```
-# 对话轮 L1 — user 行被替换
-user: "查了文件系统\n  文件A"
-# 工具组 L1 — assistant{tc} 行被替换（含全部工具详情）
-assistant{tc}: "【工具组:查文件→aaa;x.py(3个,ok)】
-  search: *.py → 3 hit
-  read_file: /tmp/test.py (60 lines) ×2"
-# tool 行全部删除（空字符串 → del conversation_history[i]）
+详见 [v5.2 注入规则分析](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md#3-tool_plan-注入重构v52)。
+# tool 行按 tool_plan 生成独立摘要（无标签，各自占一行）
+tool: "read_file: /tmp/test.py (60 lines)"
+tool: "search: *.py → 3 hits"
 # final assistant — 保留原文
 assistant_fin: "文件内容已查到"
 ```
@@ -172,12 +131,14 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 | `conversation_history` | list | 本轮完整消息历史（含 tool 结果） |
 
 行为：
+
 1. **先同步 `flush_tool_buffer()`** — 将 `_tool_buffer` 中的增量采集数据写入 store
 2. **快照恢复** — 优先从 `_saved_history_snapshot` 全量还原 mutation 前的 history；fallback 到 `_saved_history` 按 `id(msg)` 逐条恢复
 3. **再异步 `process_turn_async()`** — 生成对话轮摘要
-`conversation_history` 传副本（列表拷贝），避免竞态。
+   `conversation_history` 传副本（列表拷贝），避免竞态。
 
 **快照两层结构**：
+
 - `_saved_history_snapshot: Optional[List[Dict]]` — 完整消息列表快照，全量 clear+extend 恢复（PR3 新增，优先）
 - `_saved_history: Optional[Dict[int, str]]` — 旧式 `id(msg) → content` 映射，逐条恢复（向后兼容）
 
@@ -225,43 +186,43 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 
 **主键**：`(session_id, turn_index, api_call_count, seq_index)`
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `session_id` | TEXT | 会话 ID |
-| `turn_index` | INTEGER | 对话轮次（从 1 开始） |
-| `api_call_count` | INTEGER | API 调用序号（0=user, 1..N=API 调用, 999999=final） |
-| `seq_index` | INTEGER | 组内消息序号（0=assistant{tc}, 1..M=tool 行） |
-| `role` | TEXT | `user` / `assistant` / `tool` / `system` |
-| `content` | TEXT | 消息文本内容（thought / tool result / final text） |
-| `tool_call_id` | TEXT | 工具调用 ID（仅 role="tool" 时） |
-| `tool_name` | TEXT | 工具名（仅 role="tool" 时） |
-| `tool_calls_json` | TEXT | assistant 的 tool_calls 定义 JSON |
-| `finish_reason` | TEXT | `tool_calls` / `stop` / `length`（仅 assistant 行） |
-| `api_request_id` | TEXT | API 调用唯一 ID |
-| `duration_ms` | INTEGER | 执行耗时（仅 tool 行） |
-| `status` | TEXT | `ok` / `error` / `blocked` / `cancelled` |
-| `error_type` | TEXT | 错误类型 |
-| `error_message` | TEXT | 错误消息 |
-| `usage_json` | TEXT | Token 用量 JSON |
-| `l1_text` | TEXT | CA 摘要 JSON |
-| `l0_text` | TEXT | 单行摘要（≤100 字符） |
-| `l0_embedding` | BLOB | L0 嵌入向量（4096 字节） |
-| `l1_embedding` | BLOB | L1 嵌入向量（4096 字节） |
-| `bm25_tokens` | TEXT | BM25 分词 |
-| `token_offset` | INTEGER | 累计 Token 偏移 |
-| `query_embedding` | BLOB | 用户消息嵌入向量 |
-| `_assemble_status` | INTEGER | 0=成功, 1=降级, 2=永久跳过 |
-| `backfill_attempts` | INTEGER | L-stage 尝试次数 |
-| `created_at` | TEXT | 创建时间戳 |
+| 字段                  | 类型    | 说明                                                      |
+| --------------------- | ------- | --------------------------------------------------------- |
+| `session_id`        | TEXT    | 会话 ID                                                   |
+| `turn_index`        | INTEGER | 对话轮次（从 1 开始）                                     |
+| `api_call_count`    | INTEGER | API 调用序号（0=user, 1..N=API 调用, 999999=final）       |
+| `seq_index`         | INTEGER | 组内消息序号（0=assistant{tc}, 1..M=tool 行）             |
+| `role`              | TEXT    | `user` / `assistant` / `tool` / `system`          |
+| `content`           | TEXT    | 消息文本内容（thought / tool result / final text）        |
+| `tool_call_id`      | TEXT    | 工具调用 ID（仅 role="tool" 时）                          |
+| `tool_name`         | TEXT    | 工具名（仅 role="tool" 时）                               |
+| `tool_calls_json`   | TEXT    | assistant 的 tool_calls 定义 JSON                         |
+| `finish_reason`     | TEXT    | `tool_calls` / `stop` / `length`（仅 assistant 行） |
+| `api_request_id`    | TEXT    | API 调用唯一 ID                                           |
+| `duration_ms`       | INTEGER | 执行耗时（仅 tool 行）                                    |
+| `status`            | TEXT    | `ok` / `error` / `blocked` / `cancelled`          |
+| `error_type`        | TEXT    | 错误类型                                                  |
+| `error_message`     | TEXT    | 错误消息                                                  |
+| `usage_json`        | TEXT    | Token 用量 JSON                                           |
+| `l1_text`           | TEXT    | CA 摘要 JSON                                              |
+| `l0_text`           | TEXT    | 单行摘要（≤100 字符）                                    |
+| `l0_embedding`      | BLOB    | L0 嵌入向量（4096 字节）                                  |
+| `l1_embedding`      | BLOB    | L1 嵌入向量（4096 字节）                                  |
+| `bm25_tokens`       | TEXT    | BM25 分词                                                 |
+| `token_offset`      | INTEGER | 累计 Token 偏移                                           |
+| `query_embedding`   | BLOB    | 用户消息嵌入向量                                          |
+| `_assemble_status`  | INTEGER | 0=成功, 1=降级, 2=永久跳过                                |
+| `backfill_attempts` | INTEGER | L-stage 尝试次数                                          |
+| `created_at`        | TEXT    | 创建时间戳                                                |
 
 **行类型速查**：
 
-| 行类型 | `api_call_count` | `seq_index` | `role` | 关键特征 |
-|--------|-----------------|-------------|--------|---------|
-| user | 0 | 0 | user | 用户输入 |
-| assistant{tc} | N（≥1） | 0 | assistant | 含 `tool_calls_json`，`finish_reason="tool_calls"` |
-| tool | N（≥1） | ≥1 | tool | 含 `tool_call_id`，`status` |
-| final assistant | 999999 | 0 | assistant | `finish_reason="stop"` |
+| 行类型          | `api_call_count` | `seq_index` | `role`  | 关键特征                                               |
+| --------------- | ------------------ | ------------- | --------- | ------------------------------------------------------ |
+| user            | 0                  | 0             | user      | 用户输入                                               |
+| assistant{tc}   | N（≥1）           | 0             | assistant | 含 `tool_calls_json`，`finish_reason="tool_calls"` |
+| tool            | N（≥1）           | ≥1           | tool      | 含 `tool_call_id`，`status`                        |
+| final assistant | 999999             | 0             | assistant | `finish_reason="stop"`                               |
 
 ### 存储特性
 
@@ -273,88 +234,53 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 
 ## 内存缓存结构（AssemblyCache）
 
-| 缓存 | Key 类型 | 说明 |
-|------|---------|------|
-| `l0_texts` | `Dict[int, str]` | 对话轮 L0 文本，key=turn_index |
-| `l1_texts` | `Dict[int, str]` | 对话轮 L1 JSON，key=turn_index |
-| `tool_l0_texts` | `Dict[Tuple[int,int], str]` | 个体工具 L0，key=(turn_index, seq_index) |
-| `tool_l1_texts` | `Dict[Tuple[int,int], str]` | 个体工具 L1 JSON，key=(turn_index, seq_index) |
-| `tool_group_l0_texts` | `Dict[Tuple[int,int], str]` | 工具组 L0，key=(turn_index, api_call_count) |
+| 缓存                    | Key 类型                      | 说明                                             |
+| ----------------------- | ----------------------------- | ------------------------------------------------ |
+| `l0_texts`            | `Dict[int, str]`            | 对话轮 L0 文本，key=turn_index                   |
+| `l1_texts`            | `Dict[int, str]`            | 对话轮 L1 JSON，key=turn_index                   |
+| `tool_l0_texts`       | `Dict[Tuple[int,int], str]` | 个体工具 L0，key=(turn_index, seq_index)         |
+| `tool_l1_texts`       | `Dict[Tuple[int,int], str]` | 个体工具 L1 JSON，key=(turn_index, seq_index)    |
+| `tool_group_l0_texts` | `Dict[Tuple[int,int], str]` | 工具组 L0，key=(turn_index, api_call_count)      |
 | `tool_group_l1_texts` | `Dict[Tuple[int,int], str]` | 工具组 L1 JSON，key=(turn_index, api_call_count) |
 
 `add_tool_group()` 在 `flush_tool_buffer()` 末尾同步调用，保证缓存与 DB 一致。
 
 ## 关键环境变量
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `CA_EMBED_BACKEND` | `ollama` | 嵌入后端 |
-| `CA_EMBED_MODEL` | `qwen3-embedding:0.6b` | 嵌入模型 |
-| `CA_EMBED_ENDPOINT` | `http://localhost:11439` | 嵌入服务端点 |
-| `CA_LLM_MODEL` | `qwen3-4b-instruct` | L1 摘要生成模型 |
-| `CA_LLM_ENDPOINT` | `http://localhost:11440` | LLM 服务端点 |
-| `CA_EMBED_TIMEOUT` | 30 | 嵌入超时（秒） |
-| `CA_LLM_TIMEOUT` | 180 | LLM 超时（秒） |
-| `CA_CONTEXT_LENGTH` | 50000 | 上下文 Token 预算上限 |
-| `CA_L1_TEMPERATURE` | 0.3 | L1 摘要生成温度 |
-| `CA_L1_MAX_TOKENS` | 800 | L1 摘要生成最大 Token 数 |
-| `CA_PROTECT_TAIL_TOKENS` | 10000 | 对话轮尾区保护 Token 数 |
-| `CA_TOOL_TAIL_TURN_COUNT` | 2 | 工具轮尾区保留最近对话轮数 |
-| `CA_SYSTEM_TAIL_TURN_COUNT` | 2 | 系统尾区：最近 N 条系统消息原文透传 |
-| `CA_COMPRESSION_THRESHOLD` | 0.50 | 压缩警戒比值 |
-| `CA_HISTORY_INJECTION` | `replace` | 注入模式：`replace`(mutation)/`append`(annotation)/`off`(仅数据积累) |
-| `CA_HISTORY_MUTATE` | (已弃用) | 2值开关，`1`→替换 `0`→追加。未设 `CA_HISTORY_INJECTION` 时兼容此旧变量 |
-| `CA_LLM_THINK` | 未设置 | L1 LLM think 参数（1/0/true/false） |
+| 变量                          | 默认值                     | 说明                                                                           |
+| ----------------------------- | -------------------------- | ------------------------------------------------------------------------------ |
+| `CA_EMBED_BACKEND`          | `ollama`                 | 嵌入后端                                                                       |
+| `CA_EMBED_MODEL`            | `qwen3-embedding:0.6b`   | 嵌入模型                                                                       |
+| `CA_EMBED_ENDPOINT`         | `http://localhost:11439` | 嵌入服务端点                                                                   |
+| `CA_LLM_MODEL`              | `qwen3-4b-instruct`      | L1 摘要生成模型                                                                |
+| `CA_LLM_ENDPOINT`           | `http://localhost:11440` | LLM 服务端点                                                                   |
+| `CA_EMBED_TIMEOUT`          | 30                         | 嵌入超时（秒）                                                                 |
+| `CA_LLM_TIMEOUT`            | 180                        | LLM 超时（秒）                                                                 |
+| `CA_CONTEXT_LENGTH`         | 50000                      | 上下文 Token 预算上限                                                          |
+| `CA_L1_TEMPERATURE`         | 0.3                        | L1 摘要生成温度                                                                |
+| `CA_L1_MAX_TOKENS`          | 800                        | L1 摘要生成最大 Token 数                                                       |
+| `CA_PROTECT_TAIL_TOKENS`    | 20000（来自 settings.yaml） | 当前话题块 Token 保护安全阀。来源：`ca/settings.yaml`→`_YAML_DEFAULTS`→env `CA_PROTECT_TAIL_TOKENS` |
+| `CA_TOOL_TAIL_TURN_COUNT`   | 2                          | 工具轮尾区保留最近对话轮数                                                     |
+| `CA_SYSTEM_TAIL_TURN_COUNT` | 2                          | 系统尾区：最近 N 条系统消息原文透传                                            |
+| `CA_COMPRESSION_THRESHOLD`  | 0.50                       | 压缩警戒比值                                                                   |
+| `CA_HISTORY_INJECTION`      | `replace`                | 注入模式：`replace`(mutation)/`append`(annotation)/`off`(仅数据积累)     |
+| `CA_HISTORY_MUTATE`         | (已弃用)                   | 2值开关，`1`→替换 `0`→追加。未设 `CA_HISTORY_INJECTION` 时兼容此旧变量 |
+| `CA_LLM_THINK`              | 未设置                     | L1 LLM think 参数（1/0/true/false）                                            |
 
 ### 话题拣配配置（v4.6.0）
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `CA_TOPIC_BOUNDARY_DISTANCE` | 0.50 | 话题边界检测余弦距离阈值 |
-| `CA_TOPIC_JACCARD_ENTRY` | 0.03 | 话题分割首次合并 Jaccard 阈值 |
-| `CA_TOPIC_JACCARD_CHAIN` | 0.04 | 话题分割链内扩展 Jaccard 阈值 |
-| `CA_TOPIC_RADIUS_WEIGHT` | 2.0 | 半径公式中最近邻距离的权重系数 |
-| `CA_TOPIC_MAX_UPGRADE` | 10 | 检索升级最大 topic 数 |
-| `CA_TOPIC_BG_LEVEL` | `L0` | BG 话题固定级别 |
+| 变量                           | 默认值 | 说明                           |
+| ------------------------------ | ------ | ------------------------------ |
+| `CA_TOPIC_BOUNDARY_DISTANCE` | 0.50   | 话题边界检测余弦距离阈值       |
+| `CA_TOPIC_JACCARD_ENTRY`     | 0.03   | 话题分割首次合并 Jaccard 阈值  |
+| `CA_TOPIC_JACCARD_CHAIN`     | 0.04   | 话题分割链内扩展 Jaccard 阈值  |
+| `CA_TOPIC_RADIUS_WEIGHT`     | 2.0    | 半径公式中最近邻距离的权重系数 |
+| `CA_TOPIC_MAX_UPGRADE`       | 10     | 检索升级最大 topic 数          |
+| `CA_TOPIC_BG_LEVEL`          | `L0` | BG 话题固定级别                |
 
 ## L1 摘要生成架构
 
-### 关键模块
-
-| 模块/文件 | 职责 |
-|-----------|------|
-| `ca/post_process.py` | 防御性解析器：`parse_v1_markdown_xml`(主入口)、`_safe_truncate`(智能截断)、`_json_to_v1_markdown`(格式转换)、`ItemState` 枚举、状态前缀提取 |
-| `ca/prompts.py` | `L1_GENERATION_PROMPT` — "研发对话意图分析器"人设 |
-| `ca/tool_summarizer.py` | `ToolSummarizer` 类：`summarize()` 按工具名分发, `generate_group_summary()` 组摘要 |
-| `ca/__init__.py :: _call_llm_for_l1` | LLM 调用，返回 `Tuple[str,str]`(response, finish_reason) |
-| `ca/__init__.py :: _compute_assemble_plan` | Plan 计算阶段（含 bypass_turns 生产） |
-| `ca/__init__.py :: _build_aligned_outcomes` | 1:1 对齐（mutation 模式入口，v5.1 新增 bypass_turns 感知） |
-| `ca/__init__.py :: _format_tool_group_assembly` | 工具组紧凑格式（v5.1 新增，替代 _format_group_summary） |
-| `ca/__init__.py :: _format_l1_for_display` | 对话轮 L1 JSON → 可读文本 |
-| `ca/__init__.py :: _format_group_summary` | **已弃用 v5.1** — 由 _format_tool_group_assembly 替代 |
-| `ca/__init__.py :: _format_single_tool` | 个体工具格式化（v5.1 保留供遗留引用，不再被生产调用） |
-| `ca/__init__.py :: _build_messages_from_plan` | 标签注入模式（annotation 模式/旧路径，v5.1 新增 bypass_turns 参数） |
-| `ca/ooda_parser.py` | OODA 分区、中文别名映射 |
-| `ca/store.py :: format_previous_summary_for_prompt` | DB JSON → Markdown 适配器 |
-| `ca/config.py` | 配置项热重载 |
-
-### 数据流
-
-```
-旧 DB JSON (5类英key)               LLM 输出 (4类中文+XML)
-    │                                      │
-    ▼                                      ▼
-format_previous_summary_for_prompt()    parse_v1_markdown_xml()
-    │                                      │
-    ├─ None/"无" → "无"                    ├─ 提取 <core_change>
-    ├─ JSON → _json_to_v1_markdown         ├─ 提取 OODA 4 类
-    └─ 纯文本 → 原样返回                   └─ 解析 → (l1_dict, l0_text, core_state)
-           │                                      │
-           ▼                                      ▼
-    ┌──────────────────────────────────────────────┘
-    ▼
-clean_increment() → DB (5类英key JSON，格式不变)
-```
+关键模块表见上。数据流详见 [v5.2 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md#2-l0_embedding-孤儿数据清理)。
 
 ## 断路器
 
@@ -400,70 +326,30 @@ print(water)
 
 **返回字段**：
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `context_length` | int | 总 Token 窗口上限（`CA_CONTEXT_LENGTH`） |
-| `budget_max` | int | 可用预算上限（`context_length × 0.95`） |
-| `used_tokens` | int | 当前累计 token 偏移 |
-| `remaining` | int | 剩余可用预算 |
-| `usage_pct` | float | 使用率百分比 |
+| 字段               | 类型  | 说明                                       |
+| ------------------ | ----- | ------------------------------------------ |
+| `context_length` | int   | 总 Token 窗口上限（`CA_CONTEXT_LENGTH`） |
+| `budget_max`     | int   | 可用预算上限（`context_length × 0.95`） |
+| `used_tokens`    | int   | 当前累计 token 偏移                        |
+| `remaining`      | int   | 剩余可用预算                               |
+| `usage_pct`      | float | 使用率百分比                               |
 
 ## 测试接口清单
 
-**测试总数**：430 条（活跃 339 条 + legacy 91 条）
-
-运行方法：
+**活跃**: 315 passed, 4 failed（既存test_a.py）, 20 skipped（全量+legacy: 378/31/20/1）
 
 ```bash
-# 活跃测试（不含 legacy，推荐）
 cd /home/i1j/.hermes/profiles/tester/plugins/ca_assembler
 python -m pytest tests/test_pr3_injection.py tests/test_aligned_outcomes.py tests/test_tool_buffer.py tests/test_c.py tests/test_a.py tests/test_v440.py tests/test_v460.py tests/test_config.py tests/test_parse_v1.py tests/test_store_adapter.py tests/test_store.py tests/test_embedding.py tests/test_plugin.py tests/test_circuit.py tests/test_health.py tests/test_lifecycle.py tests/test_degradation.py tests/test_quality.py tests/test_system.py -v -p no:cacheprovider -o "addopts="
-
-# 全量（含 legacy 和已知失败）
-python -m pytest tests/ -q -p no:cacheprovider -o "addopts="
-
-# 最近结果
-# 活跃: 315 passed, 4 failed（test_a.py 标签注入/annotation 断言，既存）, 20 skipped
-# 全量: 378 passed, 31 failed, 20 skipped, 1 error（legacy 相关，非活跃管线问题）
 ```
-
-### 文档与源码差异
-
-| 差异点 | source 项目 | 当前部署 |
-|--------|------------|---------|
-| 代码位置 | `~/projects/context-assembler/` | `plugins/ca_assembler/` 自包含副本 |
-| `register()` | 不存在 | 已添加，注册 8 个 hooks |
-| `_state_file_path()` | `Path.home() / ".hermes"` | `get_hermes_home()`（profile 感知） |
-| `sys.path` | 无特殊处理 | 本地 `ca/` 子目录优先 |
-| 激活方式 | `context.engine: ca_assembler` | `plugins.enabled: [ca_assembler]` |
-| `_build_aligned_outcomes` | 不存在 | 已实现，mutation 模式主要入口 |
-| 注入方式 | 标签注入 `[~/N/0]` | 无标签 1:1 对齐替换（mutation 模式） |
-| `bg_review A-stage` | 不支持 | gate 跳过，C-stage 写 biz_category |
 
 ### 调试记录
 
-| 日期 | 文件 | 内容 |
-|------|------|------|
-| 2026-06-11 | `docs/debug/debug-20260611-state-db-pollution-fix.md` | state DB 内容确认 + 实装：CA post_llm_call 就地恢复 content（不碰 hermes-agent），切断污染循环 |
-| 2026-06-11 | `docs/debug/debug-20260611-biz-category-implementation.md` | biz_category 双向嵌入 + 脆弱点修复实装验证 |
-| 2026-06-11 | `docs/debug/debug-20260611-bypass-design-evolution.md` | bypass 设计演进 + biz_category 实施路径 |
-| 2026-06-10 | `docs/debug/debug-20260610-180k-context-breakdown-fix.md` | 180K 上下文崩溃根因链 + 三修复 |
-| 2026-06-10 | `docs/debug/debug-20260610-20k-dialogue-tail-refactoring.md` | 20K 对话尾区三区模型重设计 |
-| 2026-06-09 | `docs/debug/debug-20260609-tool-group-l2-reconstruction.md` | 工具组 L2 重构 + 验证 |
-| 2026-06-09 | `docs/debug/debug-20260609-tool-group-architecture.md` | 工具组架构设计 |
-| 2026-06-07 | `docs/debug/ca-deploy-debug-20260607.md` | 首次部署调试 |
+详见 `docs/debug/` 目录和 `docs/analysis/` 分析报告。
 
-### 脚本工具
+### 预算实测
 
-## 预算实测结论（2026-06-14）
-
-18 轮对话实测：
-
-- 所有行 `_assemble_status=0`（无降级）
-- budget 从未耗尽：~72K 预算 vs ~32K 使用
-- `budget=0` 只跳过检索升级（`retriever.retrieve()` 不执行）
-- **Middle L0 永远生成，不受预算约束**——这是设计
-- `_system_overhead` 默认 20K 仅作保守缓冲区，动态测量代码已移除
+所有行 `_assemble_status=0`，budget 从未耗尽。详见 [v5.2 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md)。
 
 ## ⚠️ 关键概念：CA 不是 context engine
 
@@ -478,33 +364,52 @@ Hermes 有两条完全独立的机制：
 
 ## 与 source project 的差异
 
-| 差异点                 | source 项目                       | 当前部署                              |
-| ---------------------- | --------------------------------- | ------------------------------------- |
-| 代码位置               | `~/projects/context-assembler/` | `plugins/ca_assembler/` 自包含副本  |
-| `register()`         | 不存在                            | 已添加，注册 8 个 hooks               |
-| `_state_file_path()` | `Path.home() / ".hermes"`       | `get_hermes_home()`（profile 感知） |
-| `sys.path`           | 无特殊处理                        | 本地 `ca/` 子目录优先               |
-| 激活方式               | `context.engine: ca_assembler`  | `plugins.enabled: [ca_assembler]`   |
-| `_build_aligned_outcomes` | 不存在                        | 已实现，mutation 模式主要入口        |
-| 注入方式               | 标签注入 `[~/N/0]`             | 无标签 1:1 对齐替换（mutation 模式） |
+| 差异点                      | source 项目                       | 当前部署                              |
+| --------------------------- | --------------------------------- | ------------------------------------- |
+| 代码位置                    | `~/projects/context-assembler/` | `plugins/ca_assembler/` 自包含副本  |
+| `register()`              | 不存在                            | 已添加，注册 8 个 hooks               |
+| `_state_file_path()`      | `Path.home() / ".hermes"`       | `get_hermes_home()`（profile 感知） |
+| `sys.path`                | 无特殊处理                        | 本地 `ca/` 子目录优先               |
+| 激活方式                    | `context.engine: ca_assembler`  | `plugins.enabled: [ca_assembler]`   |
+| `_build_aligned_outcomes` | 不存在                            | 已实现，mutation 模式主要入口         |
+| 注入方式                    | 标签注入 `[~/N/0]`              | 无标签 1:1 对齐替换（tool 行独立摘要）  |
+| `bg_review A-stage`       | 不支持                            | gate 跳过，C-stage 写 biz_category    |
+| l0_embedding                | 一直计算                          | 已注释（无人消费）                    |
+| 工具组输出                  | 旧紧凑格式（header+各工具详情）   | v5.2 精简为仅 header                 |
 
 ## 脚本工具
 
-| 脚本 | 说明 |
-|------|------|
+| 脚本                                   | 说明                             |
+| -------------------------------------- | -------------------------------- |
 | `scripts/backfill_tool_summaries.py` | 历史工具摘要回填（修复存量数据） |
-| `scripts/benchmark_l1.py` | L1 生成性能基准测试 |
+| `scripts/benchmark_l1.py`            | L1 生成性能基准测试              |
 
 ## 相关文档
 
 所有文档按类别归档在 `docs/` 下：
 
-| 类别 | 目录 | 内容 |
-|------|------|------|
-| 变更历史 | `docs/changelog.md` | 全版本变更记录（唯一权威源） |
-| 设计 | `docs/design/` | 技术方案、话题拣选、系统分析、改进方案 |
-| 调试 | `docs/debug/` | 调试报告、修复验证、部署调试 |
-| 评审 | `docs/review/` | 交叉评审（开发线/测试线） |
-| 测试计划 | `docs/test-plans/` | 试验计划 |
-| L1 重构 | `docs/ca-l1-refactor/` | 白皮书、需求、方案、测试 |
-| 工具轮重构 | `docs/design/` | 分析文档（tool-turn-refactor-analysis.md）、技术方案（technical-plan.md） |
+| 类别       | 目录                            | 内容                                                                      |
+| ---------- | ------------------------------- | ------------------------------------------------------------------------- |
+| 变更历史   | `docs/changelog.md`           | 全版本变更记录（唯一权威源）                                              |
+| 设计       | `docs/design/`                | 设计方案、系统分析、改进方案                                              |
+| 分析       | `docs/analysis/`              | 缓存分析、注入重构报告（v5.1）                                            |
+| 调试       | `docs/debug/`                 | 调试报告、修复验证、部署调试                                              |
+| 评审       | `docs/review/`                | 交叉评审（开发线/测试线）                                                 |
+| 测试计划   | `docs/test-plans/`            | 试验计划                                                                  |
+| L1 重构    | `docs/ca-l1-refactor/`        | 白皮书、需求、方案、测试                                                  |
+| 工具轮重构 | `docs/tool-turn-refactor/`    | 分析文档、技术方案、需求、测试需求                                        |
+
+## 知识图谱（graphify）
+
+`graphify-out/` 目录包含项目代码的静态知识图谱分析产物，用于快速理解架构和数据流。
+
+| 文件 | 用途 |
+|------|------|
+| `GRAPH_REPORT.md` | 图谱概况：2210 节点、2930 边、303 社区。God Nodes 排名、边关系分布、动态数据流、建议查询问题 |
+| `graph.html` | 可交互图谱（浏览器打开），可视化节点与边关系 |
+| `graph.json` | 完整图谱数据（节点+边），可被代码分析工具消费 |
+| `manifest.json` | 文件清单（AST 哈希、mtime），用于增量更新检测 |
+| `cache/` | AST 解析缓存，加速后续 graphify 重建 |
+| `.graphify_labels.json` | 社区标签映射 |
+
+**何时使用**：代码重构前、跨模块数据流追踪、定位 God Nodes（高耦合中心如 `ContextAssembler` 100 度、`SQLiteStore` 62 度）。

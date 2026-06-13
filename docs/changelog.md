@@ -34,6 +34,7 @@
 | **v4.3.2‑ooda‑fix**    | 2026-06-01 | 调查：OODA 解析器冒号剥离 | `_extract_sections` content 提取后前导冒号未剥离，导致 `core_change` 带 `：` 前缀（如 `：对话中多次查询...`）。详见 [bug-007](../tests/docs/bugs/bug-007-ooda-parser-core-change-colon-prefix.md)。 | **已归档** |
 || **v5.0-pr4‑inject‑fix** | 2026-06-09 | 注入层微修复批 | read_turn_texts l1/l0 缺 api_call_count 过滤（同 turn 多工具组 l1 相同）；_format_group_summary thought+intent 重复；L0 工具组缺 "工具组：" 前缀；_format_l1_for_display 占位符噪声。详见 [debug-20260609-1842-injection-layer-fix-batch.md](docs/debug/debug-20260609-1842-injection-layer-fix-batch.md)。 | **已修复** |
 | **v4.4.0‑ooda‑fix**    | 2026-06-03 | 修复：OODA 解析器前导冒号 | 在 `_extract_sections` content 提取后追加 `.lstrip(\\\":：　 \\\")`，去除全角/半角冒号。见 [bug-007](../tests/docs/bugs/bug-007-ooda-parser-core-change-colon-prefix.md)。 | **已修复** |
+| **v5.2**               | 2026-06-13 | 缓存分析 + 注入重构 | ① l0_embedding 孤儿数据清除（从未被消费，注释全部计算链路+删死代码 `retrieve_l0_upgrade`）② `tool_plan` 独立 tool 行决策（v5.2）：`_AssemblePlanResult.tool_plan`, `_compute_tool_plan_v2`, `_build_aligned_outcomes`/`_build_messages_from_plan` 签名扩展, `_format_tool_group_assembly` 精简为仅 header, tool 行输出 `[~/N/M]` 独立标签 ③ `_mutation_mode` 中 bg_review 轮由 `\" \"` 改为从 DB 读取 L1/L0 填充。详见 [v5.1 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md)。 | **发布** |
 
 ---
 

@@ -132,65 +132,45 @@ class TestMergeConsecutiveToolOutcomes:
 
 
 # ──────────────────────────────────────────────
-# _format_group_summary 边缘场景
+# _format_tool_group_assembly 边缘场景
 # ──────────────────────────────────────────────
 
-class TestFormatGroupSummary:
+class TestFormatToolGroupAssembly:
 
-    def test_fgs_empty_intent_with_result(self, ca_engine):
-        """group_intent 空但有 result → 不裸 →，显示 '执行 N 个工具 →'"""
+    def test_fta_old_json_format(self, ca_engine):
+        """旧 JSON 格式（有 thought 字段）→ 提取 thought"""
         l1 = json.dumps({
-            "group_intent": "", "group_result": "文件内容",
+            "group_intent": "查文件", "group_result": "aaa",
+            "tool_count": 2, "state": "ok",
+            "thought": "我想查一下文件系统",
+        }, ensure_ascii=False)
+        text = ca_engine._format_tool_group_assembly(l1)
+        assert "我想查一下文件系统" in text
+
+    def test_fta_old_json_no_thought(self, ca_engine):
+        """旧 JSON 格式（无 thought）→ 降级到 group_intent"""
+        l1 = json.dumps({
+            "group_intent": "查文件", "group_result": "aaa",
             "tool_count": 2, "state": "ok",
         }, ensure_ascii=False)
-        text = ca_engine._format_group_summary(l1)
-        assert "工具组" in text
-        assert "执行 2 个工具" in text
-        assert "文件内容" in text
-        assert "→" in text  # 有 prefix 的 →
-
-    def test_fgs_empty_intent_no_result(self, ca_engine):
-        """group_intent 和 result 都空 → 回退到纯工具计数"""
-        l1 = json.dumps({
-            "group_intent": "", "group_result": "",
-            "tool_count": 3, "state": "ok",
-        }, ensure_ascii=False)
-        text = ca_engine._format_group_summary(l1)
-        assert "工具组" in text
-        assert "3个" in text
-
-    def test_fgs_empty_all_no_tools(self, ca_engine):
-        """全部空且 tool_count=0 → 空字符串"""
-        l1 = json.dumps({
-            "group_intent": "", "group_result": "",
-            "tool_count": 0, "state": "ok",
-        }, ensure_ascii=False)
-        text = ca_engine._format_group_summary(l1)
-        assert text == ""
-
-    def test_fgs_long_result_truncated(self, ca_engine):
-        """result 超过 80 字符 → 截断"""
-        long = "a" * 100
-        l1 = json.dumps({
-            "group_intent": "查文件", "group_result": long,
-            "tool_count": 1, "state": "ok",
-        }, ensure_ascii=False)
-        text = ca_engine._format_group_summary(l1)
+        text = ca_engine._format_tool_group_assembly(l1)
         assert "查文件" in text
-        assert "…" in text  # 截断标记
-        assert len(text) < 140  # 摘要长度合理
 
-    def test_fgs_intent_and_result(self, ca_engine):
-        """正常路径：intent+result = 完整格式"""
-        l1 = json.dumps({
-            "group_intent": "查文件", "group_result": "aaa；x.py",
-            "tool_count": 3, "state": "ok",
-        }, ensure_ascii=False)
-        text = ca_engine._format_group_summary(l1)
-        assert "查文件" in text
-        assert "aaa" in text
-        assert "3个" in text
-        assert "ok" in text
+    def test_fta_new_plain_text(self, ca_engine):
+        """新格式纯文本 → 直接返回"""
+        text = ca_engine._format_tool_group_assembly("我想查一下文件系统")
+        assert "我想查一下文件系统" in text
+
+    def test_fta_empty(self, ca_engine):
+        """空输入 → 空字符串"""
+        assert ca_engine._format_tool_group_assembly("") == ""
+        assert ca_engine._format_tool_group_assembly(None) == ""
+
+    def test_fta_truncation(self, ca_engine):
+        """超长文本截断"""
+        long_text = "a" * 200
+        text = ca_engine._format_tool_group_assembly(long_text)
+        assert len(text) <= 105  # _safe_truncate 100 + 允许少量余量
 
 
 # ──────────────────────────────────────────────
@@ -199,48 +179,50 @@ class TestFormatGroupSummary:
 
 class TestGenerateGroupSummary:
 
-    def test_ggs_empty_thought_falls_back_to_tool_names(self):
-        """thought 空时 group_intent 用工具名称归约"""
+    def test_ggs_thought_truncation(self):
+        """有 thought 时返回截断文本"""
         from ca.tool_summarizer import ToolSummarizer
-        result = ToolSummarizer.generate_group_summary("", [
-            {"tool_name": "read_file", "status": "ok", "result_summary": "aaa"},
-            {"tool_name": "search_files", "status": "ok", "result_summary": "bbb"},
-        ])
-        assert result["group_intent"], f"Expected non-empty intent, got '{result['group_intent']}'"
-        assert "read_file" in result["group_intent"] or "search_files" in result["group_intent"], \
-            f"Expected tool names in intent, got '{result['group_intent']}'"
+        result = ToolSummarizer.generate_group_summary("我想查一下文件系统")
+        assert isinstance(result, str)
+        assert "文件系统" in result
 
-    def test_ggs_empty_thought_single_tool(self):
-        """空 thought 单工具时 intent 含工具名"""
+    def test_ggs_empty_thought_fallback(self):
+        """thought 空时返回空字符串"""
         from ca.tool_summarizer import ToolSummarizer
-        result = ToolSummarizer.generate_group_summary(None, [
-            {"tool_name": "terminal", "status": "ok", "result_summary": "output"},
-        ])
-        assert result["group_intent"]
-        assert "terminal" in result["group_intent"]
+        result = ToolSummarizer.generate_group_summary("")
+        assert result == ""
 
-    def test_ggs_single_tool_result_delegated(self):
-        """单工具时 group_result 不包含工具细节"""
+    def test_ggs_none_thought_fallback(self):
+        """None thought 时返回空字符串"""
         from ca.tool_summarizer import ToolSummarizer
-        result = ToolSummarizer.generate_group_summary("查文件", [
-            {"tool_name": "read_file", "status": "ok",
-             "result_summary": "aaa文件内容很长很详细"},
-        ])
-        # group_result 应该是通用描述，不重复工具的 result_summary
-        assert "调用 1 个工具" in result["group_result"], \
-            f"Expected generic, got '{result['group_result']}'"
-        assert "aaa" not in result["group_result"], \
-            "Single-tool group_result should NOT contain tool result_summary"
+        result = ToolSummarizer.generate_group_summary(None)
+        assert result == ""
 
-    def test_ggs_multi_tool_aggregates(self):
-        """多工具时 group_result 聚合各工具 result_summary"""
+    def test_ggs_sentence_truncation(self):
+        """句尾截断：超过 100 字时在 。处断开"""
         from ca.tool_summarizer import ToolSummarizer
-        result = ToolSummarizer.generate_group_summary("查文件", [
-            {"tool_name": "read_file", "status": "ok", "result_summary": "aaa"},
-            {"tool_name": "search_files", "status": "ok", "result_summary": "bbb"},
-        ])
-        assert "aaa" in result["group_result"]
-        assert "bbb" in result["group_result"]
+        long_thought = "先查询用户信息表了解用户的基本情况。" + "再处理".join(["的" * 20] * 10)
+        long_thought += "。最后输出结果"
+        result = ToolSummarizer.generate_group_summary(long_thought)
+        assert len(result) <= 105  # 允许少量超额
+        assert result.endswith("。") or result.endswith("。")  # 句号结尾
+
+    def test_ggs_no_llm_call(self):
+        """generate_group_summary 不调 LLM"""
+        from ca.tool_summarizer import ToolSummarizer
+        result = ToolSummarizer.generate_group_summary("thought test")
+        assert isinstance(result, str)
+
+    def test_ggs_transition_phrase_excluded(self):
+        """过渡词被剥离，后面的真正 thought 被引用"""
+        from ca.tool_summarizer import ToolSummarizer
+        # 仅为过渡词 → 返回空
+        assert ToolSummarizer.generate_group_summary("开始。") == ""
+        assert ToolSummarizer.generate_group_summary("查代码。") == ""
+        assert ToolSummarizer.generate_group_summary("明白了。") == ""
+        # 过渡词开头 + 真正 thought → 剥离后引用后者
+        assert ToolSummarizer.generate_group_summary("开始。先定位数据源。") == "先定位数据源。"
+        assert ToolSummarizer.generate_group_summary("开始审视。看看情况。") == "看看情况。"
 
 
 # ──────────────────────────────────────────────
@@ -316,10 +298,8 @@ class TestBuildAlignedOutcomes:
         ]
         outcomes = engine._build_aligned_outcomes(plan, history)
         assert len(outcomes) == 4
-        # dialogue L1 → 摘要文本
-        assert outcomes[0] is not None, "dialogue L1 should produce text"
-        assert outcomes[0] != "", "dialogue L1 should not be empty"
-        assert outcomes[0] != ""  # no [~/N/M] tag
+        # dialogue L1 → None（保留用户原文）
+        assert outcomes[0] is None, "user row should preserve original input"
         # tool_group L1 → group summary
         assert outcomes[1] is not None, "tool_group L1 should produce text"
         # tool L1 → tool summary
@@ -375,8 +355,8 @@ class TestBuildAlignedOutcomes:
             {"role": "assistant", "content": "好的", "finish_reason": "stop"},
         ]
         outcomes = engine._build_aligned_outcomes(plan, history)
-        # dialogue L0 → l0 摘要
-        assert outcomes[0] is not None
+        # dialogue L0 → None（保留用户原文）
+        assert outcomes[0] is None, "user row should preserve original input"
         # assistant{tc} 和 tool 在 plan 无 tool_group entry → None / ""
         assert outcomes[1] is None
         assert outcomes[2] == "", "tool without plan entry should be removed"

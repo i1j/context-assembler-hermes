@@ -116,10 +116,12 @@ class BackfillThread(threading.Thread):
         if "core_change" not in cleaned:
             cleaned["core_change"] = "本轮无新内容"
         l1_str = json.dumps(cleaned, ensure_ascii=False)
-        l0 = cleaned.get("core_change", "")[:100]
+        l0 = self.engine._extract_l0(cleaned)
         try:
             l1_emb = self.engine.embed_client.embed(l1_str)
-            l0_emb = self.engine.embed_client.embed(l0)
+            # l0_emb 不再使用（2026-06-13，见 graphify 分析报告）
+            # l0_emb = self.engine.embed_client.embed(l0)
+            l0_emb = None
         except Exception:
             l1_emb = None
             l0_emb = None
@@ -157,7 +159,9 @@ class BackfillThread(threading.Thread):
 
             try:
                 l1_emb = self.engine.embed_client.embed(json.dumps(tool_l1, ensure_ascii=False))
-                l0_emb = self.engine.embed_client.embed(tool_l0)
+                # l0_emb 不再使用（2026-06-13，见 graphify 分析报告）
+                # l0_emb = self.engine.embed_client.embed(tool_l0)
+                l0_emb = None
             except Exception:
                 l1_emb = None
                 l0_emb = None
@@ -172,7 +176,7 @@ class BackfillThread(threading.Thread):
                 session_id, turn_idx,
                 l0_text=tool_l0,
                 l1_text=json.dumps(tool_l1, ensure_ascii=False),
-                l0_embedding=l0_emb,
+                l0_embedding=None,
                 l1_embedding=l1_emb,
                 api_call_count=api_count, seq_index=sub_index,
                 role='tool', content=tool_content,

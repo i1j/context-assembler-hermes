@@ -431,7 +431,7 @@ class CAContextAssemblerPlugin:
         """annotation 模式：从 outcomes 提取非 None 文本拼接返回，不碰 history。"""
         if isinstance(result, list):
             return None  # degraded
-        outcomes = self._engine._build_aligned_outcomes(result.plan, conversation_history, bypass_turns=result.bypass_turns)
+        outcomes = self._engine._build_aligned_outcomes(result.plan, conversation_history, bypass_turns=result.bypass_turns, tool_plan=result.tool_plan)
         parts = [o for o in outcomes if o]
         if not parts:
             return None
@@ -461,7 +461,7 @@ class CAContextAssemblerPlugin:
 
         # 1. 构建 1:1 outcomes
         try:
-            outcomes = self._engine._build_aligned_outcomes(result.plan, conversation_history, bypass_turns=result.bypass_turns)
+            outcomes = self._engine._build_aligned_outcomes(result.plan, conversation_history, bypass_turns=result.bypass_turns, tool_plan=result.tool_plan)
         except Exception as exc:
             logger.warning("_build_aligned_outcomes() failed: %s", exc)
             return None
@@ -478,6 +478,18 @@ class CAContextAssemblerPlugin:
                 _bg_ts = {t for t, c in _biz_cats.items() if c == "bg_review"}
         except Exception:
             pass
+
+        # 预加载 bg_review 轮完整数据（对话轮 L1/L0 + 工具轮 L0）
+        _bg_rows: Dict[int, List[Dict]] = {}
+        if _bg_ts:
+            try:
+                _all = self._engine.store.read_session(self._session_id)
+                for rec in _all:
+                    t = rec.get("turn_index")
+                    if t in _bg_ts:
+                        _bg_rows.setdefault(t, []).append(rec)
+            except Exception:
+                pass
 
         # 计算尾区边界：按非 bg_review 对话轮计数，最后 2 轮 + 当前 Q 保留
         # （数字非 biz 对话 turn，到倒数第 3 个非 bg_review 对话 user 消息为止）
@@ -503,19 +515,68 @@ class CAContextAssemblerPlugin:
             outcome = outcomes[i]
             msg = conversation_history[i]
             if outcome is None:
-                # 后台对话轮（非尾区）→ 清空；尾区或其他 → 保留原文
+                # 后台对话轮（非尾区）→ 用 L1/L0 填充；尾区或其他 → 保留原文
                 if _bg_ts and msg.get("role") != "system":
                     _turn = msg.get("_turn_index")
                     if _turn is None and msg["role"] == "user":
                         _fallback_turn += 1
                         _turn = _fallback_turn
                     if _turn in _bg_ts and i < _tail_boundary:
-                        msg["content"] = " "
+                        _bg_records = _bg_rows.get(_turn, [])
+                        _role = msg.get("role")
+                        if _role == "user":
+                            _rec = next((r for r in _bg_records if r.get("role") == "user"), None)
+                            _l1 = _rec.get("l1_text", "") if _rec else ""
+                            _l0 = _rec.get("l0_text", "") if _rec else ""
+                            if _l1:
+                                msg["content"] = self._engine._format_l1_for_display(_l1)
+                            elif _l0:
+                                msg["content"] = _l0
+                            else:
+                                msg["content"] = " "
+                        elif _role == "assistant" and msg.get("tool_calls"):
+                            _api = msg.get("_api_call_count", 0)
+                            _rec = next(
+                                (r for r in _bg_records if r.get("api_call_count") == _api
+                                 and r.get("seq_index") == 0 and r.get("role") == "assistant"),
+                                None,
+                            )
+                            _l1 = _rec.get("l1_text", "") if _rec else ""
+                            _l0 = _rec.get("l0_text", "") if _rec else ""
+                            if _l1:
+                                msg["content"] = self._engine._format_tool_group_assembly(
+                                    _l1, conversation_history, _turn, _api)
+                            elif _l0:
+                                msg["content"] = _l0
+                            else:
+                                msg["content"] = " "
+                        else:
+                            msg["content"] = " "
                         _bg_cleared += 1
                 continue
             if outcome == "":
-                msg["content"] = " "
-                skipped += 1
+                # 工具行：优先检查是否为 bg_review → L0 填充
+                _turn = msg.get("_turn_index")
+                if _turn in _bg_ts:
+                    _seq = msg.get("_seq_index", 0)
+                    _api = msg.get("_api_call_count", 0)
+                    _bg_records = _bg_rows.get(_turn, [])
+                    _rec = next(
+                        (r for r in _bg_records if r.get("api_call_count") == _api
+                         and r.get("seq_index") == _seq
+                         and r.get("role") == "tool"),
+                        None,
+                    )
+                    _l0 = _rec.get("l0_text", "") if _rec else ""
+                    if _l0:
+                        msg["content"] = _l0
+                        _bg_cleared += 1
+                    else:
+                        msg["content"] = " "
+                        skipped += 1
+                else:
+                    msg["content"] = " "
+                    skipped += 1
             else:
                 msg["content"] = outcome
                 replaced += 1

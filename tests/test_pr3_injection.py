@@ -142,9 +142,9 @@ class TestTripleLevelInjection:
         result = engine._build_messages_from_plan(plan, messages)
         all_tags_str = " ".join(str(m.get("content","")) for m in result)
 
-        # 工具组 [~/1/1]（非尾区 L1 → 格式化组摘要）
+        # 工具组 [~/1/1]（非尾区 L1 → 提取 thought/group_intent）
         assert "[~/1/1]" in all_tags_str, f"Missing [~/1/1] in {all_tags_str}"
-        assert "工具组" in all_tags_str, f"Missing '工具组' in {all_tags_str}"
+        assert "查文件" in all_tags_str, f"Missing '查文件' in {all_tags_str}"
         # 不应再有旧的 [~/N/g] 标记
         assert "[~/1/g]" not in all_tags_str, f"Unexpected [~/1/g] tag in {all_tags_str}"
 
@@ -184,8 +184,8 @@ class TestTripleLevelInjection:
         # 工具轮数据
         assert len(tool_l1_texts) > 0, f"No tool entries in cache: {tool_l1_texts}"
 
-    def test_format_group_summary_in_build(self, ca_engine):
-        """_build_messages_from_plan 对工具组条目格式化 group L1"""
+    def test_format_tool_group_in_build(self, ca_engine):
+        """_build_messages_from_plan 对工具组条目格式化 tool group L1"""
         engine = ca_engine
         group_l1 = json.dumps({
             "group_intent": "查文件", "group_result": "aaa",
@@ -201,47 +201,32 @@ class TestTripleLevelInjection:
                           l2_tokens=10, summary_tokens=5, tokens_saved=5),
         ]
 
-        # 直接验证 _format_group_summary
-        formatted = engine._format_group_summary(group_l1)
-        assert "工具组" in formatted
+        # 旧 JSON 格式 → 兼容层提取 thought/group_intent
+        formatted = engine._format_tool_group_assembly(group_l1)
         assert "查文件" in formatted
-        assert "1个" in formatted
 
-        # 含 thought 字段时也显示（当前 _format_group_summary 已不包含 thought 文本）
+        # 含 thought 字段的旧格式 → 优先提取 thought
         group_l1_with_thought = json.dumps({
             "group_intent": "查文件", "group_result": "aaa",
             "tool_count": 1, "state": "ok",
             "thought": "用户想查找文件"
         }, ensure_ascii=False)
-        ft2 = engine._format_group_summary(group_l1_with_thought)
-        assert "工具组" in ft2
-        assert "查文件" in ft2
+        ft2 = engine._format_tool_group_assembly(group_l1_with_thought)
+        assert "用户想查找文件" in ft2
 
     def test_generate_group_summary(self):
-        """generate_group_summary 纯文本拼接，返回正确 schema"""
+        """generate_group_summary 返回 thought 截断纯文本（非 JSON）"""
         from ca.tool_summarizer import ToolSummarizer
         thought = "我想查一下文件系统"
-        tool_results = [
-            {"tool_name": "read_file", "status": "ok", "result_summary": "找到文件"},
-            {"tool_name": "search_files", "status": "ok", "result_summary": "匹配3个"},
-        ]
-        result = ToolSummarizer.generate_group_summary(thought, tool_results)
-        assert result["group_intent"] == "我想查一下文件系统"
-        assert "找到文件" in result["group_result"] or "匹配" in result["group_result"]
-        assert result["tool_count"] == 2
-        assert result["state"] == "ok"
-        assert result.get("thought") == "我想查一下文件系统", f"thought 未保留: {result.get('thought')}"
+        result = ToolSummarizer.generate_group_summary(thought)
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        assert "我想查一下文件系统" in result or result == "我想查一下文件系统"
 
     def test_generate_group_summary_partial_error(self):
-        """generate_group_summary 有工具失败时 state=error"""
+        """generate_group_summary 有工具失败时——不再关心 state（纯文本），仅验证返回 str"""
         from ca.tool_summarizer import ToolSummarizer
-        tool_results = [
-            {"tool_name": "read_file", "status": "ok", "result_summary": "aaa"},
-            {"tool_name": "write_file", "status": "error", "result_summary": "权限不足"},
-        ]
-        result = ToolSummarizer.generate_group_summary("测试", tool_results)
-        assert result["state"] == "error"
-        assert result["tool_count"] == 2
+        result = ToolSummarizer.generate_group_summary("测试")
+        assert isinstance(result, str)
 
     def test_generate_group_summary_no_llm_call(self, ca_engine, monkeypatch):
         """generate_group_summary 零 LLM 调用"""
@@ -252,7 +237,7 @@ class TestTripleLevelInjection:
             call_count += 1
             return "", "stop"
         monkeypatch.setattr(ca_engine, '_call_llm_for_l1', assert_no_call)
-        ToolSummarizer.generate_group_summary("thought", [{"tool_name": "t", "status": "ok", "result_summary": "ok"}])
+        ToolSummarizer.generate_group_summary("thought")
         assert call_count == 0, f"generate_group_summary 不应调 LLM, 实际调用 {call_count} 次"
 
 

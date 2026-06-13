@@ -13,9 +13,50 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import ClassVar, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+# ── PyYAML（可选）：从 settings.yaml 加载默认值 ──
+_YAML_AVAILABLE = False
+try:
+    import yaml as _yaml
+    _YAML_AVAILABLE = True
+except ImportError:
+    pass
+
+
+_YAML_DEFAULTS: Dict[str, Any] = {}
+_settings_path: Optional[str] = None
+
+
+def _load_settings_yaml() -> Dict[str, Any]:
+    """从 ca/settings.yaml 加载默认配置值。
+
+    仅类级别调用一次（import 时），后续热重载不重新读取 YAML。
+    重复加载因 logger 可能尚未初始化而不可靠——热重载时保持 YAML 值不变，
+    仅通过环境变量覆盖。
+
+    Returns:
+        YAML 配置字典（文件不存在或解析失败时返回空字典）
+    """
+    if not _YAML_AVAILABLE:
+        return {}
+    global _settings_path
+    if _settings_path is None:
+        _settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.yaml")
+    try:
+        with open(_settings_path, "r") as _f:
+            _data = _yaml.safe_load(_f)
+        if isinstance(_data, dict):
+            return _data
+    except Exception:
+        pass  # 静默失败，使用硬编码默认值
+    return {}
+
+
+_YAML_DEFAULTS = _load_settings_yaml()
+
 
 # _assemble_status 常量
 ASSEMBLE_OK = 0
@@ -68,7 +109,10 @@ class Config:
         logger.warning("Invalid CA_LLM_THINK: '%s', ignoring", raw)
         return None
 
-    PROTECT_TAIL_TOKENS: ClassVar[int] = int(os.getenv("CA_PROTECT_TAIL_TOKENS", "10000"))
+    PROTECT_TAIL_TOKENS: ClassVar[int] = int(os.getenv(
+        "CA_PROTECT_TAIL_TOKENS",
+        str(_YAML_DEFAULTS.get("protect_tail_tokens", "10000")),
+    ))
 
     # 工具尾区保护：只保留最近 N 个对话轮的工具原文。
     # 工具轮与对话轮功能不同——对话需要 20K token 尾区保护，

@@ -179,14 +179,6 @@ class Retriever:
                     break
         return result
 
-    @staticmethod
-    def retrieve_l0_upgrade(prev_l1_emb: List[float],
-                            l0_embeddings: Dict[TurnKey, List[float]],
-                            top_n: int = 3) -> List[TurnKey]:
-        if not l0_embeddings:
-            return []
-        ranked = cosine_similarity_batch(prev_l1_emb, l0_embeddings)
-        return [k for k, _ in ranked[:top_n]]
 
 
 def _rrf_fuse(ranked_lists: List, k: int = 60) -> List[TurnKey]:

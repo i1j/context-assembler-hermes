@@ -883,81 +883,40 @@ class ToolSummarizer:
         s = s.replace("/home/i1j", "~")
         return s[:max_len]
 
+    # 无信息量的过渡词/句（作前缀剥离用，不含句号也匹配）
+    _TRANSITION_PREFIXES = sorted([
+        "开始。", "开始审视。", "查代码。", "明白了。",
+        "开始", "开始审视", "查代码", "明白了",
+    ], key=len, reverse=True)  # 长串优先匹配
+
     @staticmethod
     def generate_group_summary(thought: str,
-                                tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """纯文本拼接工具组摘要，不调 LLM。
+                                tool_results: List[Dict[str, Any]] = None) -> str:
+        """从 thought 提取工具组摘要（≤100 字符，按句尾截断）。
 
-        Args:
-            thought: assistant 的思考文本
-            tool_results: 工具结果列表，每项含 tool_name / status / result_summary
+        tool_results 参数已弃用——仅保留签名兼容历史调用。
+        返回纯文本（非 JSON），直接写入 l1_text 供 A-stage 注入。
 
         Returns:
-            {"group_intent": str, "group_result": str,
-             "tool_count": int, "state": "ok"|"error"|"blocked"|"cancelled"}
+            纯文本摘要（≤100 字符）；如果 thought 为空或仅为过渡词则返回 ""
         """
-        # 1. group_intent：截取 thought 首句（≤80 字符）；无 thought 时用工具名前缀
-        intent = (thought or "").strip().split("\n")[0][:80]
-        if not intent:
-            unique_tools = list(dict.fromkeys(
-                tr.get("tool_name", "?") for tr in (tool_results or [])
-            ))
-            tool_list = ", ".join(unique_tools[:3])
-            if unique_tools:
-                intent = f"调用 {tool_list}"
-                if len(unique_tools) > 3:
-                    intent += " 等工具"
-            else:
-                intent = "工具调用"
+        text = (thought or "").strip()
+        if not text:
+            return ""
 
-        # 2. group_result：汇总各工具 result_summary
-        ok_count = 0
-        error_count = 0
-        tool_names = []
-        for tr in (tool_results or []):
-            name = tr.get("tool_name", "?")
-            tool_names.append(name)
-            st = tr.get("status", "ok")
-            if st == "ok":
-                ok_count += 1
-            else:
-                error_count += 1
+        # 剥离无信息量的过渡词前缀，露出真正的 thought
+        for prefix in ToolSummarizer._TRANSITION_PREFIXES:
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+                break
+        if not text:
+            return ""
 
-        # 确定整体状态
-        if error_count > 0 and ok_count == 0:
-            state = "error"
-        elif error_count > 0:
-            state = "error"  # 有工具失败就标 error（保守策略）
-        elif ok_count > 0:
-            state = "ok"
-        else:
-            state = "ok"
+        # 优先按句尾截断（中文句号/问号/感叹号 + 英文句号/叹号/问号）
+        for sep in ("\n\n", "。", "！", "？", ".", "!", "?"):
+            cut = text.find(sep)
+            if cut != -1 and cut <= 90:  # 留 10 字符余量
+                return text[:cut + len(sep)]
 
-        # 工具名去重后摘要
-        unique_tools = list(dict.fromkeys(tool_names))
-        tool_list = ", ".join(unique_tools[:5])
-        if len(unique_tools) > 5:
-            tool_list += f" 等 {len(unique_tools)} 种工具"
-
-        result_parts = []
-        for tr in (tool_results or []):
-            rs = tr.get("result_summary", "")
-            if rs:
-                result_parts.append(rs)
-
-        # 单工具组的 group_result 不重复工具细节——由工具行独占
-        if len(tool_results) <= 1:
-            group_result = f"调用 {len(tool_results)} 个工具"
-        else:
-            result_str = "；".join(result_parts[:3])
-            if len(result_parts) > 3:
-                result_str += "…"
-            group_result = result_str if result_str else f"调用 {len(tool_results)} 个工具"
-
-        return {
-            "group_intent": intent,
-            "group_result": group_result,
-            "tool_count": len(tool_results),
-            "state": state,
-            "thought": (thought or "")[:200],
-        }
+        # 退到常规截断
+        return _safe_truncate(text, 100)

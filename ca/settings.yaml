@@ -21,8 +21,7 @@ keep_alive: 1800                     # 30m，模型驻留秒数
 
 # ── 上下文预算 ──
 context_length: 50000
-protect_tail_tokens: 20000
-system_overhead: 20000
+protect_tail_tokens: 20000       # 当前话题块 Token 保护安全阀（被 _YAML_DEFAULTS 读取为 Config 类默认值）
 
 # ── 检索升级 ──
 tool_max_upgrade_k: 3
