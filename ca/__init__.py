@@ -229,6 +229,7 @@ class _AssemblePlanResult:
     stats: Any
     tokens_before: int
     bypass_turns: Set[int] = field(default_factory=set)
+    tool_plan: List[TurnPlanEntry] = field(default_factory=list)  # 独立 tool 行 entries (v5.2)
 
 
 class ContextAssembler:
@@ -724,28 +725,18 @@ class ContextAssembler:
                 )
                 total_rows += 1
 
-            # ④ 用工具轮 L1 result_summary 拼组摘要，而非 raw content[:80]
-            tool_results_for_summary = [
-                {"tool_name": s["tool_name"], "status": s["status"],
-                 "result_summary": s["result_summary"]}
-                for s in per_tool_summaries
-            ]
-            group_summary = ToolSummarizer.generate_group_summary(
-                buf.thought, tool_results_for_summary
-            )
+            # ④ 用 buf.thought 生成纯文本组摘要（不再拼接 tool_results）
+            group_summary_text = ToolSummarizer.generate_group_summary(buf.thought)
 
-            # 组 L0：拼接各工具 L0
-            group_l0_parts = [s["l0"] for s in per_tool_summaries[:5]]
-            group_l0 = " | ".join(group_l0_parts)
-            if len(per_tool_summaries) > 5:
-                group_l0 += "..."
+            # 组 L0：占位符（工具组 L0 已无用，由独立 tool 行覆盖）
+            group_l0 = " "
 
             # ⑤ assistant{tc} 行 (api=N, seq=0)
             tool_calls_json = json.dumps(buf.tool_defs, ensure_ascii=False)
             self.store.write_turn(
                 self._session_id, turn_idx,
                 l0_text=group_l0,
-                l1_text=json.dumps(group_summary, ensure_ascii=False),
+                l1_text=group_summary_text,
                 l0_embedding=None, l1_embedding=None,
                 token_offset=0,
                 api_call_count=buf.api_call_count, seq_index=0,
@@ -756,10 +747,10 @@ class ContextAssembler:
             )
             total_rows += 1
 
-            # ⑥ 同步更新内存缓存，供下一轮 A‑stage 组装使用
+            # ⑥ 同步更新内存缓存（纯文本，下轮 A-stage 使用）
             self.cache.add_tool_group(
                 turn_idx, buf.api_call_count,
-                group_l0, json.dumps(group_summary, ensure_ascii=False),
+                group_l0, group_summary_text,
             )
 
         # ④ 清空 buffer
@@ -909,7 +900,7 @@ class ContextAssembler:
         if isinstance(result, list):
             return result  # degraded path: raw messages
         with result.stats.time_phase("build"):
-            final = self._build_messages_from_plan(result.plan, result.messages, bypass_turns=result.bypass_turns)
+            final = self._build_messages_from_plan(result.plan, result.messages, bypass_turns=result.bypass_turns, tool_plan=result.tool_plan)
 
         if Config.is_dedup_enabled():
             with result.stats.time_phase("dedup"):
@@ -1058,11 +1049,14 @@ class ContextAssembler:
                     e.biz_category = _biz_cats[e.turn_index]
             self.store.write_turn_plan(self._session_id, [e.as_dict() for e in plan])
 
+        # ── tool_plan：独立 tool 行决策（v5.2），不持久化到 turn_plan（运行时派生）──
+        tool_plan = self._compute_tool_plan_v2(messages, plan)
+
         # ── 最后 3 个对话轮旁路（bg_review 已从 plan 过滤，无需特判）──
         _dialogue_entries = [e for e in plan if e.turn_type == "dialogue"]
         _bypass_turns: Set[int] = {e.turn_index for e in _dialogue_entries[-3:]}
 
-        return _AssemblePlanResult(plan, messages, stats, tokens_before, _bypass_turns)
+        return _AssemblePlanResult(plan, messages, stats, tokens_before, _bypass_turns, tool_plan)
 
 
     def _available_budget(self, context_length, messages, tail_protected_turns: Set[int],
@@ -1546,6 +1540,59 @@ class ContextAssembler:
             return ""
         return _safe_truncate(text, max_chars)
 
+    def _compute_tool_plan_v2(self, messages: List[Dict],
+                               dialogue_plan: List[TurnPlanEntry]) -> List[TurnPlanEntry]:
+        """为每条独立 tool 行生成决策条目。
+
+        规则：tool 行 target_level = 父对话轮级别 - 1
+          parent L2 → tool L1
+          parent L1 → tool L0
+          parent L0 → skip（不生成条目）
+
+        返回 tool_plan，每一条对应 conversation_history 中的一条 tool 行。
+        """
+        dialogue_by_turn: Dict[int, TurnPlanEntry] = {
+            e.turn_index: e for e in dialogue_plan if e.turn_type == "dialogue"
+        }
+        tool_plan: List[TurnPlanEntry] = []
+
+        for msg in messages:
+            if msg.get("role") != "tool":
+                continue
+            turn = msg.get("_turn_index")
+            seq = msg.get("_seq_index", 0)
+            if turn is None:
+                continue
+
+            parent = dialogue_by_turn.get(turn)
+            parent_level = parent.target_level if parent else "L0"
+
+            # tool 级别 = parent - 1
+            if parent_level == "L2":
+                tool_level = "L1"
+            elif parent_level == "L1":
+                tool_level = "L0"
+            else:
+                continue  # skip
+
+            key = (turn, seq)
+            l1 = self.cache.tool_l1_texts.get(key, "")
+            l0 = self.cache.tool_l0_texts.get(key, "")
+            sum_tk = self._token_estimate(l1) or self._token_estimate(l0 or "")
+
+            entry = TurnPlanEntry(
+                turn_index=turn,
+                turn_type="tool",
+                tool_sub_index=seq,
+                target_level=tool_level,
+                decision_reason="tool_entry",
+                summary_tokens=sum_tk,
+                tokens_saved=0,
+            )
+            tool_plan.append(entry)
+
+        return tool_plan
+
     def _system_msgs_for_assembly(self, messages):
         """返回系统消息列表：最近 SYSTEM_TAIL_TURN_COUNT 条原文，更早的截断为 L0。"""
         sys_msgs = [m for m in messages if m.get("role") == "system"]
@@ -1562,7 +1609,8 @@ class ContextAssembler:
 
     def _build_messages_from_plan(self, plan: List[TurnPlanEntry],
                                    messages: List[Dict],
-                                   bypass_turns: Optional[Set[int]] = None) -> List[Dict]:
+                                   bypass_turns: Optional[Set[int]] = None,
+                                   tool_plan: Optional[List[TurnPlanEntry]] = None) -> List[Dict]:
         """按 turn_plan 决策从 turn_cache 按 level 读取文本，构建消息列表。
 
         对每条 plan entry：
@@ -1878,115 +1926,39 @@ class ContextAssembler:
         return text
 
     def _format_tool_group_assembly(self, group_l1_json: str,
-                                     conversation_history: List[Dict],
-                                     turn_index: int,
-                                     api_call_count: int) -> str:
-        """将工具组格式化为紧凑的 assistant{tc} 摘要行，内含各工具详情。
+                                     conversation_history: List[Dict] = None,
+                                     turn_index: int = 0,
+                                     api_call_count: int = 0) -> str:
+        """兼容新旧格式，提取工具组摘要文本。
 
-        输入 group_l1_json: {"group_intent":"查文件","group_result":"aaa","tool_count":3,"state":"ok"}
-        输出：【工具组:查文件→aaa(3个,ok)】
-                search: *.py → 3 hits
-                read_file: /tmp/test.py (60 lines) ×2
+        新格式（v5.2+）：纯文本（已由 generate_group_summary 截断）
+        旧格式（v5.1-）：JSON，取 thought 字段（优先）或 group_intent（降级）
 
-        组内 ×N 合并：连续相同 tool_name+detail 合并为 ×N。
-
-        api_call_count 取代 group_idx 防截断错位：直接按 _api_call_count 匹配消息。
+        Returns:
+            摘要文本（空字符串表示无可用摘要）
         """
-        # ── 1. Header from group_l1_json ──
-        header = ""
-        if group_l1_json and group_l1_json.strip():
-            try:
-                data = json.loads(group_l1_json)
-            except (json.JSONDecodeError, TypeError):
-                data = {}
-            intent = data.get("group_intent", "")
-            result = data.get("group_result", "")
-            count = data.get("tool_count", 0)
-            state = data.get("state", "")
-            parts = []
-            if intent:
-                parts.append(intent)
-            if result:
-                parts.append(f"→{result}")
-            header = "【工具组:" + "".join(parts)
-            header += f"（{count}个"
-            if state:
-                header += f"，{state}"
-            header += "）】"
-        if not header:
-            return group_l1_json or ""
+        if not group_l1_json or not group_l1_json.strip():
+            return ""
 
-        # ── 2. 从 conversation_history 提取本组的工具行 ──
-        # 使用 _api_call_count 直接匹配，不依赖顺序计数（防截断错位）
-        _in_group = False
-        _group_tool_msgs: List[Dict] = []
-        for msg in conversation_history:
-            if msg.get("_turn_index", -1) != turn_index:
-                if _in_group:
-                    break
-                continue
-            role = msg.get("role", "")
-            if role == "assistant" and msg.get("tool_calls"):
-                _msg_acc = msg.get("_api_call_count") or 0
-                if _msg_acc == api_call_count:
-                    _in_group = True
-                elif _in_group:
-                    break  # 抵达下一组，停止收集
-            elif role == "tool" and _in_group:
-                _group_tool_msgs.append(msg)
-            elif role in ("user", "assistant") and _in_group:
-                break  # 抵达下一轮，停止收集
+        # 尝试 JSON 解析：旧格式兼容
+        try:
+            data = json.loads(group_l1_json)
+            if isinstance(data, dict):
+                text = data.get("thought", "") or data.get("group_intent", "") or ""
+                if not text:
+                    return ""
+                return _safe_truncate(text, 100)
+        except (json.JSONDecodeError, TypeError):
+            pass
 
-        # ── 3. 格式化各工具行 + ×N 合并 ──
-        raw_entries: List[Tuple[str, str]] = []
-        for msg in _group_tool_msgs:
-            tool_name = msg.get("name", "")
-            seq = msg.get("_seq_index", 0)
-            tool_key = (turn_index, seq)
-            l1 = self.cache.tool_l1_texts.get(tool_key, "")
-            l0 = self.cache.tool_l0_texts.get(tool_key, "")
-            content = msg.get("content", "")
-
-            detail = ""
-            if l1 and l1.strip():
-                try:
-                    l1d = json.loads(l1)
-                    rs = l1d.get("result_summary", "")
-                    st = l1d.get("status", "")
-                    if rs:
-                        detail = rs
-                        if st and st != "ok":
-                            detail += f" ({st})"
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            if not detail and l0:
-                detail = l0[:100]
-            if not detail and content:
-                detail = content[:60].replace("\n", "\\n")
-            raw_entries.append((tool_name, detail))
-
-        # ×N 合并：连续的相同 (tool_name, detail) 合并
-        merged: List[Tuple[str, str, int]] = []
-        for tname, tdetail in raw_entries:
-            if merged and merged[-1][0] == tname and merged[-1][1] == tdetail:
-                merged[-1] = (tname, tdetail, merged[-1][2] + 1)
-            else:
-                merged.append((tname, tdetail, 1))
-
-        tool_lines: List[str] = []
-        for tname, tdetail, n in merged:
-            line = f"  {tname}: {tdetail}" if tname else f"  {tdetail}"
-            if n > 1:
-                line += f" ×{n}"
-            tool_lines.append(line)
-
-        if tool_lines:
-            return header + "\n" + "\n".join(tool_lines)
-        return header
+        # 新格式：纯文本，直接返回（安全网截断）
+        text = group_l1_json.strip()
+        return _safe_truncate(text, 100) if text else ""
 
     def _build_aligned_outcomes(self, plan: List,
                                  conversation_history: List[Dict],
-                                 bypass_turns: Optional[Set[int]] = None) -> List[Optional[str]]:
+                                 bypass_turns: Optional[Set[int]] = None,
+                                 tool_plan: Optional[List] = None) -> List[Optional[str]]:
         """构建与 conversation_history 1:1 对齐的结果列表。
 
         按 plan 条目的顺序依次消费（而非按 turn_index 查找），
@@ -1995,15 +1967,24 @@ class ContextAssembler:
         返回 List[Optional[str]]：
             None = 保留原文
             ""   = 跳过（行将被移除）
-            str  = 替换内容（无 [~/N/M] 标签）
+            str  = 替换内容（工具行含 [~/N/M] 标签，对话轮无标签）
 
         bypass_turns: 从 _AssemblePlanResult 传入的最后 2 对话轮索引集合。
             这些轮次的工具组无条件 L2（原文保留）。
+        tool_plan: 独立 tool 行条目（v5.2），每条对应一条 role="tool" 消息。
         """
         # 按 turn_index 构建索引，替代顺序计数（防截断错位）
         dialogue_by_turn: Dict[int, TurnPlanEntry] = {
             e.turn_index: e for e in plan if e.turn_type == "dialogue"
         }
+
+        # tool_plan by (turn_index, tool_sub_index)
+        _tool_by_key: Dict[Tuple[int, int], TurnPlanEntry] = {}
+        if tool_plan:
+            for e in tool_plan:
+                if e.turn_type == "tool":
+                    _tool_by_key[(e.turn_index, e.tool_sub_index)] = e
+
         # tg_by_turn[turn_index] = [tool_group_entries...]
         tg_by_turn: Dict[int, List[TurnPlanEntry]] = {}
         for de in dialogue_by_turn.values():
@@ -2046,29 +2027,8 @@ class ContextAssembler:
                     _group_counter[_turn] = _group_counter.get(_turn, 0) + 1
 
             if role == "user":
-                if _turn is not None and _turn in dialogue_by_turn:
-                    entry = dialogue_by_turn[_turn]
-                elif _turn is None:
-                    # 降级：按顺序索引
-                    _seq_idx = _fallback_turn - 1
-                    _all_dialogues = [e for e in plan if e.turn_type == "dialogue"]
-                    entry = _all_dialogues[_seq_idx] if 0 <= _seq_idx < len(_all_dialogues) else None
-                else:
-                    entry = None
-
-                if entry is not None:
-                    if entry.target_level == "L2" or entry.turn_index in _bypass_set:
-                        outcomes.append(None)
-                    else:
-                        text = ""
-                        if entry.target_level == "L1":
-                            l1 = self.cache.l1_texts.get(entry.turn_index, "")
-                            text = self._format_l1_for_display(l1)
-                        if not text:
-                            text = self.cache.l0_texts.get(entry.turn_index, "")
-                        outcomes.append(text if text else None)
-                else:
-                    outcomes.append(None)
+                # user 行始终保留原文（L1 摘要用于注入 final assistant，不替换 user 行本身）
+                outcomes.append(None)
 
             elif role == "assistant" and msg.get("tool_calls"):
                 groups = tg_by_turn.get(_turn, []) if _turn is not None else []
@@ -2085,12 +2045,7 @@ class ContextAssembler:
                         gkey = (entry.turn_index, entry.api_call_count)
                         l1 = self.cache.tool_group_l1_texts.get(gkey, "")
                         l0 = self.cache.tool_group_l0_texts.get(gkey, "")
-                        text = self._format_tool_group_assembly(
-                            l1 if l1 else l0,
-                            conversation_history,
-                            entry.turn_index,
-                            entry.api_call_count,
-                        ) if l1 or l0 else ""
+                        text = self._format_tool_group_assembly(l1 if l1 else l0)
                         outcomes.append(text if text else None)
                     else:
                         outcomes.append(None)
@@ -2098,11 +2053,34 @@ class ContextAssembler:
                     outcomes.append(None)
 
             elif role == "tool":
-                # ── 独立工具行已合并到 assistant{tc}，全部删除 ──
-                outcomes.append("")
+                # ── 独立 tool 行：按 tool_plan 生成 [~/N/M] 摘要文本 ──
+                _t_turn = msg.get("_turn_index")
+                _t_seq = msg.get("_seq_index", 0)
+                _t_key = (_t_turn, _t_seq)
+                _t_entry = _tool_by_key.get(_t_key) if _t_turn is not None else None
+                if _t_entry is not None:
+                    _t_key_cache = (_t_turn, _t_seq)
+                    _t_l1 = self.cache.tool_l1_texts.get(_t_key_cache, "")
+                    _t_l0 = self.cache.tool_l0_texts.get(_t_key_cache, "")
+                    _t_text = _t_l1 or _t_l0 or ""
+                    if _t_text:
+                        outcomes.append(_t_text)
+                    else:
+                        # 无摘要时保留原文
+                        outcomes.append(None)
+                else:
+                    # tool_plan 无此条目（parent L0 跳过）→ 移除
+                    outcomes.append("")
 
-            else:  # final assistant
-                outcomes.append(None)
+            else:  # final assistant — 注入整轮摘要（bypass 轮保留原文）
+                if _turn is not None and _turn not in _bypass_set:
+                    l1 = self.cache.l1_texts.get(_turn, "")
+                    text = self._format_l1_for_display(l1)
+                    if not text:
+                        text = self.cache.l0_texts.get(_turn, "") or ""
+                    outcomes.append(text if text else None)
+                else:
+                    outcomes.append(None)
 
         return outcomes
 
@@ -2348,7 +2326,18 @@ class ContextAssembler:
         if not core or core in ("无", "本轮无新内容"):
             logger.warning("[CA-METRIC] ca.l0.skipped_empty: turn=%d", self._turn_counter)
             return "无"
-        return _safe_truncate(core, 100)
+        result = _safe_truncate(core, 100)
+        # 去掉【计划】/【探讨】开头的续写段落，L0 仅保留首要状态摘要。
+        # 例如 core_change="【已实施】xxx\n【计划】yyy" → L0 只取 "【已实施】xxx"。
+        # 若整段都是【计划】/【探讨】（idx==0），则保留不变。
+        _first_low = len(result)
+        for _tag in ("【计划】", "【探讨】"):
+            _idx = result.find(_tag)
+            if 0 < _idx < _first_low:
+                _first_low = _idx
+        if _first_low < len(result):
+            result = result[:_first_low].rstrip()
+        return result or "无"
 
     def _estimate_token_offset(self, history):
         return sum(self._token_estimate(m.get("content", "")) for m in history) if history else 0
