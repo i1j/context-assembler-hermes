@@ -428,12 +428,12 @@ print(water)
 
 ```bash
 cd /home/i1j/.hermes/profiles/tester/plugins/ca_assembler
-python -m pytest tests/test_pr3_injection.py tests/test_aligned_outcomes.py tests/test_tool_buffer.py tests/test_c.py tests/test_a.py tests/test_v440.py tests/test_v460.py tests/test_config.py tests/test_parse_v1.py tests/test_store_adapter.py tests/test_store.py tests/test_embedding.py tests/test_plugin.py tests/test_circuit.py tests/test_health.py tests/test_lifecycle.py tests/test_degradation.py tests/test_quality.py tests/test_system.py -v -p no:cacheprovider -o "addopts="
+python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts=" --ignore=tests/legacy
 ```
 
 ### 调试记录
 
-详见 `docs/debug/` 目录和 `docs/analysis/` 分析报告。
+详见 `docs/analysis/` 分析报告。
 
 ### 预算实测
 
@@ -481,13 +481,7 @@ Hermes 有两条完全独立的机制：
 | 类别       | 目录                            | 内容                                                                      |
 | ---------- | ------------------------------- | ------------------------------------------------------------------------- |
 | 变更历史   | `docs/changelog.md`           | 全版本变更记录（唯一权威源）                                              |
-| 设计       | `docs/design/`                | 设计方案、系统分析、改进方案                                              |
 | 分析       | `docs/analysis/`              | 缓存分析、注入重构报告（v5.1）                                            |
-| 调试       | `docs/debug/`                 | 调试报告、修复验证、部署调试                                              |
-| 评审       | `docs/review/`                | 交叉评审（开发线/测试线）                                                 |
-| 测试计划   | `docs/test-plans/`            | 试验计划                                                                  |
-| L1 重构    | `docs/ca-l1-refactor/`        | 白皮书、需求、方案、测试                                                  |
-| 工具轮重构 | `docs/tool-turn-refactor/`    | 分析文档、技术方案、需求、测试需求                                        |
 
 ## 知识图谱（graphify）
 
