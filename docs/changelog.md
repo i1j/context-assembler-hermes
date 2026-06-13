@@ -31,9 +31,9 @@
 | **v4.3.2‑testplan**    | 2026-05-25 | 全指纹去重（测试）  | 测试计划 v1.3：22 个测试用例（9 功能 + 10 边界 + 2 集成 + 1 性能），tool 消息独立验证、tool_calls 指纹、dict/list 类型 content 覆盖。                                                          | **待验证** |
 | **v4.3.2‑impl**        | 2026-05-25 | 全指纹去重（实现）  | 实现 _deduplicate_messages 方法、Config._parse_bool_env 辅助、DEDUP_ENABLED 开关、CA_DEBUG 日志。22 个测试函数落盘。代码待部署环境验证后合入主线。                                               | **待提交** |
 
-| **v4.3.2‑ooda‑fix**    | 2026-06-01 | 调查：OODA 解析器冒号剥离 | `_extract_sections` content 提取后前导冒号未剥离，导致 `core_change` 带 `：` 前缀（如 `：对话中多次查询...`）。详见 [bug-007](../tests/docs/bugs/bug-007-ooda-parser-core-change-colon-prefix.md)。 | **已归档** |
-|| **v5.0-pr4‑inject‑fix** | 2026-06-09 | 注入层微修复批 | read_turn_texts l1/l0 缺 api_call_count 过滤（同 turn 多工具组 l1 相同）；_format_group_summary thought+intent 重复；L0 工具组缺 "工具组：" 前缀；_format_l1_for_display 占位符噪声。详见 [debug-20260609-1842-injection-layer-fix-batch.md](docs/debug/debug-20260609-1842-injection-layer-fix-batch.md)。 | **已修复** |
-| **v4.4.0‑ooda‑fix**    | 2026-06-03 | 修复：OODA 解析器前导冒号 | 在 `_extract_sections` content 提取后追加 `.lstrip(\\\":：　 \\\")`，去除全角/半角冒号。见 [bug-007](../tests/docs/bugs/bug-007-ooda-parser-core-change-colon-prefix.md)。 | **已修复** |
+| **v4.3.2‑ooda‑fix**    | 2026-06-01 | 调查：OODA 解析器冒号剥离 | `_extract_sections` content 提取后前导冒号未剥离，导致 `core_change` 带 `：` 前缀（如 `：对话中多次查询...`）。 | **已归档** |
+|| **v5.0-pr4‑inject‑fix** | 2026-06-09 | 注入层微修复批 | read_turn_texts l1/l0 缺 api_call_count 过滤（同 turn 多工具组 l1 相同）；_format_group_summary thought+intent 重复；L0 工具组缺 "工具组：" 前缀；_format_l1_for_display 占位符噪声。 | **已修复** |
+| **v4.4.0‑ooda‑fix**    | 2026-06-03 | 修复：OODA 解析器前导冒号 | 在 `_extract_sections` content 提取后追加 `.lstrip(\":：　 \")`，去除全角/半角冒号。 | **已修复** |
 | **v5.2**               | 2026-06-13 | 缓存分析 + 注入重构 | ① l0_embedding 孤儿数据清除（从未被消费，注释全部计算链路+删死代码 `retrieve_l0_upgrade`）② `tool_plan` 独立 tool 行决策（v5.2）：`_AssemblePlanResult.tool_plan`, `_compute_tool_plan_v2`, `_build_aligned_outcomes`/`_build_messages_from_plan` 签名扩展, `_format_tool_group_assembly` 精简为仅 header, tool 行输出 `[~/N/M]` 独立标签 ③ `_mutation_mode` 中 bg_review 轮由 `\" \"` 改为从 DB 读取 L1/L0 填充。详见 [v5.1 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md)。 | **发布** |
 | **v5.2.1**               | 2026-06-14 | 话题分割修复 + 自适应阈值 | ① `_add_bigrams` 集合无心化修复 (`sorted(s)`) ② `_compute_topic_groups` 新增 Jaccard 独立合并路径，默认 0.18，不依赖 todo_overlap ③ 自适应阈值模块：`_load_start_threshold`, `_compute_ideal_threshold`, `persist_ideal_threshold`，持久化至 `{ca_cache}/topic_threshold_meta.json` ④ 会话内阈值固定，跨会话加权漂移 (`0.6×last + 0.4×avg`) ⑤ `session_reset` 时持久化 ideal，`session_start` 时加载起始阈值 | **已实施** |
 
@@ -444,7 +444,7 @@ v4.2                  v4.3 → v4.3-s1 → v4.3-s2    v4.3.1 → v4.3.1 修订
 
 ### v4.7.0 — L1 摘要系统重构（2026-06-07）
 
-全面吸收白皮书 v1.2 Gold Master 设计（`docs/ca-l1-refactor/ca-l1-whitepaper-v1.2-gm.md`），重构 L1 摘要生成链路，采用 PDD（Prompt-Driven Development）范式。
+全面吸收白皮书 v1.2 Gold Master 设计，重构 L1 摘要生成链路，采用 PDD（Prompt-Driven Development）范式。
 
 | 变更 | 说明 | 代码位置 |
 |------|------|---------|
@@ -490,7 +490,7 @@ v4.2                  v4.3 → v4.3-s1 → v4.3-s2    v4.3.1 → v4.3.1 修订
 **设计文档**：
 - `pr1-store-plan.md`：PR1 实现方案（4 视角 34 条意见全部闭环）
 - `pr1-review-decisions.md`：多视角审查裁决记录
-- `docs/tool-turn-refactor/tool-turn-refactor-technical-plan.md`：整体技术方案
+- 整体技术方案（文档已归档，代码已实施）
 
 ### v5.0-pr2 — Buffer层 + 数据采集重定向（R2+R3+R4）（2026-06-09）
 

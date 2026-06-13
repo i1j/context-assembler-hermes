@@ -428,7 +428,7 @@ print(water)
 
 ```bash
 cd /home/i1j/.hermes/profiles/tester/plugins/ca_assembler
-python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts=" --ignore=tests/legacy
+python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts="
 ```
 
 ### 调试记录
