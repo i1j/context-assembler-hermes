@@ -23,33 +23,33 @@ def test_TC_A_001_p95_latency(ca_engine):
 
 @pytest.mark.high
 def test_TC_A_002_head_middle_tail(monkeypatch, ca_engine):
-    """分层测试"""
+    """分层测试 — v5.2.1: 摘要标记 [~/N/0] 出现在 bypass 窗口外"""
+    # PROTECT_TAIL_TOKENS 极小 → 历史轮不全在尾保护区，摘要注入产生标记
     monkeypatch.setattr('ca.config.Config.PROTECT_TAIL_TOKENS', 1)
-    msgs = [
-        {"role": "user", "content": "你好", "_turn_index": 0},
-        {"role": "assistant", "content": "你好", "_turn_index": 0},
-        {"role": "user", "content": "天气", "_turn_index": 1},
-        {"role": "assistant", "content": "晴天", "_turn_index": 1}
-    ]
-    seed_dialogue(ca_engine, 1, msgs)
-    ca_engine.cache.add_turn(0, "L0", '{"core_change":"问候"}')
-    ca_engine.cache.add_turn(1, "L0", '{"core_change":"天气晴"}')
-    with patch('ca.ContextAssembler._token_estimate', return_value=10):
+    # 5 轮：bypass 最后 3 轮 → 前 2 轮应出 [~/ 标记
+    for i in range(1, 6):
+        msgs = [{"role": "user", "content": f"msg{i}", "_turn_index": i}]
+        seed_dialogue(ca_engine, i, msgs)
+        # 非 BG 轮（含 new_materials）
+        ca_engine.cache.add_turn(i, "L0", json.dumps({"new_materials": [f"内容{i}"], "core_change": "c"}))
+    with patch('ca.ContextAssembler._token_estimate', return_value=100):
         with patch('ca.retrieval.Retriever.retrieve', return_value=[]):
-            result = ca_engine.assemble("天气", context_length=32000)
+            result = ca_engine.assemble("查询", context_length=32000)
     assert any("[~/" in str(m) for m in result)
 
 @pytest.mark.high
 def test_TC_A_002a_turn_index_mapping(monkeypatch, ca_engine):
-    """按 turn_index 映射摘要"""
+    """按 turn_index 映射摘要 — v5.2.1: 验证 [~/N/0] 标记出现在 bypass 窗口外"""
     monkeypatch.setattr('ca.config.Config.PROTECT_TAIL_TOKENS', 1)
-    msgs = [{"role": "user", "content": "hello", "_turn_index": 5}]
-    seed_dialogue(ca_engine, 5, msgs)
-    ca_engine.cache.add_turn(5, "L0", '{"core_change":"测试"}')
-    with patch('ca.ContextAssembler._token_estimate', return_value=10):
+    # 4 轮：bypass 最后 3 轮 → 第 1 轮出 [~/1/0] 标记
+    for i in range(1, 5):
+        msgs = [{"role": "user", "content": f"hello{i}", "_turn_index": i}]
+        seed_dialogue(ca_engine, i, msgs)
+        ca_engine.cache.add_turn(i, "L0", json.dumps({"new_materials": [f"测试{i}"], "core_change": "c"}))
+    with patch('ca.ContextAssembler._token_estimate', return_value=100):
         with patch('ca.retrieval.Retriever.retrieve', return_value=[]):
             result = ca_engine.assemble("hello", context_length=32000)
-    assert any("[~/5/0]" in str(m) for m in result)
+    assert any("[~/1/0]" in str(m) for m in result)
 
 @pytest.mark.medium
 def test_TC_A_003_dual_retrieval(ca_engine):
@@ -87,15 +87,17 @@ def test_TC_A_005_budget_gate(ca_engine):
 
 @pytest.mark.high
 def test_TC_A_006_summary_marker(monkeypatch, ca_engine):
-    """[~/N/0] 标记"""
+    """[~/N/0] 标记 — v5.2.1: 验证 bypass 窗口外的特定轮标记"""
     monkeypatch.setattr('ca.config.Config.PROTECT_TAIL_TOKENS', 1)
-    msgs = [{"role": "user", "content": "hi", "_turn_index": 3}]
-    seed_dialogue(ca_engine, 3, msgs)
-    ca_engine.cache.add_turn(3, "L0", '{"core_change":"摘要内容"}')
-    with patch('ca.ContextAssembler._token_estimate', return_value=10):
+    # 5 轮：bypass 最后 3 轮 → 第 1,2 轮应出 [~/1/0], [~/2/0]
+    for i in range(1, 6):
+        msgs = [{"role": "user", "content": f"hi{i}", "_turn_index": i}]
+        seed_dialogue(ca_engine, i, msgs)
+        ca_engine.cache.add_turn(i, "L0", json.dumps({"new_materials": [f"摘要{i}"], "core_change": "c"}))
+    with patch('ca.ContextAssembler._token_estimate', return_value=100):
         with patch('ca.retrieval.Retriever.retrieve', return_value=[]):
             result = ca_engine.assemble("查询", context_length=32000)
-    assert any("[~/3/0]" in m.get('content', '') for m in result)
+    assert any("[~/1/0]" in m.get('content', '') for m in result)
 
 @pytest.mark.high
 def test_TC_A_007_empty_cache_fallback(ca_engine):
@@ -253,7 +255,7 @@ def test_TC_A_018_plan_based_assembly_writes_turn_plan(engine):
     # 验证 turn_plan 表
     plans = engine.store.read_turn_plan(engine._session_id)
     assert len(plans) > 0, "turn_plan should have entries"
-    assert any(p["decision_reason"] in ("tail", "middle", "retrieved") for p in plans), \
+    assert any(p["decision_reason"] in ("tail", "middle", "retrieved", "topic_bg", "topic_baseline") for p in plans), \
         f"No valid decision_reason found in {plans}"
     # 验证消息含新格式 [~/N/0]
     ca_msgs = [m for m in result

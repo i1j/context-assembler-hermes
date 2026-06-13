@@ -338,7 +338,7 @@ def test_tc_c_T3_no_closing_tag(engine):
         tidx = max(engine._turn_counter, 0) + 1
         engine._run_c_stage(engine._session_id, tidx, {},
                             "User: hi\nAssistant: hi", 0)
-        # 验证写入 backfill 记录
+        # 验证写入 backfill 记录（截断内容写为 backfill=1）
         row = engine.store.conn.execute(
             "SELECT _assemble_status FROM turn_cache WHERE session_id=? AND turn_index=?",
             (engine._session_id, tidx)
