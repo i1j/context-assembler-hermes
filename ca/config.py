@@ -161,6 +161,8 @@ class Config:
     TOPIC_MAX_UPGRADE: ClassVar[int] = int(os.getenv("CA_TOPIC_MAX_UPGRADE", "10"))
     # BG 类话题固定级别
     TOPIC_BG_LEVEL: ClassVar[str] = os.getenv("CA_TOPIC_BG_LEVEL", "L0")
+    # Jaccard 独立合并阈值（双实义轮，无需 todo_overlap）
+    TOPIC_JACCARD_MERGE: ClassVar[float] = float(os.getenv("CA_TOPIC_JACCARD_MERGE", "0.07"))
 
     # 已知模型上下文窗口（Hermes hook 不传 context_length，需自行查表）
     _MODEL_CONTEXT_WINDOW: ClassVar[Dict[str, int]] = {
@@ -290,6 +292,7 @@ class Config:
         pos_int("BM25_HIT_THRESHOLD", cls.BM25_HIT_THRESHOLD, min_v=1, max_v=20)
         pos_float("TOPIC_JACCARD_ENTRY", cls.TOPIC_JACCARD_ENTRY, min_v=0.01)
         pos_float("TOPIC_JACCARD_CHAIN", cls.TOPIC_JACCARD_CHAIN, min_v=0.01)
+        pos_float("TOPIC_JACCARD_MERGE", cls.TOPIC_JACCARD_MERGE, min_v=0.01)
         pos_float("TOPIC_RADIUS_WEIGHT", cls.TOPIC_RADIUS_WEIGHT, min_v=1.0)
         pos_int("TOPIC_MAX_UPGRADE", cls.TOPIC_MAX_UPGRADE, max_v=20)
         if cls.TOPIC_BG_LEVEL not in ("L0", "L1", "L2"):
@@ -351,6 +354,7 @@ class Config:
             cls.BM25_HIT_THRESHOLD = int(os.getenv("CA_BM25_HIT_THRESHOLD", str(cls.BM25_HIT_THRESHOLD)))
             cls.TOPIC_JACCARD_ENTRY = float(os.getenv("CA_TOPIC_JACCARD_ENTRY", str(cls.TOPIC_JACCARD_ENTRY)))
             cls.TOPIC_JACCARD_CHAIN = float(os.getenv("CA_TOPIC_JACCARD_CHAIN", str(cls.TOPIC_JACCARD_CHAIN)))
+            cls.TOPIC_JACCARD_MERGE = float(os.getenv("CA_TOPIC_JACCARD_MERGE", str(cls.TOPIC_JACCARD_MERGE)))
             cls.TOPIC_RADIUS_WEIGHT = float(os.getenv("CA_TOPIC_RADIUS_WEIGHT", str(cls.TOPIC_RADIUS_WEIGHT)))
             cls.TOPIC_MAX_UPGRADE = int(os.getenv("CA_TOPIC_MAX_UPGRADE", str(cls.TOPIC_MAX_UPGRADE)))
             cls.TOPIC_BG_LEVEL = os.getenv("CA_TOPIC_BG_LEVEL", cls.TOPIC_BG_LEVEL)

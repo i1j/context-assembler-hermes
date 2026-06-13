@@ -32,6 +32,7 @@ bm25_hit_threshold: 5
 # ── 话题分割 ──
 topic_jaccard_entry: 0.03
 topic_jaccard_chain: 0.04
+topic_jaccard_merge: 0.07
 topic_radius_weight: 2.0
 topic_max_upgrade: 10
 topic_bg_level: "L0"

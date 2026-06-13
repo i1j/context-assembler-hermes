@@ -4,9 +4,9 @@
 
 | 项          | 值                                                                                |
 | ----------- | --------------------------------------------------------------------------------- |
-| 版本        | v5.2                                                                              |
+| 版本        | v5.2.1                                                                              |
 | 注入方式    | 1:1 对齐替换（mutation）+独立 tool 标签（v5.2），v5.2 bypass_turns 感知 tool_plan |
-| plugin.yaml | v5.2（待同步）                                                                    |
+| plugin.yaml | v5.2.1（待同步）                                                                    |
 | 部署方式    | 自包含独立副本                                                                    |
 | 插件路径    | `~/.hermes/profiles/tester/plugins/ca_assembler/`                               |
 | 核心引擎    | `ca/` 子目录（入口 `ca/__init__.py` → `ContextAssembler`）                 |
@@ -43,12 +43,16 @@ def _on_session_start(**kwargs: Any) -> None:
 行为：
 
 1. 创建 `CAContextAssemblerPlugin` 实例
-2. 检查断路器 `is_available()` → 3 次失败则 1 小时冷却
-3. 从 `get_hermes_home()` 获取 profile 基路径
-4. DB 路径：`{hermes_home}/ca_cache/{session_id}.db`
-5. 通过 `session_manager.get(session_id, db_path)` 创建引擎
-6. 注册到模块级 `_engines` 字典（`session_id → plugin`）
-7. 成功后日志：`"CA plugin started for session {session_id}"`
+2. 引擎初始化时加载话题分割阈值：
+   - 默认策略（`CA_TOPIC_JACCARD_MERGE=0.07`）→ 全部实义轮合并，由 20K 尾区切割
+   - 如启用自适应（见后文）→ `0.6 × last_ideal + 0.4 × global_avg`，限幅 `[0.08, 0.35]`
+   - 阈值在本会话内固定不变
+3. 检查断路器 `is_available()` → 3 次失败则 1 小时冷却
+4. 从 `get_hermes_home()` 获取 profile 基路径
+5. DB 路径：`{hermes_home}/ca_cache/{session_id}.db`
+6. 通过 `session_manager.get(session_id, db_path)` 创建引擎
+7. 注册到模块级 `_engines` 字典（`session_id → plugin`）
+8. 成功后日志：`"CA plugin started for session {session_id}"` 含阈值信息
 
 ### `_on_session_end` — 资源清理
 
@@ -68,7 +72,10 @@ def _on_session_reset(**kwargs: Any) -> None:
 
 **kwargs**: `session_id`（可选，无 session_id 时重置全部）
 
-行为：从 `_engines` 移除 → `engine.reset()` + 清除断路器状态
+行为：
+
+1. 持久化会话理想阈值 → `{ca_cache}/topic_threshold_meta.json`
+2. 从 `_engines` 移除 → `engine.reset()` + 清除断路器状态
 
 ### `_on_pre_llm_call` — 上下文注入（A-stage）
 
@@ -272,11 +279,92 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 | 变量                           | 默认值 | 说明                           |
 | ------------------------------ | ------ | ------------------------------ |
 | `CA_TOPIC_BOUNDARY_DISTANCE` | 0.50   | 话题边界检测余弦距离阈值       |
-| `CA_TOPIC_JACCARD_ENTRY`     | 0.03   | 话题分割首次合并 Jaccard 阈值  |
-| `CA_TOPIC_JACCARD_CHAIN`     | 0.04   | 话题分割链内扩展 Jaccard 阈值  |
+| `CA_TOPIC_JACCARD_ENTRY`     | 0.03   | 话题分割首次合并 Jaccard 阈值（需 todo 重叠） |
+| `CA_TOPIC_JACCARD_CHAIN`     | 0.04   | 话题分割链内扩展 Jaccard 阈值（需 todo 重叠） |
+| `CA_TOPIC_JACCARD_MERGE`   | 0.07   | 话题分割 Jaccard 独立合并阈值（无需 todo 重叠）。设为 0.07 确保全部 S→S 实义轮合并，由 20K 尾区保护完成唯一实质性切割 |
 | `CA_TOPIC_RADIUS_WEIGHT`     | 2.0    | 半径公式中最近邻距离的权重系数 |
 | `CA_TOPIC_MAX_UPGRADE`       | 10     | 检索升级最大 topic 数          |
 | `CA_TOPIC_BG_LEVEL`          | `L0` | BG 话题固定级别                |
+
+## 话题分割算法（v5.2.1）
+
+### R1: BG 分类
+
+检查 `new_materials`, `objective_facts`, `consensus`, `todo` 四个内容字段：
+
+- 全空 → **BG 轮**（后台/过渡轮）
+- 任一非空 → **实义轮**
+- 连续 BG → 合并到同一话题
+- BG↔实义 → 强制分裂
+
+### R2: 实义轮合并（三条路径，任意满足即合并）
+
+| 路径 | 条件 | 说明 |
+|------|------|------|
+| todo 链内扩展 | `has_todo_overlap` AND `J ≥ 0.04` AND 已在链中 | 上轮 TODO 与下轮 core_change/new_materials 精确匹配 |
+| todo 首次合并 | `has_todo_overlap` AND `J ≥ 0.03` | 同上，入口级 |
+| **Jaccard 独立合并**（v5.2.1 新增） | **`J ≥ threshold`** | **不依赖 todo 重叠**，用于长对话同话题扩展 |
+
+`threshold` 默认 **0.07**（见下方"由 20K 切割"说明）。
+
+### 由 20K 切割（v5.2.1 默认策略）
+
+话题分割的 Jaccard 独立合并阈值设为 **0.07**，这意味着所有 S→S（实义→实义）连续对都满足合并条件（28 对中最低 J=0.0729），实义轮在话题上全部合并为一个连续块。
+
+话题分割在此策略下的唯一作用是：
+
+- **BG 轮隔离**：将"Review the conversation"等无内容轮从实义流中独立出去
+- **实义轮合并**：将所有实义轮归入一个大话题
+- **强制话题切换**：用户消息含"换一个话题"等短语时，无条件分裂
+
+### 强制话题切换
+
+当用户消息包含以下任一词组时，该轮在话题分割中**强制分裂**，不受任何合并条件影响：
+
+```
+"换一个话题", "换个话题", "切换话题", "新话题",
+"另一件事", "另一个问题", "换个方向",
+"换一个问题", "topic switch", "change topic", "next topic"
+```
+
+检测发生在 `assemble()` 中，由 `_detect_forced_split_turns(messages)` 扫描 `conversation_history` 中的 `role="user"` 消息实现。
+
+真正的上下文质量由 **20K 尾区保护区** 保证——尾区内的轮强制 L2 原文透传。即使整个实义话题远超 20K，保护区外的轮按话题分级降级，不会破坏尾区内的对话质量。
+
+如需改变此行为（例如希望话题分割承担更多上下文精细化管理），增大 `CA_TOPIC_JACCARD_MERGE` 即可。
+
+#### 自适应阈值（可选，v5.2.1）
+
+如不使用"由 20K 切割"策略，可恢复自适应阈值。将 `CA_TOPIC_JACCARD_MERGE` 设为 `0.18`（或留空由自适应计算），此时机制为：
+
+```
+会话 N 启动:
+  T_start = 0.6 × last_ideal + 0.4 × global_avg (种子 0.18)
+  限幅 [0.08, 0.35]
+
+每轮 assemble() 后:
+  收集所有已知 S→S 对的 Jaccard 值
+  计算 25th percentile 作为本会话的理想值
+  （首次 3 对以上数据后写入 _ideal_threshold_this_session）
+
+会话 N 结束 (reset):
+  persist_ideal_threshold()
+  → 更新 {ca_cache}/topic_threshold_meta.json
+  → 影响下一会话的 T_start
+```
+
+```json
+{
+  "global_sum": 0.93,
+  "global_count": 5,
+  "last_ideal": 0.21
+}
+
+```
+
+### 非确定性修复
+
+`_add_bigrams` 中使用 `sorted(s)` 保证 `''.join(s)` 跨运行一致。
 
 ## L1 摘要生成架构
 
@@ -376,6 +464,8 @@ Hermes 有两条完全独立的机制：
 | `bg_review A-stage`       | 不支持                            | gate 跳过，C-stage 写 biz_category    |
 | l0_embedding                | 一直计算                          | 已注释（无人消费）                    |
 | 工具组输出                  | 旧紧凑格式（header+各工具详情）   | v5.2 精简为仅 header                 |
+| `_add_bigrams 确定性`      | 集合 `''.join(s)` 无心化不稳定  | v5.2.1 用 `sorted(s)` 保证确定性       |
+| 话题分割合并路径            | 仅 todo 重叠一条路径            | v5.2.1 新增 Jaccard 独立合并 + 自适应阈值 |
 
 ## 脚本工具
 

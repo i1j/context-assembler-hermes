@@ -8,3 +8,4 @@ __pycache__/
 
 # Temporary files
 .tmp-*
+working_copy.db

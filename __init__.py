@@ -60,6 +60,10 @@ def _on_session_start(**kwargs: Any) -> None:
         return
     try:
         plugin = CAContextAssemblerPlugin()
+        # Log the session's starting threshold
+        if plugin._engine:
+            _t = plugin._engine._topic_jaccard_threshold
+            logger.info("[CA] session_start: threshold=%.4f for session %s", _t, session_id)
         # Remove session_id from kwargs to avoid duplicate-arg error
         # since on_session_start(self, session_id, **kwargs) takes it positionally
         hook_kwargs = {k: v for k, v in kwargs.items() if k != "session_id"}
@@ -367,6 +371,9 @@ class CAContextAssemblerPlugin:
 
     def on_session_reset(self) -> None:
         """重置引擎状态（/new 或 /reset 时调用）。"""
+        # 持久化会话理想阈值
+        if self._engine:
+            self._engine.persist_ideal_threshold()
         self._saved_history = None
         self._saved_history_snapshot = None
         if self._engine:

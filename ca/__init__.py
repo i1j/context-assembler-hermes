@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
 import logging
 import sys
@@ -21,6 +22,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .config import Config
@@ -253,6 +255,10 @@ class ContextAssembler:
         self._api_sequence: int = 0                          # fallback 自增计数器
         self.stats = AssembleStats()
         self._original_messages: Optional[List[Dict]] = None
+        self._ideal_threshold_this_session: Optional[float] = None
+
+        # 话题分割阈值（会话内固定，跨会话自适应）
+        self._topic_jaccard_threshold: float = self._load_start_threshold()
 
         self._dialogue_backfill = BackfillThread(self, 'dialogue', Config.BACKFILL_DIALOGUE_RATE)
         self._tool_backfill = BackfillThread(self, 'tool', Config.BACKFILL_TOOL_RATE)
@@ -895,6 +901,34 @@ class ContextAssembler:
                 i += 1
         return tool_map
 
+    @staticmethod
+    def _detect_forced_split_turns(messages: List[Dict]) -> Set[int]:
+        """检测用户消息中是否包含话题切换指示，返回应强制分裂的 turn index 集合。
+
+        匹配的用户轮之后的第一个 S→S 对将强制分裂。
+        """
+        _patterns = [
+            "换一个话题", "换个话题", "切换话题", "新话题",
+            "另一件事", "另一个问题", "换个方向",
+            "topic switch", "change topic", "next topic",
+            "换一个问题",
+        ]
+        forced: Set[int] = set()
+        for msg in messages:
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "") or ""
+            if not content:
+                continue
+            for pat in _patterns:
+                if pat in content:
+                    turn = msg.get("_turn_index")
+                    if turn is not None:
+                        forced.add(turn)
+                        logger.debug("[CA] forced_split_turn=%d from pattern=%r", turn, pat)
+                    break  # 一个 turn 只需一个模式
+        return forced
+
     def assemble(self, user_message: str, context_length: int = None) -> List[Dict]:
         result = self._compute_assemble_plan(user_message, context_length)
         if isinstance(result, list):
@@ -1011,9 +1045,23 @@ class ContextAssembler:
             except Exception:
                 pass
 
+        # ── 话题切换检测（用户消息含"换一个话题"等短语，强制分裂）──
+        _forced_split_turns = self._detect_forced_split_turns(messages)
+
         # ── 话题分割（R1 + R2）──
         with stats.time_phase("topic_seg"):
-            turn_to_topic, topic_data = self._compute_topic_groups(l1_texts, l1_embeddings)
+            turn_to_topic, topic_data = self._compute_topic_groups(
+                l1_texts, l1_embeddings,
+                jaccard_merge_threshold=self._topic_jaccard_threshold,
+                forced_split_turns=_forced_split_turns,
+            )
+
+            # 计算并缓存会话理想阈值（仅首次覆盖）
+            if self._ideal_threshold_this_session is None:
+                _ideal = self._compute_ideal_threshold()
+                if _ideal is not None:
+                    self._ideal_threshold_this_session = _ideal
+                    logger.info("[CA] ideal_threshold_this_session=%.4f (used %.4f)", _ideal, self._topic_jaccard_threshold)
 
         # ── 话题检索 + 三级定级 ──
         with stats.time_phase("topic_retrieval"):
@@ -1166,7 +1214,8 @@ class ContextAssembler:
 
         # 中文二元组提升（对 CJK 序列做字符二元组）
         def _add_bigrams(s: set) -> set:
-            cjk_chars = [c for c in ''.join(s) if '\u4e00' <= c <= '\u9fff']
+            # 排序保证 `''.join(s)` 确定性——集合无心化导致跨运行 Jaccard 不同
+            cjk_chars = [c for c in ''.join(sorted(s)) if '\u4e00' <= c <= '\u9fff']
             bigrams = set()
             for i in range(len(cjk_chars) - 1):
                 bigrams.add(cjk_chars[i] + cjk_chars[i + 1])
@@ -1193,7 +1242,9 @@ class ContextAssembler:
         return True
 
     def _compute_topic_groups(self, l1_texts: Dict[int, str],
-                               l1_embeddings: Dict[int, List[float]]) -> Tuple[Dict[int, int], Dict]:
+                               l1_embeddings: Dict[int, List[float]],
+                               jaccard_merge_threshold: float = 0.07,
+                               forced_split_turns: Optional[Set[int]] = None) -> Tuple[Dict[int, int], Dict]:
         """话题分割：R1（BG 检测）+ R2（Jaccard + todo 链）。
         
         Returns:
@@ -1260,7 +1311,13 @@ class ContextAssembler:
                 # 实义 → BG → 分裂
                 _start_new_topic(turn)
             else:
-                # 双实义：R2 Jaccard + todo 链
+                # 双实义：R2 Jaccard + todo 链 + 强制切换
+                # 强制切换优先：用户消息含话题切换短语时无条件分裂
+                if forced_split_turns and turn in forced_split_turns:
+                    _start_new_topic(turn)
+                    logger.debug("[CA] forced topic split at turn %d", turn)
+                    continue
+
                 prev_fields = turn_fields[prev]
                 curr_fields = turn_fields[turn]
                 
@@ -1293,6 +1350,9 @@ class ContextAssembler:
                 if has_todo_overlap and j >= Config.TOPIC_JACCARD_CHAIN and is_in_chain:
                     _extends_chain(turn)
                 elif has_todo_overlap and j >= Config.TOPIC_JACCARD_ENTRY:
+                    _extends_chain(turn)
+                elif j >= jaccard_merge_threshold:
+                    # Jaccard 独立合并路径：不依赖 todo_overlap，用于长对话同话题扩展
                     _extends_chain(turn)
                 else:
                     _start_new_topic(turn)
@@ -2408,3 +2468,142 @@ class ContextAssembler:
             "remaining": max(0, budget_max - max_offset),
             "usage_pct": round(max_offset / Config.CONTEXT_LENGTH * 100, 1),
         }
+
+    # ── 自适应话题分割阈值（v5.2+）──
+
+    _THRESHOLD_META_FILENAME = "topic_threshold_meta.json"
+    """持久化文件：{ca_cache_dir}/{filename}"""
+
+    @staticmethod
+    def _topic_threshold_meta_path() -> str:
+        """返回阈值元数据 JSON 文件路径。"""
+        try:
+            from hermes_constants import get_hermes_home
+            base = get_hermes_home()
+        except ImportError:
+            base = Path.home() / ".hermes"
+        cache_dir = base / "ca_cache"
+        return str(cache_dir / ContextAssembler._THRESHOLD_META_FILENAME)
+
+    @staticmethod
+    def _load_topic_meta() -> Optional[Dict[str, float]]:
+        """从持久化文件加载阈值历史。"""
+        path = ContextAssembler._topic_threshold_meta_path()
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+
+    @staticmethod
+    def _save_topic_meta(meta: Dict[str, float]) -> None:
+        """持久化阈值历史。"""
+        path = ContextAssembler._topic_threshold_meta_path()
+        try:
+            # 确保父目录存在
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            with open(path, 'w') as f:
+                json.dump(meta, f)
+        except OSError as e:
+            logger.warning("[CA] Failed to save topic threshold meta: %s", e)
+
+    def _load_start_threshold(self) -> float:
+        """加载会话起始阈值。
+        
+        优先级：
+        1. 环境变量 CA_TOPIC_JACCARD_MERGE 显式设置 → 直接使用（固定值，不启用自适应）
+        2. 有持久化历史 → 自适应计算（0.6 × last_ideal + 0.4 × global_avg）
+        3. 无历史 → 返回 Config.TOPIC_JACCARD_MERGE 的编译值
+        """
+        # 检查环境变量是否被显式设置
+        _env_val = os.environ.get("CA_TOPIC_JACCARD_MERGE")
+        if _env_val is not None and _env_val.strip():
+            try:
+                return max(0.01, min(0.50, float(_env_val.strip())))
+            except ValueError:
+                pass  # 非法值，fallthrough 到自适应
+
+        # 自适应路径
+        meta = self._load_topic_meta()
+        if meta is None:
+            return Config.TOPIC_JACCARD_MERGE  # 无历史用编译默认值
+        global_count = meta.get("global_count", 0)
+        if global_count == 0:
+            return Config.TOPIC_JACCARD_MERGE
+
+        global_avg = meta["global_sum"] / global_count
+        last_ideal = meta.get("last_ideal", Config.TOPIC_JACCARD_MERGE)
+
+        t = 0.6 * last_ideal + 0.4 * global_avg
+        return max(0.08, min(0.35, t))
+
+    def _compute_ideal_threshold(self) -> Optional[float]:
+        """根据当前所有已知 S→S 对 Jaccard 值，计算理想阈值（25th percentile）。
+
+        Returns:
+            float: 理想阈值；S→S 对不足 3 对时返回 None。
+        """
+        # 获取有效对话轮 L1（与 assemble 中一致：排除 bg_review）
+        l1_texts, _ = self.cache.get_snapshot_data()
+        _biz_cats = self.store.read_turn_biz_categories(self._session_id)
+        if _biz_cats:
+            l1_texts = {t: v for t, v in l1_texts.items() if t not in _biz_cats}
+
+        sorted_turns = sorted(l1_texts.keys())
+        if len(sorted_turns) < 4:
+            return None  # 数据不足
+
+        # 解析字段 + BG 分类
+        turn_fields: Dict[int, Optional[Dict]] = {}
+        for t in sorted_turns:
+            try:
+                turn_fields[t] = json.loads(l1_texts[t]) if l1_texts.get(t) else None
+            except (json.JSONDecodeError, TypeError):
+                turn_fields[t] = None
+
+        turn_bg: Dict[int, bool] = {}
+        for t in sorted_turns:
+            turn_bg[t] = self._is_bg_turn(turn_fields[t])
+
+        # 收集所有 S→S Jaccard 值
+        jaccard_vals: List[float] = []
+        for i in range(1, len(sorted_turns)):
+            prev = sorted_turns[i - 1]
+            curr = sorted_turns[i]
+            if turn_bg[prev] or turn_bg[curr]:
+                continue
+            j = self._jaccard_tokens(
+                turn_fields[prev] or {}, turn_fields[curr] or {},
+            )
+            jaccard_vals.append(j)
+
+        if len(jaccard_vals) < 3:
+            return None  # 数据不足
+
+        # 25th percentile
+        jaccard_vals.sort()
+        idx = int(len(jaccard_vals) * 0.25)
+        return jaccard_vals[idx]
+
+    def persist_ideal_threshold(self) -> None:
+        """将会话理想阈值持久化。在 session_end 时调用。"""
+        ideal = getattr(self, '_ideal_threshold_this_session', None)
+        if ideal is None:
+            return
+
+        meta = self._load_topic_meta() or {}
+        global_sum = meta.get("global_sum", 0.0)
+        global_count = meta.get("global_count", 0)
+
+        # 更新时忽略历史平均值和 last_ideal 的取值限制
+        global_sum += ideal
+        global_count += 1
+
+        new_meta = {
+            "global_sum": global_sum,
+            "global_count": global_count,
+            "last_ideal": ideal,
+        }
+        self._save_topic_meta(new_meta)
+        logger.info("[CA] persist_ideal_threshold: ideal=%.4f global_sum=%.4f count=%d",
+                    ideal, global_sum, global_count)
