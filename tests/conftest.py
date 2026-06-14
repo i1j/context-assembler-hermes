@@ -97,7 +97,7 @@ def _mock_llm():
 
     新签名返回 Tuple[str, str]：(response_text, finish_reason)
     """
-    with patch('ca.ContextAssembler._call_llm_for_l1',
+    with patch('ca.ContextAssembler._call_llm_for_fct',
                return_value=(
                    "### 现象与问题\n- 无\n"
                    "### 背景与约束\n- 无\n"

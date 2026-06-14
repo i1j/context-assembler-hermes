@@ -1344,8 +1344,8 @@ def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
     return False
 
 
-def read_l1_v5(store, session_id: str, turn: int, seq: int) -> str:
-    """点查：返回 (turn, seq) 的 l1_text，无则空字符串。"""
+def read_fct_v5(store, session_id: str, turn: int, seq: int) -> str:
+    """点查：返回 (turn, seq) 的 fct_text（l1_text），无则空字符串。"""
     try:
         cur = store.conn.execute(
             "SELECT l1_text FROM turn_stream WHERE session_id=? AND turn=? AND seq=?",
@@ -1357,13 +1357,13 @@ def read_l1_v5(store, session_id: str, turn: int, seq: int) -> str:
         return ""
 
 
-def update_seq0_l1_v5(store, session_id: str, turn: int,
-                       l1_text: str, l0_text: str) -> bool:
+def update_seq0_fct_v5(store, session_id: str, turn: int,
+                       fct_text: str, hdl_text: str) -> bool:
     """仅 UPDATE turn_stream 的 l1/l0 列（seq=0 行），不碰 content。"""
     try:
         store.conn.execute(
             "UPDATE turn_stream SET l1_text=?, l0_text=? WHERE session_id=? AND turn=? AND seq=0",
-            (l1_text, l0_text, session_id, turn),
+            (fct_text, hdl_text, session_id, turn),
         )
         store.conn.commit()
         return True

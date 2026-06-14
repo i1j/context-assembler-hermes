@@ -32,14 +32,14 @@ from .retrieval import Retriever, cosine_similarity
 from .embedding import EmbeddingClient
 from .ooda_parser import OODAParser
 from .post_process import robust_json_parse, clean_increment, parse_v1_markdown_xml, _safe_truncate, ItemState
-from .prompts import L1_GENERATION_PROMPT
+from .prompts import FCT_GENERATION_PROMPT
 from .store import format_previous_summary_for_prompt
 from .stats import AssembleStats
 
 logger = logging.getLogger(__name__)
 
 
-class L1TruncatedException(Exception):
+class FctTruncatedException(Exception):
     """LLM 输出被截断时抛出的异常。
 
     携带 response_text 以便降级代码读取部分输出。
@@ -225,7 +225,7 @@ class ContextAssembler:
 
     def destroy(self):
         # (removed tool_buffer flush — E-stage write-on-receive in v5.0)
-        # 1. 先等待所有 C‑stage 任务完成
+        # 1. 先等待所有 F‑stage 任务完成
         self.wait_for_pending(Config.SHUTDOWN_TIMEOUT)
         # 2. 再停止 L‑stage 线程
         self._dialogue_backfill.shutdown()
@@ -253,57 +253,57 @@ class ContextAssembler:
         else:
             self.cache._rebuild_executor.shutdown(wait=False)
 
-    # ---------- C‑stage ----------
-    def process_turn_async(self, user_message: str, assistant_response: str,
+    # ---------- F‑stage ----------
+    def process_turn_f_stage(self, user_message: str, assistant_response: str,
                            conversation_history: Optional[List[Dict]] = None) -> int:
         expected = len([m for m in (conversation_history or []) if m.get("role") == "user"])
         with self._task_lock:
             target = max(self._turn_counter + 1, expected)
             if target in self._pending_tasks and self._pending_tasks[target].is_alive():
-                logger.info("[CA] process_turn_async: turn %d already pending, returning", target)
+                logger.info("[CA] process_turn_f_stage: turn %d already pending, returning", target)
                 return target
             self._turn_counter = target
             turn_index = target
 
-        logger.info("[CA] process_turn_async: starting C-stage for turn %d (expected=%d)",
+        logger.info("[CA] process_turn_f_stage: starting F-stage for turn %d (expected=%d)",
                     turn_index, expected)
 
-        l2_text = f"User: {user_message}\nAssistant: {assistant_response}"
-        prev_l1 = self._get_previous_l1()
+        elm_text = f"User: {user_message}\nAssistant: {assistant_response}"
+        prev_fct = self._get_previous_fct()
         token_offset = self._estimate_token_offset(conversation_history)
 
         # 在主线程捕获 write_origin（ContextVar 不自动传播到 daemon 线程）
         _bg_review = (get_current_write_origin() == "background_review")
         if _bg_review:
-            logger.info("[CA] process_turn_async: background review detected for turn %d", turn_index)
+            logger.info("[CA] process_turn_f_stage: background review detected for turn %d", turn_index)
 
         thread = threading.Thread(
-            target=self._run_c_stage,
-            args=(self._session_id, turn_index, prev_l1, l2_text, token_offset,
+            target=self._run_f_stage,
+            args=(self._session_id, turn_index, prev_fct, l2_text, token_offset,
                   user_message, assistant_response, _bg_review, conversation_history),
-            daemon=True, name=f"CA-CStage-{turn_index}"
+            daemon=True, name=f"CA-FStage-{turn_index}"
         )
         with self._task_lock:
             self._pending_tasks[turn_index] = thread
-        logger.info("[CA] process_turn_async: starting thread CA-CStage-%d", turn_index)
+        logger.info("[CA] process_turn_f_stage: starting thread CA-FStage-%d", turn_index)
         thread.start()
-        logger.info("[CA] process_turn_async: thread CA-CStage-%d started", turn_index)
+        logger.info("[CA] process_turn_f_stage: thread CA-FStage-%d started", turn_index)
         return turn_index
 
-    def _run_c_stage(self, session_id, turn_index, prev_l1, l2_text, token_offset,
+    def _run_f_stage(self, session_id, turn_index, prev_fct, elm_text, token_offset,
                      user_message="", assistant_response="",
                      bg_review=False, conversation_history=None):
         start = time.monotonic()
-        logger.info("[CA] _run_c_stage: START turn %d", turn_index)
+        logger.info("[CA] _run_f_stage: START turn %d", turn_index)
         dialogue_ok = False
 
         if bg_review:
-            logger.info("[CA] _run_c_stage turn %d: background review, skipping LLM", turn_index)
+            logger.info("[CA] _run_f_stage turn %d: background review, skipping LLM", turn_index)
 
         try:
             if bg_review:
                 # bg_review 路径：从 user_message 提取实际内容摘要
-                _src = user_message or l2_text or ""
+                _src = user_message or elm_text or ""
                 if len(_src) > 80:
                     _brief = _src[:80].strip()
                 else:
@@ -315,21 +315,21 @@ class ContextAssembler:
                     "_assemble_status": 0
                 }
                 dialogue_ok = True
-                logger.info("[CA] _run_c_stage turn %d: bg_review summary: %s",
+                logger.info("[CA] _run_f_stage turn %d: bg_review summary: %s",
                             turn_index, _brief)
             else:
-                logger.info("[CA] _run_c_stage turn %d: calling LLM", turn_index)
+                logger.info("[CA] _run_f_stage turn %d: calling LLM", turn_index)
                 try:
-                    response_text, finish_reason = self._call_llm_for_l1(prev_l1, l2_text)
-                except L1TruncatedException as e:
+                    response_text, finish_reason = self._call_llm_for_fct(prev_fct, elm_text)
+                except FctTruncatedException as e:
                     response_text = e.response_text
                     finish_reason = "length"
 
-                # 截断检测（在 _call_llm_for_l1 返回后进行，即使被 mock 也能覆盖）
+                # 截断检测（在 _call_llm_for_fct 返回后进行，即使被 mock 也能覆盖）
                 if finish_reason == "length" or not response_text.strip().endswith("</core_change>"):
-                    logger.warning("[CA-METRIC] ca.l1.truncated_fallback: turn=%d, finish_reason=%s, len=%d",
+                    logger.warning("[CA-METRIC] ca.fct.truncated_fallback: turn=%d, finish_reason=%s, len=%d",
                                    turn_index, finish_reason, len(response_text))
-                    self.stats.truncated_fallback += 1
+                    self.stats.fct_truncated_fallback += 1
                     # 截断降级：写入待补全记录
                     truncated_cleaned = {
                         "core_change": "本轮无新内容",
@@ -339,54 +339,54 @@ class ContextAssembler:
                         "todo": [],
                         "_assemble_status": 1,
                     }
-                    l1_str = json.dumps(truncated_cleaned, ensure_ascii=False)
-                    self._update_l1_v5(
-                        session_id, turn_index, l1_str, "",
+                    fct_str = json.dumps(truncated_cleaned, ensure_ascii=False)
+                    self._update_fct_v5(
+                        session_id, turn_index, fct_str, "",
                     )
-                    logger.info("[CA] _run_c_stage turn %d: truncated, saved as pending backfill", turn_index)
+                    logger.info("[CA] _run_f_stage turn %d: truncated, saved as pending backfill", turn_index)
                     return
 
-                l1_dict, l0_text, core_state = parse_v1_markdown_xml(response_text)
-                if not l0_text:
+                fct_dict, parser_hdl, core_state = parse_v1_markdown_xml(response_text)
+                if not parser_hdl:
                     logger.warning("[CA-METRIC] ca.l0.skipped_empty: turn=%d", turn_index)
                     self.stats.skipped_empty += 1
-                # l1_dict 已由 parse_v1_markdown_xml 完成结构化解析，
+                # fct_dict 已由 parse_v1_markdown_xml 完成结构化解析，
                 # 直接传给 clean_increment（跳过 ooda_parser.parse，
                 # 后者只兼容旧格式 "标题：内容" 格式，不兼容 Markdown ### 标题）
-                cleaned = clean_increment(l1_dict)
-                # 状态注入：将 core_state 嵌入 l1_dict 内部字段
+                cleaned = clean_increment(fct_dict)
+                # 状态注入：将 core_state 嵌入 fct_dict 内部字段
                 if core_state and core_state != ItemState.UNKNOWN:
                     cleaned["_state"] = core_state.value
                 cleaned["_assemble_status"] = 0
                 dialogue_ok = True
 
-            l1_str = json.dumps(cleaned, ensure_ascii=False)
-            l0_text = self._extract_l0(cleaned)
+            fct_str = json.dumps(cleaned, ensure_ascii=False)
+            hdl_text = self._extract_l0(cleaned)
             try:
-                l1_emb = self.embed_client.embed(l1_str)
-                l0_emb = self.embed_client.embed(l0_text)
+                fct_emb = self.embed_client.embed(fct_str)
+                hdl_emb = self.embed_client.embed(hdl_text)
             except Exception:
-                l1_emb = None
-                l0_emb = None
+                fct_emb = None
+                hdl_emb = None
 
-            # v5: 用 _update_l1_v5 只写 l1/l0，不碰 content
-            self._update_l1_v5(
-                session_id, turn_index, l1_str, l0_text,
+            # v5: 用 _update_fct_v5 只写 fct/hdl，不碰 content
+            self._update_fct_v5(
+                session_id, turn_index, fct_str, hdl_text,
             )
-            self.cache.add_turn(turn_index, l0_text, l1_str, l0_emb, l1_emb)
+            self.cache.add_turn(turn_index, hdl_text, fct_str, hdl_emb, fct_emb)
 
             if dialogue_ok:
                 self.stats.tool_pre_upgrade_count = 0
 
         except Exception as e:
-            logger.error("C‑stage crash turn %d: %s", turn_index, e, exc_info=True)
+            logger.error("F‑stage crash turn %d: %s", turn_index, e, exc_info=True)
             fallback = json.dumps({
                 "core_change": "本轮无新内容",
                 "_assemble_status": 1,
                 "new_materials": [], "objective_facts": [],
                 "consensus": [], "todo": []
             }, ensure_ascii=False)
-            self._update_l1_v5(
+            self._update_fct_v5(
                 session_id, turn_index, fallback, "本轮无新内容",
             )
             self.cache.add_turn(turn_index, "本轮无新内容", fallback, None, None)
@@ -394,7 +394,7 @@ class ContextAssembler:
             with self._task_lock:
                 self._pending_tasks.pop(turn_index, None)
             elapsed = time.monotonic() - start
-            logger.info("[CA] _run_c_stage: FINISH turn %d in %.1fs (dialogue_ok=%s)",
+            logger.info("[CA] _run_f_stage: FINISH turn %d in %.1fs (dialogue_ok=%s)",
                        turn_index, elapsed, dialogue_ok)
             self._dialogue_backfill.trigger()
             self._tool_backfill.trigger()
@@ -510,13 +510,13 @@ class ContextAssembler:
         content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False) if result else ""
 
         # 生成 per-tool L1
-        l1_str, l0_text = "", ""
+        fct_str, hdl_text = "", ""
         try:
             tc_def = {"id": tool_call_id, "type": "function",
                       "function": {"name": tool_name, "arguments": args or {}}}
             result_entry = [{"content": content, "status": status}]
-            l1_dict, l0_text = self.tool_summarizer.summarize(tc_def, result_entry)
-            l1_str = json.dumps(l1_dict, ensure_ascii=False) if l1_dict else ""
+            l1_dict, hdl_text = self.tool_summarizer.summarize(tc_def, result_entry)
+            fct_str = json.dumps(l1_dict, ensure_ascii=False) if l1_dict else ""
         except Exception as e:
             logger.warning("[CA_v5] tool summarize failed: %s", e)
 
@@ -527,17 +527,17 @@ class ContextAssembler:
             tool_name=tool_name, tool_call_id=tool_call_id,
             args_json=json.dumps(args) if args else None,
             status=status, duration_ms=duration_ms,
-            l1_text=l1_str, l0_text=l0_text,
+            l1_text=fct_str, l0_text=hdl_text,
             written_at=time.time(),
         )
         logger.debug("[CA_v5] _on_post_tool_call: wrote %s turn=%d seq=%d status=%s",
                      tool_name, turn, seq, status)
 
-    def _update_l1_v5(self, session_id: str, turn_index: int,
-                       l1_text: str, l0_text: str) -> bool:
+    def _update_fct_v5(self, session_id: str, turn_index: int,
+                       fct_text: str, hdl_text: str) -> bool:
         """v5: 只 UPDATE turn_stream 的 l1/l0 列（seq=0），不碰 content。"""
-        from .store import update_seq0_l1_v5
-        return update_seq0_l1_v5(self.store, session_id, turn_index, l1_text, l0_text)
+        from .store import update_seq0_fct_v5
+        return update_seq0_fct_v5(self.store, session_id, turn_index, fct_text, hdl_text)
 
 
     # ---------- A‑stage ----------
@@ -895,8 +895,8 @@ class ContextAssembler:
             return int(len(text) * 1.5)
         return max(1, len(text) // 2)
 
-    def _is_valid_summary(self, l1_text: str) -> bool:
-        if not l1_text or not l1_text.strip():
+    def _is_valid_fct(self, l1_text: str) -> bool:
+        if not fct_text or not l1_text.strip():
             return False
         try:
             data = json.loads(l1_text)
@@ -905,33 +905,33 @@ class ContextAssembler:
         except (json.JSONDecodeError, TypeError, AttributeError):
             return False
 
-    _L1_DEBUG_PATTERNS = (
+    _FCT_DEBUG_PATTERNS = (
         "当前会话", "CA 注入", "CA插件", "CA 插件", "当前 CA",
         "此会话", "本对话", "此对话",
         "当前上下文", "当前注入", "ctx 中",
         "完全无工具", "无工具组",
     )
 
-    def _format_l1_for_display(self, l1_text: str) -> str:
+    def _format_fct_for_display(self, l1_text: str) -> str:
         """将对话轮 L1 JSON 摘要格式化为可读文本，替代原始 JSON 注入。
 
         当 LLM 生成非 JSON 调试描述时（如"当前会话 CA 注入 ctx 中完全无工具组..."），
         识别并返回空字符串，不泄漏原始文本。
         """
-        if not l1_text or not l1_text.strip():
+        if not fct_text or not l1_text.strip():
             return l1_text
         try:
             data = json.loads(l1_text)
         except (json.JSONDecodeError, TypeError):
             # 非 JSON → 检测是否为调试描述（LLM 错误输出）
-            for pat in self._L1_DEBUG_PATTERNS:
+            for pat in self._FCT_DEBUG_PATTERNS:
                 if pat in l1_text:
                     return ""
             return l1_text
         core = data.get("core_change", "")
         if not core:
             # JSON 格式但无有效核心内容 → 检测调试模式
-            for pat in self._L1_DEBUG_PATTERNS:
+            for pat in self._FCT_DEBUG_PATTERNS:
                 if pat in l1_text:
                     return ""
             return l1_text
@@ -948,18 +948,18 @@ class ContextAssembler:
         return "\n".join(lines)
 
     @staticmethod
-    def _call_llm_for_l1(self, prev_l1, l2_text) -> Tuple[str, str]:
+    def _call_llm_for_fct(self, prev_fct, elm_text) -> Tuple[str, str]:
         """返回 (response_text, finish_reason)。
 
         所有重试均失败时返回 ("", "error")。
         """
         import urllib.request
         llm_start = time.monotonic()
-        prompt = L1_GENERATION_PROMPT.format(
+        prompt = FCT_GENERATION_PROMPT.format(
             previous_summary=format_previous_summary_for_prompt(
-                json.dumps(prev_l1, ensure_ascii=False) if prev_l1 else None
+                json.dumps(prev_fct, ensure_ascii=False) if prev_fct else None
             ),
-            current_dialog=l2_text)
+            current_dialog=elm_text)
         req_body = {
             "model": Config.LLM_MODEL,
             "prompt": prompt, "stream": False,
@@ -988,12 +988,12 @@ class ContextAssembler:
                 time.sleep(2 ** attempt)
 
         elapsed_ms = int((time.monotonic() - llm_start) * 1000)
-        logger.warning("[CA-METRIC] ca.l1.latency_ms: turn=%d, ms=%d", self._turn_counter, elapsed_ms)
-        self.stats.l1_latency_ms += elapsed_ms
+        logger.warning("[CA-METRIC] ca.fct.latency_ms: turn=%d, ms=%d", self._turn_counter, elapsed_ms)
+        self.stats.fct_latency_ms += elapsed_ms
 
         # 所有重试均失败，返回退化输出
         if finish_reason == "error":
-            self.stats.truncated_fallback += 1
+            self.stats.fct_truncated_fallback += 1
             return ("", "error")
 
         return (response_text, finish_reason)
@@ -1019,7 +1019,7 @@ class ContextAssembler:
     def _estimate_token_offset(self, history):
         return sum(self._token_estimate(m.get("content", "")) for m in history) if history else 0
 
-    def _get_previous_l1(self) -> Optional[Dict]:
+    def _get_previous_fct(self) -> Optional[Dict]:
         with self._task_lock:
             current_turn = self._turn_counter
         if current_turn <= 0:

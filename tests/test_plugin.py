@@ -283,8 +283,8 @@ class TestPreLlmCall:
         plugin._engine_errored = False
         plugin._session_id = "test_sid"
 
-        from ca.store import read_l1_v5
-        with patch('ca.store.read_l1_v5', return_value="替换摘要"):
+        from ca.store import read_fct_v5
+        with patch('ca.store.read_fct_v5', return_value="替换摘要"):
             history = [
                 {"role": "user", "content": "查询"},
                 {"role": "assistant", "content": "结果", "tool_calls": []},
@@ -327,9 +327,9 @@ class TestPostLlmCall:
             )
             mock_write.assert_called_once()
 
-        # 然后 process_turn_async
-        mock_engine.process_turn_async.assert_called_once()
-        args, kwargs = mock_engine.process_turn_async.call_args
+        # 然后 process_turn_f_stage
+        mock_engine.process_turn_f_stage.assert_called_once()
+        args, kwargs = mock_engine.process_turn_f_stage.call_args
         assert "查文件" in args
         assert "查完了" in args
 

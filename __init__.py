@@ -335,8 +335,8 @@ class CAContextAssemblerPlugin:
             if role == "assistant" and not msg.get("tool_calls"):
                 continue
 
-            from ca.store import read_l1_v5
-            l1 = read_l1_v5(store, sid, turn, seq)
+            from ca.store import read_fct_v5
+            l1 = read_fct_v5(store, sid, turn, seq)
             if l1:
                 msg["content"] = l1
                 replaced += 1
@@ -390,8 +390,8 @@ class CAContextAssemblerPlugin:
             self._saved_history_snapshot = None
 
         history_copy = list(conversation_history) if conversation_history else []
-        engine.process_turn_async(user_message, assistant_response, history_copy)
-        logger.info("[CA_v5] post_llm_call: process_turn_async called for turn %d", turn)
+        engine.process_turn_f_stage(user_message, assistant_response, history_copy)
+        logger.info("[CA_v5] post_llm_call: process_turn_f_stage called for turn %d", turn)
 
 
 # ═══════════════════════════════════════════════════════════════

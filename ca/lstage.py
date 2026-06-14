@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 from .config import Config
 from .post_process import robust_json_parse, clean_increment, parse_v1_markdown_xml
 from .tool_summarizer import ToolSummarizer
-from . import L1TruncatedException
+from . import FctTruncatedException
 
 if TYPE_CHECKING:
     from . import ContextAssembler
@@ -85,9 +85,9 @@ class BackfillThread(threading.Thread):
         """回填对话轮 L1，并提取工具调用回填为 tool_group。"""
         prev_l1 = self._get_prev_l1(rec["turn_index"])
         try:
-            response_text, finish_reason = self.engine._call_llm_for_l1(prev_l1, l2_text)
-        except L1TruncatedException as e:
-            logger.warning("[CA-METRIC] ca.l1.truncated_fallback: turn=%d, finish_reason=truncated, len=%d",
+            response_text, finish_reason = self.engine._call_llm_for_fct(prev_l1, l2_text)
+        except FctTruncatedException as e:
+            logger.warning("[CA-METRIC] ca.fct.truncated_fallback: turn=%d, finish_reason=truncated, len=%d",
                            rec["turn_index"], len(e.response_text))
             session_id = self.engine._session_id
             turn_index = rec["turn_index"]
