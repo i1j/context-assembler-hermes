@@ -226,6 +226,7 @@ class Config:
     BACKFILL_TOOL_RATE: ClassVar[int] = int(os.getenv("CA_BACKFILL_TOOL_RATE", "5"))
     TOOL_PRE_UPGRADE_WAIT_TIMEOUT: ClassVar[int] = int(os.getenv("CA_TOOL_PRE_UPGRADE_WAIT_TIMEOUT", "30"))
     TOOL_FIELD_PRIORITY_PROFILE: ClassVar[str] = os.getenv("CA_TOOL_FIELD_PRIORITY_PROFILE", "")
+    CA_OV_SUBMIT_ENABLED: ClassVar[bool] = os.getenv("CA_OV_SUBMIT_ENABLED", "1").strip().lower() in ("1", "true", "yes")
 
     SHUTDOWN_TIMEOUT: ClassVar[int] = int(os.getenv("CA_SHUTDOWN_TIMEOUT", "5"))
     BM25_HIT_THRESHOLD: ClassVar[int] = int(os.getenv("CA_BM25_HIT_THRESHOLD", "5"))

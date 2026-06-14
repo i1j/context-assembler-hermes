@@ -224,6 +224,23 @@ class TurnPlanEntry:
 
 
 @dataclass
+class _TopicSwitchData:
+    topic_id: int
+    turn_indices: List[int]
+    agg_text: str
+    l1_texts: Dict[int, str]
+    tool_group_l1: Dict[str, str]
+
+
+@dataclass
+class EncodingRow:
+    """编码表：conversation_history 位置 ↔ CA 内部 (turn, seq, role)。"""
+    turn_index: int
+    seq_index: int
+    role: str
+
+
+@dataclass
 class _AssemblePlanResult:
     """_compute_assemble_plan 返回值：正常路径下包含 plan 与辅助数据。"""
     plan: List[TurnPlanEntry]
@@ -265,7 +282,15 @@ class ContextAssembler:
         self._dialogue_backfill.start()
         self._tool_backfill.start()
 
-        # 话题边界追踪：从 turn_plan 恢复上次 topic_id
+        # 话题边界追踪 + OpenViking 提交
+        self._last_topic_id: Optional[int] = None
+        self._pending_ov_submit: Optional[_TopicSwitchData] = None
+
+        # 会话编码表：conv_idx → (turn, seq, role)
+        self._conv_encoding: Dict[int, EncodingRow] = {}
+        self._encoding_max_conv: int = -1
+        self._encoding_loaded: bool = False
+        self._encoding_db: Any = None
 
 
     def _restore_turn_index(self) -> int:
@@ -341,7 +366,7 @@ class ContextAssembler:
         thread = threading.Thread(
             target=self._run_c_stage,
             args=(self._session_id, turn_index, prev_l1, l2_text, token_offset,
-                  user_message, assistant_response, _bg_review),
+                  user_message, assistant_response, _bg_review, conversation_history),
             daemon=True, name=f"CA-CStage-{turn_index}"
         )
         with self._task_lock:
@@ -353,7 +378,7 @@ class ContextAssembler:
 
     def _run_c_stage(self, session_id, turn_index, prev_l1, l2_text, token_offset,
                      user_message="", assistant_response="",
-                     bg_review=False):
+                     bg_review=False, conversation_history=None):
         start = time.monotonic()
         logger.info("[CA] _run_c_stage: START turn %d", turn_index)
         dialogue_ok = False
@@ -492,6 +517,9 @@ class ContextAssembler:
                        turn_index, elapsed, dialogue_ok)
             self._dialogue_backfill.trigger()
             self._tool_backfill.trigger()
+            # ── 写入编码表 ──
+            if conversation_history is not None:
+                self._persist_conv_encoding(session_id, conversation_history)
 
     def _extract_tool_calls(self, messages: List[Dict]) -> List[Dict]:
         tool_turns = []
@@ -958,6 +986,9 @@ class ContextAssembler:
         """
         if context_length is None:
             context_length = self.context_length
+
+        # 加载编码表（用于 _build_aligned_outcomes 的 turn/seq 映射）
+        self._load_conv_encoding(self._session_id)
 
         messages = self._rebuild_messages_from_cache()
         messages.append({"role": "user", "content": user_message})
@@ -1616,12 +1647,17 @@ class ContextAssembler:
         }
         tool_plan: List[TurnPlanEntry] = []
 
-        for msg in messages:
+        for conv_idx, msg in enumerate(messages):
             if msg.get("role") != "tool":
                 continue
-            turn = msg.get("_turn_index")
-            seq = msg.get("_seq_index", 0)
-            if turn is None:
+            _enc = self._conv_encoding.get(conv_idx)
+            if _enc:
+                turn = _enc.turn_index
+                seq = _enc.seq_index
+            elif msg.get("_turn_index") is not None:
+                turn = msg.get("_turn_index")
+                seq = msg.get("_seq_index", 0)
+            else:
                 continue
 
             parent = dialogue_by_turn.get(turn)
@@ -2062,13 +2098,23 @@ class ContextAssembler:
         _fallback_turn = 0
         _fallback_group = 0
 
-        for msg in conversation_history:
+        for _conv_idx, msg in enumerate(conversation_history):
             role = msg.get("role", "")
             if role == "system":
                 outcomes.append(None)
                 continue
 
-            _turn = msg.get("_turn_index")
+            # 尝试从编码表解析 (turn, seq)
+            _hint_seq = 0
+            _enc = self._conv_encoding.get(_conv_idx)
+            if _enc:
+                _turn = _enc.turn_index
+                _hint_seq = _enc.seq_index
+            elif msg.get("_turn_index") is not None:
+                _turn = msg.get("_turn_index")
+                _hint_seq = msg.get("_seq_index", 0)
+            else:
+                _turn = None
 
             if _turn is None:
                 # 降级到顺序计数（兼容旧测试数据）
@@ -2113,13 +2159,11 @@ class ContextAssembler:
                     outcomes.append(None)
 
             elif role == "tool":
-                # ── 独立 tool 行：按 tool_plan 生成 [~/N/M] 摘要文本 ──
-                _t_turn = msg.get("_turn_index")
-                _t_seq = msg.get("_seq_index", 0)
-                _t_key = (_t_turn, _t_seq)
-                _t_entry = _tool_by_key.get(_t_key) if _t_turn is not None else None
+                # _turn / _hint_seq 已从编码表或 metadata 解析
+                _t_key = (_turn, _hint_seq)
+                _t_entry = _tool_by_key.get(_t_key) if _turn is not None else None
                 if _t_entry is not None:
-                    _t_key_cache = (_t_turn, _t_seq)
+                    _t_key_cache = (_turn, _hint_seq)
                     _t_l1 = self.cache.tool_l1_texts.get(_t_key_cache, "")
                     _t_l0 = self.cache.tool_l0_texts.get(_t_key_cache, "")
                     _t_text = _t_l1 or _t_l0 or ""
@@ -2176,6 +2220,109 @@ class ContextAssembler:
             else:
                 i += 1
         return merged
+
+    # ---------- 编码表 ----------
+    def _load_conv_encoding(self, session_id: str) -> None:
+        """从 working_copy.db 加载编码表到 self._conv_encoding。
+
+        空表或异常 → _build_aligned_outcomes 使用 fallback 顺序计数。
+        """
+        if self._encoding_loaded:
+            return
+        if self._encoding_db is None:
+            import sqlite3
+            db_path = str(getattr(self, 'store', None)._db_path) if hasattr(getattr(self, 'store', None), '_db_path') else './working_copy.db'
+            try:
+                self._encoding_db = sqlite3.connect(db_path)
+            except Exception:
+                self._conv_encoding = {}
+                self._encoding_max_conv = -1
+                self._encoding_loaded = True
+                return
+        try:
+            cur = self._encoding_db.execute(
+                "SELECT conv_idx, turn_index, seq_index, role "
+                "FROM conv_encoding WHERE session_id=? ORDER BY conv_idx",
+                (session_id,)
+            )
+            self._conv_encoding = {}
+            mc = -1
+            for row in cur.fetchall():
+                self._conv_encoding[row[0]] = EncodingRow(row[1], row[2], row[3])
+                if row[0] > mc:
+                    mc = row[0]
+            self._encoding_max_conv = mc
+        except Exception:
+            self._conv_encoding = {}
+            self._encoding_max_conv = -1
+        finally:
+            self._encoding_loaded = True
+
+    def _persist_conv_encoding(self, session_id: str,
+                               conversation_history: list) -> None:
+        """C-stage 末尾写入本轮新消息行的编码表。
+
+        只写行序≥1 的行（行序=0 的用户原文不记）。
+        conv_idx > _encoding_max_conv 为新增行。
+        """
+        import sqlite3
+
+        db = self._encoding_db
+        if db is None:
+            db_path = str(getattr(self, 'store', None)._db_path) if hasattr(getattr(self, 'store', None), '_db_path') else './working_copy.db'
+            try:
+                db = sqlite3.connect(db_path)
+                self._encoding_db = db
+            except Exception:
+                return
+
+        try:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS conv_encoding ("
+                "session_id TEXT NOT NULL,"
+                "conv_idx INTEGER NOT NULL,"
+                "turn_index INTEGER NOT NULL,"
+                "seq_index INTEGER NOT NULL,"
+                "role TEXT NOT NULL,"
+                "PRIMARY KEY (session_id, conv_idx))"
+            )
+        except Exception:
+            return
+
+        tc = 0
+        sc = 0
+        rows = []
+        for conv_idx, msg in enumerate(conversation_history):
+            if conv_idx <= self._encoding_max_conv:
+                if msg.get("role") == "user":
+                    tc += 1
+                continue
+            role = msg.get("role", "")
+            if role == "user":
+                tc += 1
+                sc = 0
+                continue
+            seq = sc if role == "tool" else 0
+            if role == "tool":
+                sc += 1
+            rows.append((session_id, conv_idx, tc, seq, role))
+
+        if rows:
+            try:
+                db.executemany(
+                    "INSERT OR REPLACE INTO conv_encoding "
+                    "(session_id, conv_idx, turn_index, seq_index, role) "
+                    "VALUES (?, ?, ?, ?, ?)", rows
+                )
+                db.commit()
+                self._encoding_max_conv = max(r[1] for r in rows)
+                self._conv_encoding.update(
+                    {r[1]: EncodingRow(r[2], r[3], r[4]) for r in rows}
+                )
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "[CA] _persist_conv_encoding failed", exc_info=True)
 
     def _compute_tail_start(self, messages):
         """[已弃用] 由 turn_cache 路线取代——见 _compute_assemble_plan 中 tail_protected_turns 计算。

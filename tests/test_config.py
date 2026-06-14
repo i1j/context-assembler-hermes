@@ -16,6 +16,7 @@ def test_tc_cf_001(engine):
 def test_tc_cf_002(engine):
     """validate 校验
     Steps: Config.reload(); 调用 validate()"""
+    old = os.environ.get("CA_LLM_TIMEOUT", "")
     os.environ["CA_LLM_TIMEOUT"] = "-1"
     from ca.config import Config
     Config.reload()
@@ -24,6 +25,14 @@ def test_tc_cf_002(engine):
         assert False, "Should have raised ValueError"
     except (ValueError, Exception):
         assert True
+    finally:
+        if old:
+            os.environ["CA_LLM_TIMEOUT"] = old
+        else:
+            os.environ.pop("CA_LLM_TIMEOUT", None)
+        # 必须重置 class variable，否则 reload() 以当前值作 fallback 读回 -1.0
+        Config.LLM_TIMEOUT = 120.0
+        Config.reload()
 
 @pytest.mark.medium
 def test_tc_cf_003(engine):
