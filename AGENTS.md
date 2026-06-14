@@ -4,8 +4,8 @@
 
 | 项          | 值                                                                                |
 | ----------- | --------------------------------------------------------------------------------- |
-| 版本        | v5.3.0-simple (过渡简化版)                                                           |
-| 注入方式    | 简化替换（_simple_mutation_mode） — DB 直查 L1，不依赖 turn_plan/cache/编码表        |
+| 版本        | v5.0 (F-stage)                                                                     |
+| 注入方式    | 简化替换（`_simple_mutation_mode_v5_v5`） — turn_stream 查 Fct 替换 tool 行，尾部保护 |
 | plugin.yaml | v5.2.1（待同步）                                                                    |
 | 部署方式    | 自包含独立副本                                                                    |
 | 插件路径    | `~/.hermes/profiles/tester/plugins/ca_assembler/`                               |
@@ -23,11 +23,11 @@ def register(ctx) -> None:
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("on_session_end",   _on_session_end)
     ctx.register_hook("on_session_reset", _on_session_reset)
-    ctx.register_hook("pre_llm_call",     _on_pre_llm_call)
-    ctx.register_hook("post_llm_call",    _on_post_llm_call)
-    ctx.register_hook("post_api_request", _on_post_api_request)
-    ctx.register_hook("pre_tool_call",    _on_pre_tool_call)
-    ctx.register_hook("post_tool_call",   _on_post_tool_call)
+    ctx.register_hook("pre_llm_call",     _on_pre_llm_call_v5)
+    ctx.register_hook("post_llm_call",    _on_post_llm_call_v5)
+    ctx.register_hook("post_api_request", _on_post_api_request_v5)
+    ctx.register_hook("pre_tool_call",    _on_pre_tool_call_v5)
+    ctx.register_hook("post_tool_call",   _on_post_tool_call_v5)
 ```
 
 ## Hook 分发函数
@@ -77,101 +77,92 @@ def _on_session_reset(**kwargs: Any) -> None:
 1. 持久化会话理想阈值 → `{ca_cache}/topic_threshold_meta.json`
 2. 从 `_engines` 移除 → `engine.reset()` + 清除断路器状态
 
-### `_on_pre_llm_call` — 上下文注入（A-stage）
+### `_on_pre_llm_call_v5` — E-stage 写 user Elm + A-stage 替换
 
 ```python
-def _on_pre_llm_call(**kwargs: Any) -> Optional[str]:
+def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
 ```
 
-**kwargs**:
+**kwargs**: `session_id`, `user_message`, `conversation_history`, `context_length`
 
-| 参数               | 类型 | 说明                                                    |
-| ------------------ | ---- | ------------------------------------------------------- |
-| `session_id`     | str  | 当前会话                                                |
-| `user_message`   | str  | 用户输入文本                                            |
-| `context_length` | int  | 上下文 Token 窗口上限（默认 `Config.CONTEXT_LENGTH`） |
+**E-stage 行为**（数据积累）：
 
-**返回值**: `Optional[str]`，详见 [v5.2 注入规则分析](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md#3-tool_plan-注入重构v52)。
+1. 计算当前 turn = `conversation_history` 中 role=user 的消息数
+2. 写入 `turn_stream (turn, seq=0)`：`role='user', content=user_message`
+3. 检测 bg_review：如是则直接返回 None（跳过 A-stage）
 
-注入模式由 `Config.HISTORY_INJECTION` 控制：
+**A-stage 行为**（上下文替换）：
 
-| 模式 | 入口 | 效果 | pre_llm_call 返回值 | 恢复 |
-|------|------|------|-------------------|------|
-| **replace**（默认） | `_simple_mutation_mode` | DB 直查 L1 替换 tool 行，尾部保护 | `None`（浅拷贝传播） | snapshot 全量恢复 |
-| **append** | `_build_messages_from_plan`+tool_plan | 摘要拼入 user message | 文本字符串 | 无需 |
-| **off** | — | 仅数据积累 | `None` | 无需 |
+- `_simple_mutation_mode_v5(conversation_history)`：
+  1. 保存完整消息快照到 `_saved_history_snapshot`
+  2. 尾部保护区：倒数第 3 个 user 消息之后 → 原文保留
+  3. 保护区外：assistant{tc}/tool 行用 turn_stream 的 l1_text（Fct）替换
+  4. user 行始终原文保留
+  5. 返回 None（history 已原地替换）
 
-**行类型注射规则**（replace 模式 v5.3.0-simple）：
+**行类型替换规则**：
 
 | 条件 | user | assistant_fin | assistant{tc} | tool |
 |------|------|--------------|--------------|------|
-| 尾部保护区（倒数第 3 个 user 之后） | 原文保留 | 原文保留 | 原文保留 | 原文保留 |
-| 保护区外 | 原文保留 | 原文保留 | `_format_tool_group_assembly(l1)` | l1_text 或 l0_text |
+| 尾部保护区 | 原文保留 | 原文保留 | 原文保留 | 原文保留 |
+| 保护区外 | 原文保留 | 原文保留 | 替换为 tool group Fct | 替换为 per-tool Fct |
 
-不区分 bg_review（统一规则）。DB 查询用 `store.read_turn_texts`(tool_group) + `store.read_tool_rows_for_group`。无碰撞风险（原生 `(turn, api, seq)` 过滤）。
-# tool 行按 tool_plan 生成独立摘要（无标签，各自占一行）
-tool: "read_file: /tmp/test.py (60 lines)"
-tool: "search: *.py → 3 hits"
-# final assistant — 保留原文
-assistant_fin: "文件内容已查到"
-```
-
-### `_on_post_llm_call` — 数据积累与快照恢复（C-stage）
+### `_on_post_llm_call_v5` — E-stage 写 final assistant + F-stage 触发
 
 ```python
-def _on_post_llm_call(**kwargs: Any) -> None:
+def _on_post_llm_call_v5(**kwargs: Any) -> None:
 ```
 
-**kwargs**:
+**kwargs**: `session_id`, `user_message`, `assistant_response`, `conversation_history`
 
-| 参数                     | 类型 | 说明                             |
-| ------------------------ | ---- | -------------------------------- |
-| `session_id`           | str  | 当前会话                         |
-| `user_message`         | str  | 用户输入文本                     |
-| `assistant_response`   | str  | LLM 的文本回复                   |
-| `conversation_history` | list | 本轮完整消息历史（含 tool 结果） |
+**E-stage 行为**：
 
-行为：
+1. 写入 `turn_stream (turn, seq=N+1)`：`role='assistant', content=assistant_response`
+2. 从 `_saved_history_snapshot` 恢复 A-stage 替换前的原始 content
+3. 清空 `_saved_history_snapshot`
 
-1. **先同步 `flush_tool_buffer()`** — 将 `_tool_buffer` 中的增量采集数据写入 store
-2. **快照恢复** — 优先从 `_saved_history_snapshot` 全量还原 mutation 前的 history；fallback 到 `_saved_history` 按 `id(msg)` 逐条恢复
-3. **再异步 `process_turn_async()`** — 生成对话轮摘要
-   `conversation_history` 传副本（列表拷贝），避免竞态。
+**F-stage 触发**：
 
-**快照两层结构**：
+- 调用 `engine.process_turn_f_stage(turn)`，传入当前 turn 编号
+- F-stage 在 daemon 线程中异步执行，从 DB 读取 Elm 生成 Fct
 
-- `_saved_history_snapshot: Optional[List[Dict]]` — 完整消息列表快照，全量 clear+extend 恢复（PR3 新增，优先）
-- `_saved_history: Optional[Dict[int, str]]` — 旧式 `id(msg) → content` 映射，逐条恢复（向后兼容）
-
-### `_on_post_api_request` — 工具组结构捕获（PR2 新增）
+### `_on_post_api_request_v5` — thought Elm 写入 + tool 占位行
 
 ```python
-def _on_post_api_request(**kwargs: Any) -> None:
+def _on_post_api_request_v5(**kwargs: Any) -> None:
 ```
 
-**kwargs**: `api_request_id`, `api_call_count`, `assistant_message`, `finish_reason`, `usage`, `session_id`
+**kwargs**: `api_request_id`, `assistant_message`, `api_call_count`, `finish_reason`, `usage`, `session_id`
 
-行为：从 `assistant_message` 提取 `content`(thought) + `tool_calls` → 创建 `ToolGroupBuffer` 存入 `_tool_buffer[api_request_id]`。
+**E-stage 行为**（写即落盘，不经过 buffer）：
 
-### `_on_pre_tool_call` — 工具预注册（PR2 新增）
+1. 提取 `assistant_message.content` 作为 thought Elm
+2. 写入 `turn_stream (turn, seq=1)`：`role='assistant', content=thought, l1_text=thought Fct`
+3. 如有 tool_calls，为每个工具写入占位行：`role='tool', status='pending'`
+4. 记录 `_tool_seq_map[tool_call_id] = (turn, seq)` 供回填
+
+### `_on_pre_tool_call_v5` — 无操作
 
 ```python
-def _on_pre_tool_call(**kwargs: Any) -> None:
+def _on_pre_tool_call_v5(**kwargs: Any) -> None:
+    pass
 ```
 
-**kwargs**: `tool_name`, `args`, `tool_call_id`, `api_request_id`, `session_id`
+工具占位行已在 `_on_post_api_request_v5` 中写入，无需此处处理。
 
-行为：在对应 buffer 中注册工具占位（status=pending）。buffer 不存在时 auto-create sentinel（api_call_count=999999）。
-
-### `_on_post_tool_call` — 工具结果填充（PR2 新增）
+### `_on_post_tool_call_v5` — tool 行回填 + per-tool Fct
 
 ```python
-def _on_post_tool_call(**kwargs: Any) -> None:
+def _on_post_tool_call_v5(**kwargs: Any) -> None:
 ```
 
 **kwargs**: `tool_name`, `args`, `result`, `tool_call_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, `error_message`, `session_id`
 
-行为：将工具执行结果填充到对应 buffer 中。Hermes 原始 status(`ok`/`error`/`blocked`/`cancelled`)透传。
+**E-stage 行为**：
+
+1. 查 `_tool_seq_map[tool_call_id]` 定位 (turn, seq)
+2. 写入 `turn_stream (turn, seq)`：`role='tool', content=result, status, duration_ms`
+3. 同步生成 per-tool Fct（`ToolSummarizer.summarize()`），写入 l1_text/l0_text
 
 ## 存储结构
 
@@ -183,7 +174,33 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 
 当前 profile 实际路径：`~/.hermes/profiles/tester/ca_cache/{session_id}.db`
 
-### turn_cache 表（v5 schema）
+### turn_stream 表（v5.0 E-stage 新表）
+
+**主键**：`(session_id, turn, seq)`
+
+| 字段              | 类型    | 说明                                      |
+| ----------------- | ------- | ----------------------------------------- |
+| `session_id`    | TEXT    | 会话 ID                                   |
+| `turn`           | INTEGER | 对话轮次（1-based，对应 user 消息数）     |
+| `seq`            | INTEGER | 轮内序号（0=user, 1=thought, 2..=tool, N=assistant_fin） |
+| `role`           | TEXT    | `user` / `assistant` / `tool`            |
+| `content`        | TEXT    | Elm（原始消息文本）                        |
+| `tool_name`      | TEXT    | 工具名（仅 tool 行）                       |
+| `tool_call_id`   | TEXT    | 工具调用 ID（仅 tool 行）                  |
+| `args_json`      | TEXT    | 工具参数 JSON（仅 tool 行）                |
+| `status`         | TEXT    | `ok` / `error` / `blocked` / `cancelled` / `pending` |
+| `duration_ms`    | INTEGER | 工具执行耗时                                |
+| `tool_calls_json` | TEXT   | assistant 的 tool_calls 定义 JSON          |
+| `finish_reason`  | TEXT    | `stop` / `tool_calls` / `length`          |
+| `usage_*`        | INTEGER | LLM token 用量                             |
+| `biz_category`   | TEXT    | `bg_review` 或 NULL                        |
+| `written_at`     | REAL    | time.time() 写入时间戳                     |
+| `l1_text`        | TEXT    | Fct（结构化摘要 JSON，C/F-stage 写入）     |
+| `l0_text`        | TEXT    | Hdl（一句话标题，C/F-stage 写入）          |
+
+每行 = 一条消息切片。E-stage 写即落盘，F-stage 回写 l1_text/l0_text。
+
+### turn_cache 表（旧表，兼容保留）
 
 **主键**：`(session_id, turn_index, api_call_count, seq_index)`
 
@@ -207,8 +224,8 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 | `usage_json`        | TEXT    | Token 用量 JSON                                           |
 | `l1_text`           | TEXT    | CA 摘要 JSON                                              |
 | `l0_text`           | TEXT    | 单行摘要（≤100 字符）                                    |
-| `l0_embedding`      | BLOB    | L0 嵌入向量（4096 字节）                                  |
-| `l1_embedding`      | BLOB    | L1 嵌入向量（4096 字节）                                  |
+| `l0_embedding`      | BLOB    | Hdl 嵌入向量（4096 字节）                                  |
+| `l1_embedding`      | BLOB    | Fct 嵌入向量（4096 字节）                                  |
 | `bm25_tokens`       | TEXT    | BM25 分词                                                 |
 | `token_offset`      | INTEGER | 累计 Token 偏移                                           |
 | `query_embedding`   | BLOB    | 用户消息嵌入向量                                          |
@@ -225,26 +242,25 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 | tool            | N（≥1）           | ≥1           | tool      | 含 `tool_call_id`，`status`                        |
 | final assistant | 999999             | 0             | assistant | `finish_reason="stop"`                               |
 
-### 存储特性
+### 存储特性（turn_stream）
 
-- **L2 是递增快照**：每条 subturn 存独立消息切片，非全量拼接
-- **L0 100 字符上限**：超过自动截断
-- **全量嵌入**：成功时 l0 + l1 均为 4096 字节 BLOB
-- **所有 turn 独立存储**：40 条 subturn = 40 行 turn_cache
+- **Elm 是原始数据**：每条消息切片独立存储，按 (turn, seq) 排序
+- **Fct 含 Hdl**：l1_text 存结构化摘要（含 stage_tag），l0_text 是 Hdl（一句话标题）
+- **全量嵌入**：成功时 hdl + fct 均为 4096 字节 BLOB
 - **WAL 模式**：Store 初始化时设置 PRAGMA journal_mode=WAL
 
 ## 内存缓存结构（AssemblyCache）
 
 | 缓存                    | Key 类型                      | 说明                                             |
 | ----------------------- | ----------------------------- | ------------------------------------------------ |
-| `l0_texts`            | `Dict[int, str]`            | 对话轮 L0 文本，key=turn_index                   |
-| `l1_texts`            | `Dict[int, str]`            | 对话轮 L1 JSON，key=turn_index                   |
+| `l0_texts`            | `Dict[int, str]`            | 对话轮 Hdl 文本，key=turn_index                   |
+| `l1_texts`            | `Dict[int, str]`            | 对话轮 Fct JSON，key=turn_index                   |
 | `tool_l0_texts`       | `Dict[Tuple[int,int], str]` | 个体工具 L0，key=(turn_index, seq_index)         |
-| `tool_l1_texts`       | `Dict[Tuple[int,int], str]` | 个体工具 L1 JSON，key=(turn_index, seq_index)    |
+| `tool_l1_texts`       | `Dict[Tuple[int,int], str]` | 个体工具 Fct JSON，key=(turn_index, seq_index)    |
 | `tool_group_l0_texts` | `Dict[Tuple[int,int], str]` | 工具组 L0，key=(turn_index, api_call_count)      |
-| `tool_group_l1_texts` | `Dict[Tuple[int,int], str]` | 工具组 L1 JSON，key=(turn_index, api_call_count) |
+| `tool_group_l1_texts` | `Dict[Tuple[int,int], str]` | 工具组 Fct JSON，key=(turn_index, api_call_count) |
 
-`add_tool_group()` 在 `flush_tool_buffer()` 末尾同步调用，保证缓存与 DB 一致。
+`add_tool_group()` 已由 E-stage 写即落盘替代，仅在 `cache.add_turn()` 中同步缓存。
 
 ## 关键环境变量
 
@@ -253,20 +269,20 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 | `CA_EMBED_BACKEND`          | `ollama`                 | 嵌入后端                                                                       |
 | `CA_EMBED_MODEL`            | `qwen3-embedding:0.6b`   | 嵌入模型                                                                       |
 | `CA_EMBED_ENDPOINT`         | `http://localhost:11439` | 嵌入服务端点                                                                   |
-| `CA_LLM_MODEL`              | `qwen3-4b-instruct`      | L1 摘要生成模型                                                                |
+| `CA_LLM_MODEL`              | `qwen3-4b-instruct`      | Fct 摘要生成模型                                                                |
 | `CA_LLM_ENDPOINT`           | `http://localhost:11440` | LLM 服务端点                                                                   |
 | `CA_EMBED_TIMEOUT`          | 30                         | 嵌入超时（秒）                                                                 |
 | `CA_LLM_TIMEOUT`            | 180                        | LLM 超时（秒）                                                                 |
 | `CA_CONTEXT_LENGTH`         | 50000                      | 上下文 Token 预算上限                                                          |
-| `CA_L1_TEMPERATURE`         | 0.3                        | L1 摘要生成温度                                                                |
-| `CA_L1_MAX_TOKENS`          | 800                        | L1 摘要生成最大 Token 数                                                       |
+| `CA_L1_TEMPERATURE`         | 0.3                        | Fct 摘要生成温度                                                                |
+| `CA_L1_MAX_TOKENS`          | 800                        | Fct 摘要生成最大 Token 数                                                       |
 | `CA_PROTECT_TAIL_TOKENS`    | 20000（来自 settings.yaml） | 当前话题块 Token 保护安全阀。来源：`ca/settings.yaml`→`_YAML_DEFAULTS`→env `CA_PROTECT_TAIL_TOKENS` |
 | `CA_TOOL_TAIL_TURN_COUNT`   | 2                          | 工具轮尾区保留最近对话轮数                                                     |
 | `CA_SYSTEM_TAIL_TURN_COUNT` | 2                          | 系统尾区：最近 N 条系统消息原文透传                                            |
 | `CA_COMPRESSION_THRESHOLD`  | 0.50                       | 压缩警戒比值                                                                   |
 | `CA_HISTORY_INJECTION`      | `replace`                | 注入模式：`replace`(mutation)/`append`(annotation)/`off`(仅数据积累)     |
 | `CA_HISTORY_MUTATE`         | (已弃用)                   | 2值开关，`1`→替换 `0`→追加。未设 `CA_HISTORY_INJECTION` 时兼容此旧变量 |
-| `CA_LLM_THINK`              | 未设置                     | L1 LLM think 参数（1/0/true/false）                                            |
+| `CA_LLM_THINK`              | 未设置                     | Fct LLM think 参数（1/0/true/false）                                            |
 
 ### 话题拣配配置（v4.6.0）
 
@@ -278,7 +294,7 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 | `CA_TOPIC_JACCARD_MERGE`   | 0.07   | 话题分割 Jaccard 独立合并阈值（无需 todo 重叠）。设为 0.07 确保全部 S→S 实义轮合并，由 20K 尾区保护完成唯一实质性切割 |
 | `CA_TOPIC_RADIUS_WEIGHT`     | 2.0    | 半径公式中最近邻距离的权重系数 |
 | `CA_TOPIC_MAX_UPGRADE`       | 10     | 检索升级最大 topic 数          |
-| `CA_TOPIC_BG_LEVEL`          | `L0` | BG 话题固定级别                |
+| `CA_TOPIC_BG_LEVEL`          | `Hdl` | BG 话题固定级别                |
 
 ## 话题分割算法（v5.2.1）
 
@@ -323,7 +339,7 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 
 检测发生在 `assemble()` 中，由 `_detect_forced_split_turns(messages)` 扫描 `conversation_history` 中的 `role="user"` 消息实现。
 
-真正的上下文质量由 **20K 尾区保护区** 保证——尾区内的轮强制 L2 原文透传。即使整个实义话题远超 20K，保护区外的轮按话题分级降级，不会破坏尾区内的对话质量。
+真正的上下文质量由 **20K 尾区保护区** 保证——尾区内的轮强制 Elm 原文透传。即使整个实义话题远超 20K，保护区外的轮按话题分级降级，不会破坏尾区内的对话质量。
 
 如需改变此行为（例如希望话题分割承担更多上下文精细化管理），增大 `CA_TOPIC_JACCARD_MERGE` 即可。
 
@@ -360,7 +376,7 @@ def _on_post_tool_call(**kwargs: Any) -> None:
 
 `_add_bigrams` 中使用 `sorted(s)` 保证 `''.join(s)` 跨运行一致。
 
-## L1 摘要生成架构
+## Fct 摘要生成架构
 
 关键模块表见上。数据流详见 [v5.2 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md#2-l0_embedding-孤儿数据清理)。
 
@@ -418,7 +434,7 @@ print(water)
 
 ## 测试接口清单
 
-**活跃**: 315 passed, 4 failed（既存test_a.py）, 20 skipped（全量+legacy: 378/31/20/1）
+**全部 29 测试通过**（Phase 1-4 重构后）
 
 ```bash
 cd /home/i1j/.hermes/profiles/tester/plugins/ca_assembler
@@ -453,21 +469,19 @@ Hermes 有两条完全独立的机制：
 | `_state_file_path()`      | `Path.home() / ".hermes"`       | `get_hermes_home()`（profile 感知） |
 | `sys.path`                | 无特殊处理                        | 本地 `ca/` 子目录优先               |
 | 激活方式                    | `context.engine: ca_assembler`  | `plugins.enabled: [ca_assembler]`   |
-| `_simple_mutation_mode` | 不存在                            | 新增，mutation 模式入口（v5.3.0-simple） |
-| 注入方式                    | 标签注入 `[~/N/0]`              | DB 直查 L1 替换 tool 行，不依赖 plan/cache |
-| `bg_review A-stage`       | 不支持                            | gate 跳过，C-stage 写 biz_category    |
-| l0_embedding                | 一直计算                          | 已注释（无人消费）                    |
-| 工具组输出                  | 旧紧凑格式（header+各工具详情）   | v5.2 精简为仅 header                 |
-| `_add_bigrams 确定性`      | 集合 `''.join(s)` 无心化不稳定  | v5.2.1 用 `sorted(s)` 保证确定性       |
-| 话题分割合并路径            | 仅 todo 重叠一条路径            | v5.2.1 新增 Jaccard 独立合并 + 自适应阈值 |
-| 编码表 (conv_encoding)       | 不存在                            | v5.3.0-simple 已废弃（线程安全 + key碰撞问题，被 _simple_mutation_mode 取代） |
+| `_simple_mutation_mode_v5` | 不存在                            | 新增，mutation 模式入口（v5.0 F-stage） |
+| 注入方式                    | 标签注入 `[~/N/0]`              | DB 直查 Fct 替换 tool 行（turn_stream read_fct_v5） |
+| `bg_review A-stage`       | 不支持                            | gate 跳过，F-stage 写 biz_category    |
+| F-stage 数据源              | 函数参数拼接                    | turn_stream DB 读取（read_turn_elm_rows） |
+| stage_tag                  | 无                               | 独立字段，不嵌入 core_change |
+| 旧编码表/工具buffer       | 存在                              | v5.0 已废弃，被 turn_stream + E-stage 写即落盘取代 |
 
 ## 脚本工具
 
 | 脚本                                   | 说明                             |
 | -------------------------------------- | -------------------------------- |
 | `scripts/backfill_tool_summaries.py` | 历史工具摘要回填（修复存量数据） |
-| `scripts/benchmark_l1.py`            | L1 生成性能基准测试              |
+| `scripts/benchmark_l1.py`            | Fct 生成性能基准测试              |
 
 ## 相关文档
 
@@ -477,7 +491,7 @@ Hermes 有两条完全独立的机制：
 | ---------- | ------------------------------- | ------------------------------------------------------------------------- |
 | 变更历史   | `docs/changelog.md`           | 全版本变更记录（唯一权威源）                                              |
 | 分析       | `docs/analysis/`              | 缓存分析、注入重构报告（v5.1）                                            |
-| 调试       | `docs/debug/`                 | 调试记录（_simple_mutation_mode、编码表验证、占位符根因等）               |
+| 调试       | `docs/debug/`                 | 调试记录（_simple_mutation_mode_v5、（已移除）验证、占位符根因等）               |
 
 ## 知识图谱（graphify）
 
