@@ -327,11 +327,8 @@ class TestPostLlmCall:
             )
             mock_write.assert_called_once()
 
-        # 然后 process_turn_f_stage
-        mock_engine.process_turn_f_stage.assert_called_once()
-        args, kwargs = mock_engine.process_turn_f_stage.call_args
-        assert "查文件" in args
-        assert "查完了" in args
+        # 然后 process_turn_f_stage（参数为 turn_index）
+        mock_engine.process_turn_f_stage.assert_called_once_with(1)
 
     def test_skipped_when_errored(self):
         """引擎错误时跳过。"""

@@ -1357,6 +1357,29 @@ def read_fct_v5(store, session_id: str, turn: int, seq: int) -> str:
         return ""
 
 
+def read_turn_elm_rows(store, session_id: str, turn: int) -> list:
+    """Read all Elm rows for a turn from turn_stream.
+
+    Returns list of (seq, role, content, tool_name, tool_call_id).
+    """
+    try:
+        cur = store.conn.execute(
+            "SELECT seq, role, content, tool_name, tool_call_id "
+            "FROM turn_stream WHERE session_id=? AND turn=? ORDER BY seq",
+            (session_id, turn),
+        )
+        return cur.fetchall()
+    except sqlite3.Error:
+        return []
+
+
+def read_prev_fct(store, session_id: str, turn: int) -> str:
+    """Read previous turn's Fct from turn_stream."""
+    if turn <= 0:
+        return ""
+    return read_fct_v5(store, session_id, turn - 1, 0)
+
+
 def update_seq0_fct_v5(store, session_id: str, turn: int,
                        fct_text: str, hdl_text: str) -> bool:
     """仅 UPDATE turn_stream 的 l1/l0 列（seq=0 行），不碰 content。"""

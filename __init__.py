@@ -389,8 +389,7 @@ class CAContextAssemblerPlugin:
                     ch["content"] = orig_content
             self._saved_history_snapshot = None
 
-        history_copy = list(conversation_history) if conversation_history else []
-        engine.process_turn_f_stage(user_message, assistant_response, history_copy)
+        engine.process_turn_f_stage(turn)
         logger.info("[CA_v5] post_llm_call: process_turn_f_stage called for turn %d", turn)
 
 

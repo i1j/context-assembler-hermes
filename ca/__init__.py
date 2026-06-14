@@ -254,23 +254,15 @@ class ContextAssembler:
             self.cache._rebuild_executor.shutdown(wait=False)
 
     # ---------- F‑stage ----------
-    def process_turn_f_stage(self, user_message: str, assistant_response: str,
-                           conversation_history: Optional[List[Dict]] = None) -> int:
-        expected = len([m for m in (conversation_history or []) if m.get("role") == "user"])
+    def process_turn_f_stage(self, turn_index: int) -> int:
+        """F-stage 入口：异步启动 _run_f_stage。turn_index 由调用者确定。"""
         with self._task_lock:
-            target = max(self._turn_counter + 1, expected)
-            if target in self._pending_tasks and self._pending_tasks[target].is_alive():
-                logger.info("[CA] process_turn_f_stage: turn %d already pending, returning", target)
-                return target
-            self._turn_counter = target
-            turn_index = target
+            if turn_index in self._pending_tasks and self._pending_tasks[turn_index].is_alive():
+                logger.info("[CA] process_turn_f_stage: turn %d already pending, returning", turn_index)
+                return turn_index
+            self._turn_counter = turn_index
 
-        logger.info("[CA] process_turn_f_stage: starting F-stage for turn %d (expected=%d)",
-                    turn_index, expected)
-
-        elm_text = f"User: {user_message}\nAssistant: {assistant_response}"
-        prev_fct = self._get_previous_fct()
-        token_offset = self._estimate_token_offset(conversation_history)
+        logger.info("[CA] process_turn_f_stage: starting F-stage for turn %d", turn_index)
 
         # 在主线程捕获 write_origin（ContextVar 不自动传播到 daemon 线程）
         _bg_review = (get_current_write_origin() == "background_review")
@@ -279,8 +271,7 @@ class ContextAssembler:
 
         thread = threading.Thread(
             target=self._run_f_stage,
-            args=(self._session_id, turn_index, prev_fct, l2_text, token_offset,
-                  user_message, assistant_response, _bg_review, conversation_history),
+            args=(self._session_id, turn_index, _bg_review),
             daemon=True, name=f"CA-FStage-{turn_index}"
         )
         with self._task_lock:
@@ -290,20 +281,39 @@ class ContextAssembler:
         logger.info("[CA] process_turn_f_stage: thread CA-FStage-%d started", turn_index)
         return turn_index
 
-    def _run_f_stage(self, session_id, turn_index, prev_fct, elm_text, token_offset,
-                     user_message="", assistant_response="",
-                     bg_review=False, conversation_history=None):
+    def _run_f_stage(self, session_id, turn_index, bg_review=False):
         start = time.monotonic()
         logger.info("[CA] _run_f_stage: START turn %d", turn_index)
         dialogue_ok = False
+
+        # ── 从 DB 读一轮 Elm ──
+        from .store import read_turn_elm_rows, read_prev_fct
+        rows = read_turn_elm_rows(self.store, session_id, turn_index)
+        if not rows:
+            logger.warning("[CA] _run_f_stage turn %d: no Elm rows found, skipping", turn_index)
+            return
+
+        parts = []
+        user_elm = ""
+        for seq, role, content, tool_name, tool_call_id in rows:
+            if role == "user":
+                user_elm = content or ""
+                parts.append(f"User: {content}")
+            elif role == "assistant":
+                parts.append(f"Assistant: {content}")
+            elif role == "tool":
+                parts.append(f"Tool({tool_name}): {(content or '')[:200]}")
+        elm_text = "\n".join(parts)
+        prev_fct = read_prev_fct(self.store, session_id, turn_index)
+        token_offset = sum(len(r[2] or "") for r in rows)
 
         if bg_review:
             logger.info("[CA] _run_f_stage turn %d: background review, skipping LLM", turn_index)
 
         try:
             if bg_review:
-                # bg_review 路径：从 user_message 提取实际内容摘要
-                _src = user_message or elm_text or ""
+                # bg_review 路径：从 user Elm 提取实际内容摘要
+                _src = user_elm or elm_text or ""
                 if len(_src) > 80:
                     _brief = _src[:80].strip()
                 else:
@@ -1020,25 +1030,15 @@ class ContextAssembler:
         return sum(self._token_estimate(m.get("content", "")) for m in history) if history else 0
 
     def _get_previous_fct(self) -> Optional[Dict]:
-        with self._task_lock:
-            current_turn = self._turn_counter
-        if current_turn <= 0:
+        """从 turn_stream 查前一轮 Fct。"""
+        from .store import read_prev_fct
+        raw = read_prev_fct(self.store, self._session_id, self._turn_counter)
+        if not raw:
             return None
-        prev_idx = current_turn - 1
-        if prev_idx in self.cache.l1_texts:
-            try:
-                data = json.loads(self.cache.l1_texts[prev_idx])
-                if data.get("core_change") != "本轮无新内容":
-                    return data
-            except Exception:
-                pass
-        rec = self.store.read_turn(self._session_id, prev_idx)
-        if rec:
-            try:
-                return json.loads(rec["l1_text"])
-            except Exception:
-                pass
-        return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
 
     def reset(self):
         self.wait_for_pending(5.0)
