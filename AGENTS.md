@@ -4,8 +4,8 @@
 
 | 项          | 值                                                                                |
 | ----------- | --------------------------------------------------------------------------------- |
-| 版本        | v5.2.1                                                                              |
-| 注入方式    | 1:1 对齐替换（mutation）+独立 tool 标签（v5.2），v5.2 bypass_turns 感知 tool_plan |
+| 版本        | v5.3.0-simple (过渡简化版)                                                           |
+| 注入方式    | 简化替换（_simple_mutation_mode） — DB 直查 L1，不依赖 turn_plan/cache/编码表        |
 | plugin.yaml | v5.2.1（待同步）                                                                    |
 | 部署方式    | 自包含独立副本                                                                    |
 | 插件路径    | `~/.hermes/profiles/tester/plugins/ca_assembler/`                               |
@@ -97,24 +97,18 @@ def _on_pre_llm_call(**kwargs: Any) -> Optional[str]:
 
 | 模式 | 入口 | 效果 | pre_llm_call 返回值 | 恢复 |
 |------|------|------|-------------------|------|
-| **replace**（默认） | `_build_aligned_outcomes`+tool_plan | 替换 content，tool 行独立摘要 | `None`（浅拷贝传播） | snapshot 全量恢复 |
+| **replace**（默认） | `_simple_mutation_mode` | DB 直查 L1 替换 tool 行，尾部保护 | `None`（浅拷贝传播） | snapshot 全量恢复 |
 | **append** | `_build_messages_from_plan`+tool_plan | 摘要拼入 user message | 文本字符串 | 无需 |
 | **off** | — | 仅数据积累 | `None` | 无需 |
 
-**行类型注射规则**（replace 模式 v5.2）：
+**行类型注射规则**（replace 模式 v5.3.0-simple）：
 
-| history 行 | L2 | L1 | L0 |
-|---|---|---|---|
-| `user` | None | `_format_l1_for_display(l1)` | `l0_text` |
-| `assistant{tc}` | None | `_format_tool_group_assembly(l1)` — 仅 header | `l0_text` |
-| `tool` | 摘要文本（tool_plan L1） | 摘要文本（tool_plan L0） | `""`（占位） |
-| `assistant_fin` | None | None | None |
+| 条件 | user | assistant_fin | assistant{tc} | tool |
+|------|------|--------------|--------------|------|
+| 尾部保护区（倒数第 3 个 user 之后） | 原文保留 | 原文保留 | 原文保留 | 原文保留 |
+| 保护区外 | 原文保留 | 原文保留 | `_format_tool_group_assembly(l1)` | l1_text 或 l0_text |
 
-**tool_plan 规则**：`_compute_tool_plan_v2`，parent 级别-1（L2→L1, L1→L0, L0→skip）。不持久化。
-
-**bg_review 填充**：从 DB 读取，对话轮 L1/L0，工具轮仅 L0，无标签。三字段 `(api_call_count, seq_index, role)` 匹配保护。
-
-详见 [v5.2 注入规则分析](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md#3-tool_plan-注入重构v52)。
+不区分 bg_review（统一规则）。DB 查询用 `store.read_turn_texts`(tool_group) + `store.read_tool_rows_for_group`。无碰撞风险（原生 `(turn, api, seq)` 过滤）。
 # tool 行按 tool_plan 生成独立摘要（无标签，各自占一行）
 tool: "read_file: /tmp/test.py (60 lines)"
 tool: "search: *.py → 3 hits"
@@ -433,7 +427,7 @@ python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts="
 
 ### 调试记录
 
-详见 `docs/analysis/` 分析报告。
+详见 `docs/analysis/` 分析报告和 `docs/debug/` 调试记录。
 
 ### 预算实测
 
@@ -459,13 +453,14 @@ Hermes 有两条完全独立的机制：
 | `_state_file_path()`      | `Path.home() / ".hermes"`       | `get_hermes_home()`（profile 感知） |
 | `sys.path`                | 无特殊处理                        | 本地 `ca/` 子目录优先               |
 | 激活方式                    | `context.engine: ca_assembler`  | `plugins.enabled: [ca_assembler]`   |
-| `_build_aligned_outcomes` | 不存在                            | 已实现，mutation 模式主要入口         |
-| 注入方式                    | 标签注入 `[~/N/0]`              | 无标签 1:1 对齐替换（tool 行独立摘要）  |
+| `_simple_mutation_mode` | 不存在                            | 新增，mutation 模式入口（v5.3.0-simple） |
+| 注入方式                    | 标签注入 `[~/N/0]`              | DB 直查 L1 替换 tool 行，不依赖 plan/cache |
 | `bg_review A-stage`       | 不支持                            | gate 跳过，C-stage 写 biz_category    |
 | l0_embedding                | 一直计算                          | 已注释（无人消费）                    |
 | 工具组输出                  | 旧紧凑格式（header+各工具详情）   | v5.2 精简为仅 header                 |
 | `_add_bigrams 确定性`      | 集合 `''.join(s)` 无心化不稳定  | v5.2.1 用 `sorted(s)` 保证确定性       |
 | 话题分割合并路径            | 仅 todo 重叠一条路径            | v5.2.1 新增 Jaccard 独立合并 + 自适应阈值 |
+| 编码表 (conv_encoding)       | 不存在                            | v5.3.0-simple 已废弃（线程安全 + key碰撞问题，被 _simple_mutation_mode 取代） |
 
 ## 脚本工具
 
@@ -482,6 +477,7 @@ Hermes 有两条完全独立的机制：
 | ---------- | ------------------------------- | ------------------------------------------------------------------------- |
 | 变更历史   | `docs/changelog.md`           | 全版本变更记录（唯一权威源）                                              |
 | 分析       | `docs/analysis/`              | 缓存分析、注入重构报告（v5.1）                                            |
+| 调试       | `docs/debug/`                 | 调试记录（_simple_mutation_mode、编码表验证、占位符根因等）               |
 
 ## 知识图谱（graphify）
 

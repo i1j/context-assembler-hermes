@@ -276,7 +276,7 @@ class TestPreLlmCall:
         assert result is None
 
     def test_extracts_ca_markers_from_assemble(self):
-        """从 _compute_assemble_plan + _build_aligned_outcomes 正常返回。"""
+        """从 _compute_assemble_plan → _simple_mutation_mode 正常返回。"""
         plugin = CAContextAssemblerPlugin()
         mock_engine = MagicMock()
         # 模拟 _compute_assemble_plan 返回正常结果
@@ -288,9 +288,18 @@ class TestPreLlmCall:
         ]
         result = _AssemblePlanResult(plan=plan, messages=[], stats=MagicMock(), tokens_before=10)
         mock_engine._compute_assemble_plan.return_value = result
-        mock_engine._build_aligned_outcomes.return_value = ["对话摘要", None]
         plugin._engine = mock_engine
         plugin._engine_errored = False
+
+        # _simple_mutation_mode 需要 store 和 session_id
+        from unittest.mock import MagicMock as MM
+        mock_engine.store = MM()
+        mock_engine.store.read_turn_texts.return_value = (None, "", "")
+        mock_engine.store.read_tool_rows_for_group.return_value = []
+        mock_engine.store.read_turn_biz_categories.return_value = {}
+        mock_engine.store.read_session.return_value = []
+        plugin._session_id = "test_sid"
+        plugin._engine._format_tool_group_assembly.return_value = ""
 
         result = plugin.pre_llm_call(user_message="查询", context_length=32000,
                                      conversation_history=[
@@ -299,8 +308,6 @@ class TestPreLlmCall:
                                      ])
         # mutation mode 返回 None（history 已原地替换）
         assert result is None
-        # 验证 _build_aligned_outcomes 被调用
-        mock_engine._build_aligned_outcomes.assert_called_once()
 
     def test_assemble_failure_returns_none(self):
         """assemble 失败时返回 None。"""

@@ -237,9 +237,11 @@ class SQLiteStore:
                     else:
                         # 空 DB / 无 _meta → 创建 v5 schema
                         self._local.conn.executescript(_SCHEMA_SQL_V5)
+                        self._local.conn.executescript(_SCHEMA_SQL_V50)
                 except sqlite3.OperationalError:
                     # _meta 表不存在 → 空 DB，创建 v5 schema
                     self._local.conn.executescript(_SCHEMA_SQL_V5)
+                    self._local.conn.executescript(_SCHEMA_SQL_V50)
 
         self._local.last_used = now
         return self._local.conn
@@ -1245,3 +1247,126 @@ def format_previous_summary_for_prompt(l1_text_from_db: str) -> str:
 
     # 非 JSON 纯文本，原样返回
     return stripped
+
+
+# ═══════════════════════════════════════════════════════════
+# v5.0 — turn_stream 新表 + 模块级函数
+# (不绑定 SQLiteStore 类，调用时传 store 实例)
+# ═══════════════════════════════════════════════════════════
+
+_SCHEMA_SQL_V50 = """
+CREATE TABLE IF NOT EXISTS turn_stream (
+    session_id   TEXT    NOT NULL,
+    turn         INTEGER NOT NULL,
+    seq          INTEGER NOT NULL,
+
+    -- 原始数据核
+    role          TEXT    NOT NULL,
+    content       TEXT    NOT NULL DEFAULT '',
+
+    -- tool 行专用
+    tool_name     TEXT,
+    tool_call_id  TEXT,
+    args_json     TEXT,
+    status        TEXT,
+    duration_ms   INTEGER,
+
+    -- thought / assistant 行专用
+    tool_calls_json TEXT,
+    finish_reason  TEXT,
+    usage_prompt_tokens     INTEGER,
+    usage_completion_tokens INTEGER,
+
+    -- 标记
+    biz_category  TEXT,
+    written_at    REAL,
+
+    -- 摘要（C-stage 填）
+    l1_text       TEXT,
+    l0_text       TEXT,
+
+    PRIMARY KEY (session_id, turn, seq)
+);
+"""
+
+
+def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
+                  role: str = 'user', content: str = '',
+                  tool_name: Optional[str] = None,
+                  tool_call_id: Optional[str] = None,
+                  args_json: Optional[str] = None,
+                  status: Optional[str] = None,
+                  duration_ms: Optional[int] = None,
+                  tool_calls_json: Optional[str] = None,
+                  finish_reason: Optional[str] = None,
+                  usage_prompt_tokens: Optional[int] = None,
+                  usage_completion_tokens: Optional[int] = None,
+                  biz_category: Optional[str] = None,
+                  written_at: Optional[float] = None,
+                  l1_text: Optional[str] = None,
+                  l0_text: Optional[str] = None) -> bool:
+    """v5.0 INSERT OR REPLACE — 简化参数，无 v4 兼容映射。"""
+    if store._readonly:
+        logger.warning("write_turn_v5 called on readonly store, skipping")
+        return False
+    if written_at is None:
+        written_at = time.time()
+    for attempt in range(Config.DB_MAX_RETRY):
+        try:
+            store.conn.execute(
+                """INSERT OR REPLACE INTO turn_stream
+                   (session_id, turn, seq, role, content,
+                    tool_name, tool_call_id, args_json, status, duration_ms,
+                    tool_calls_json, finish_reason,
+                    usage_prompt_tokens, usage_completion_tokens,
+                    biz_category, written_at,
+                    l1_text, l0_text)
+                   VALUES (?,?,?,?,?, ?,?,?,?,?, ?,?,?,?, ?,?,?,?)""",
+                (session_id, turn, seq, role, content,
+                 tool_name, tool_call_id, args_json, status, duration_ms,
+                 tool_calls_json, finish_reason,
+                 usage_prompt_tokens, usage_completion_tokens,
+                 biz_category, written_at,
+                 l1_text, l0_text),
+            )
+            store.conn.commit()
+            store._invalidate_session_cache()
+            return True
+        except sqlite3.OperationalError as exc:
+            if attempt < Config.DB_MAX_RETRY - 1:
+                time.sleep(0.1 * (2 ** attempt))
+            else:
+                logger.error("write_turn_v5 failed after %d retries: %s", Config.DB_MAX_RETRY, exc)
+                return False
+        except sqlite3.Error as exc:
+            logger.error("write_turn_v5 error: %s", exc)
+            return False
+    return False
+
+
+def read_l1_v5(store, session_id: str, turn: int, seq: int) -> str:
+    """点查：返回 (turn, seq) 的 l1_text，无则空字符串。"""
+    try:
+        cur = store.conn.execute(
+            "SELECT l1_text FROM turn_stream WHERE session_id=? AND turn=? AND seq=?",
+            (session_id, turn, seq),
+        )
+        row = cur.fetchone()
+        return row[0] or "" if row else ""
+    except sqlite3.Error:
+        return ""
+
+
+def update_seq0_l1_v5(store, session_id: str, turn: int,
+                       l1_text: str, l0_text: str) -> bool:
+    """仅 UPDATE turn_stream 的 l1/l0 列（seq=0 行），不碰 content。"""
+    try:
+        store.conn.execute(
+            "UPDATE turn_stream SET l1_text=?, l0_text=? WHERE session_id=? AND turn=? AND seq=0",
+            (l1_text, l0_text, session_id, turn),
+        )
+        store.conn.commit()
+        return True
+    except sqlite3.Error as exc:
+        logger.warning("update_seq0_l1_v5 failed: %s", exc)
+        return False

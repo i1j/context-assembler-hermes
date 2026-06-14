@@ -292,6 +292,11 @@ class ContextAssembler:
         self._encoding_loaded: bool = False
         self._encoding_db: Any = None
 
+        # ── v5.0 E-stage 属性 ──
+        self._current_turn: int = 0
+        self._seq_counter: Dict[int, int] = {}       # turn → max_seq
+        self._tool_seq_map: Dict[str, Tuple[int, int]] = {}  # tool_call_id → (turn, seq)
+
 
     def _restore_turn_index(self) -> int:
         try:
@@ -426,18 +431,8 @@ class ContextAssembler:
                         "_assemble_status": 1,
                     }
                     l1_str = json.dumps(truncated_cleaned, ensure_ascii=False)
-                    self.store.write_turn(
-                        session_id, turn_index,
-                        l0_text="", l1_text=l1_str,
-                        l0_embedding=None, l1_embedding=None,
-                        token_offset=token_offset,
-                        turn_type='dialogue', tool_sub_index=0,
-                        l2_text=json.dumps([
-                            {"role": "user", "content": user_message or ""},
-                            {"role": "assistant", "content": assistant_response or ""},
-                        ], ensure_ascii=False),
-                        _assemble_status=1,
-                        biz_category="bg_review" if bg_review else None,
+                    self._update_l1_v5(
+                        session_id, turn_index, l1_str, "",
                     )
                     logger.info("[CA] _run_c_stage turn %d: truncated, saved as pending backfill", turn_index)
                     return
@@ -465,21 +460,9 @@ class ContextAssembler:
                 l1_emb = None
                 l0_emb = None
 
-            # 对话轮 l2_text：只存当前轮 [user, assistant]，不存全量历史
-            l2_storage = json.dumps([
-                {"role": "user", "content": user_message or ""},
-                {"role": "assistant", "content": assistant_response or ""},
-            ], ensure_ascii=False)
-
-            self.store.write_turn(
-                session_id, turn_index,
-                l0_text=l0_text, l1_text=l1_str,
-                l0_embedding=l0_emb, l1_embedding=l1_emb,
-                token_offset=token_offset,
-                turn_type='dialogue', tool_sub_index=0,
-                l2_text=l2_storage,
-                _assemble_status=cleaned["_assemble_status"],
-                biz_category="bg_review" if bg_review else None,
+            # v5: 用 _update_l1_v5 只写 l1/l0，不碰 content
+            self._update_l1_v5(
+                session_id, turn_index, l1_str, l0_text,
             )
             self.cache.add_turn(turn_index, l0_text, l1_str, l0_emb, l1_emb)
 
@@ -494,19 +477,8 @@ class ContextAssembler:
                 "new_materials": [], "objective_facts": [],
                 "consensus": [], "todo": []
             }, ensure_ascii=False)
-            self.store.write_turn(
-                session_id, turn_index,
-                l0_text="本轮无新内容",
-                l1_text=fallback,
-                l0_embedding=None,
-                l1_embedding=None,
-                token_offset=token_offset,
-                turn_type='dialogue', tool_sub_index=0,
-                l2_text=json.dumps([
-                    {"role": "user", "content": user_message or ""},
-                    {"role": "assistant", "content": assistant_response or ""},
-                ], ensure_ascii=False),
-                _assemble_status=1,
+            self._update_l1_v5(
+                session_id, turn_index, fallback, "本轮无新内容",
             )
             self.cache.add_turn(turn_index, "本轮无新内容", fallback, None, None)
         finally:
@@ -800,6 +772,143 @@ class ContextAssembler:
         logger.info("[CA] flush_tool_buffer: flushed %d rows for %d api groups",
                     total_rows, len(sorted_items))
         return total_rows
+
+
+    # ═══════════════════════════════════════════════════════════
+    # v5.0 E-stage — 写即落盘（替代 _tool_buffer + flush_tool_buffer）
+    # ═══════════════════════════════════════════════════════════
+
+    def _on_api_response_v5(self, *,
+                             api_request_id: str,
+                             assistant_message: Any,
+                             api_call_count: int,
+                             turn_index: int,
+                             finish_reason: str = "tool_calls",
+                             usage: Optional[Dict] = None) -> None:
+        """v5: 写 thought 行 L2 + tool 占位行 + thought L1。不经过 buffer。"""
+        thought = getattr(assistant_message, "content", "") or ""
+        tool_calls = getattr(assistant_message, "tool_calls", None) or []
+        tool_defs = []
+        for tc in tool_calls:
+            tc_id = getattr(tc, "id", "") or ""
+            tc_name = getattr(tc, "name", "") or ""
+            tc_args = getattr(tc, "arguments", None)
+            if isinstance(tc_args, str):
+                try:
+                    tc_args = json.loads(tc_args)
+                except (json.JSONDecodeError, TypeError):
+                    tc_args = {}
+            tool_defs.append({"id": tc_id, "type": getattr(tc, "type", "function"),
+                              "function": {"name": tc_name, "arguments": tc_args}})
+
+        # 纯对话（无工具且非 tool_calls）→ 不写 thought 行
+        if not tool_defs and finish_reason != "tool_calls":
+            return
+
+        turn = turn_index
+        seq = self._seq_counter.get(turn, 0) + 1
+        self._seq_counter[turn] = seq
+
+        # thought L1（轻量摘要，无需 LLM）
+        thought_l1 = ""
+        try:
+            from .tool_summarizer import ToolSummarizer
+            thought_l1 = ToolSummarizer.generate_group_summary(thought)
+        except Exception:
+            pass
+
+        from .store import write_turn_v5
+        write_turn_v5(
+            self.store, self._session_id, turn, seq,
+            role='assistant', content=thought,
+            tool_calls_json=json.dumps(tool_defs, ensure_ascii=False),
+            finish_reason=finish_reason,
+            usage_prompt_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
+            usage_completion_tokens=getattr(usage, "completion_tokens", None) if usage else None,
+            l1_text=thought_l1,
+            written_at=time.time(),
+        )
+        logger.info("[CA_v5] _on_api_response: wrote thought turn=%d seq=%d tools=%d",
+                    turn, seq, len(tool_defs))
+
+        # tool 占位行
+        for i, tc_def in enumerate(tool_defs, start=1):
+            tool_seq = self._seq_counter[turn] + i
+            tc_id = tc_def["id"]
+            write_turn_v5(
+                self.store, self._session_id, turn, tool_seq,
+                role='tool', content='',
+                tool_name=tc_def.get("function", {}).get("name", ""),
+                tool_call_id=tc_id,
+                status='pending',
+                written_at=time.time(),
+            )
+            self._tool_seq_map[tc_id] = (turn, tool_seq)
+
+        self._seq_counter[turn] += len(tool_defs)
+        logger.info("[CA_v5] _on_api_response: wrote %d tool placeholders", len(tool_defs))
+
+    def _on_pre_tool_call_v5(self, *,
+                              tool_call_id: str,
+                              tool_name: str,
+                              args: Optional[Dict] = None,
+                              api_request_id: str = "") -> None:
+        """v5: 无操作（占位行已在 _on_api_response_v5 写入）。"""
+        logger.debug("[CA_v5] _on_pre_tool_call: %s (%s) — placeholder already written", tool_name, tool_call_id)
+
+    def _on_post_tool_call_v5(self, *,
+                               tool_call_id: str,
+                               tool_name: str,
+                               args: Optional[Dict] = None,
+                               result: Any = None,
+                               status: str = "ok",
+                               duration_ms: int = 0,
+                               error_type: Optional[str] = None,
+                               error_message: Optional[str] = None,
+                               api_request_id: str = "") -> None:
+        """v5: 回填 tool 行 L2 + 生成 per-tool L1。"""
+        entry = self._tool_seq_map.get(tool_call_id)
+        if entry:
+            turn, seq = entry
+        else:
+            # 异常时序：无预占行，现场插
+            turn = self._current_turn
+            seq = self._seq_counter.get(turn, 0) + 1
+            self._seq_counter[turn] = seq
+            logger.warning("[CA_v5] _on_post_tool_call: no placeholder for %s, created at turn=%d seq=%d",
+                          tool_call_id, turn, seq)
+
+        content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False) if result else ""
+
+        # 生成 per-tool L1
+        l1_str, l0_text = "", ""
+        try:
+            tc_def = {"id": tool_call_id, "type": "function",
+                      "function": {"name": tool_name, "arguments": args or {}}}
+            result_entry = [{"content": content, "status": status}]
+            l1_dict, l0_text = self.tool_summarizer.summarize(tc_def, result_entry)
+            l1_str = json.dumps(l1_dict, ensure_ascii=False) if l1_dict else ""
+        except Exception as e:
+            logger.warning("[CA_v5] tool summarize failed: %s", e)
+
+        from .store import write_turn_v5
+        write_turn_v5(
+            self.store, self._session_id, turn, seq,
+            role='tool', content=content,
+            tool_name=tool_name, tool_call_id=tool_call_id,
+            args_json=json.dumps(args) if args else None,
+            status=status, duration_ms=duration_ms,
+            l1_text=l1_str, l0_text=l0_text,
+            written_at=time.time(),
+        )
+        logger.debug("[CA_v5] _on_post_tool_call: wrote %s turn=%d seq=%d status=%s",
+                     tool_name, turn, seq, status)
+
+    def _update_l1_v5(self, session_id: str, turn_index: int,
+                       l1_text: str, l0_text: str) -> bool:
+        """v5: 只 UPDATE turn_stream 的 l1/l0 列（seq=0），不碰 content。"""
+        from .store import update_seq0_l1_v5
+        return update_seq0_l1_v5(self.store, session_id, turn_index, l1_text, l0_text)
 
 
     # ---------- A‑stage ----------

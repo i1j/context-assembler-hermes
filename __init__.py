@@ -39,16 +39,15 @@ _engines_lock = threading.Lock()
 
 
 def register(ctx) -> None:
-    """注册 CA 插件的生命周期 hooks 和工具轮数据采集 hooks。"""
+    """注册 CA 插件 v5.0 hooks。"""
     ctx.register_hook("on_session_start", _on_session_start)
-    ctx.register_hook("on_session_end", _on_session_end)
+    ctx.register_hook("on_session_end",   _on_session_end)
     ctx.register_hook("on_session_reset", _on_session_reset)
-    ctx.register_hook("pre_llm_call", _on_pre_llm_call)
-    ctx.register_hook("post_llm_call", _on_post_llm_call)
-    # PR2: 工具轮数据采集钩子
-    ctx.register_hook("post_api_request", _on_post_api_request)
-    ctx.register_hook("pre_tool_call", _on_pre_tool_call)
-    ctx.register_hook("post_tool_call", _on_post_tool_call)
+    ctx.register_hook("pre_llm_call",     _on_pre_llm_call_v5)
+    ctx.register_hook("post_llm_call",    _on_post_llm_call_v5)
+    ctx.register_hook("post_api_request", _on_post_api_request_v5)
+    ctx.register_hook("pre_tool_call",    _on_pre_tool_call_v5)
+    ctx.register_hook("post_tool_call",   _on_post_tool_call_v5)
 
 
 # ── Hook 分发函数 ──
@@ -700,3 +699,221 @@ class CAContextAssemblerPlugin:
         )
         logger.info("[CA] post_llm_call: process_turn_async returned for session %s",
                     self._session_id)
+
+
+    # ═════════════════════════════════════════════════════
+    # v5.0 — A-stage 替换 + E-stage final 写入
+    # ═════════════════════════════════════════════════════
+
+    def _simple_mutation_mode_v5(self, conversation_history: list) -> Optional[str]:
+        """v5: 从 turn_stream 查 l1_text 替换。无 plan 依赖。"""
+        if not conversation_history:
+            return None
+        self._saved_history_snapshot = [{**m} for m in conversation_history]
+        self._saved_history = None
+        store = self._engine.store
+        sid = self._session_id
+
+        tail_boundary = 0
+        _user_count = 0
+        for i in range(len(conversation_history) - 1, -1, -1):
+            if conversation_history[i].get("role") == "user":
+                _user_count += 1
+                if _user_count >= 3:
+                    tail_boundary = i
+                    break
+
+        turn = 0
+        seq = 0
+        replaced = 0
+        skipped = 0
+
+        for i, msg in enumerate(conversation_history):
+            role = msg.get("role", "")
+            if role == "system":
+                continue
+            if role == "user":
+                turn += 1
+                seq = 0
+                continue
+            seq += 1
+            if i >= tail_boundary:
+                continue
+            if role == "user":
+                continue
+            if role == "assistant" and not msg.get("tool_calls"):
+                continue
+
+            from ca.store import read_l1_v5
+            l1 = read_l1_v5(store, sid, turn, seq)
+            if l1:
+                msg["content"] = l1
+                replaced += 1
+            else:
+                skipped += 1
+
+        logger.info("[CA_v5] simple_mutation: replaced %d + skipped %d (tail=%d, turns=%d)",
+                    replaced, skipped, tail_boundary, turn)
+        return None
+
+    def pre_llm_call_v5(self, **kwargs: Any) -> Optional[str]:
+        """v5 A-stage: 直接 _simple_mutation_mode_v5。"""
+        conversation_history = kwargs.get("conversation_history", [])
+        if not isinstance(conversation_history, list) or not conversation_history:
+            return None
+        return self._simple_mutation_mode_v5(conversation_history)
+
+    def post_llm_call_v5(self, **kwargs: Any) -> None:
+        """v5 E-stage final: 写 asst_fin → 快照恢复 → C-stage。"""
+        if self._engine_errored or not self._engine:
+            return
+        user_message = kwargs.get("user_message", "")
+        assistant_response = kwargs.get("assistant_response", "")
+        conversation_history = kwargs.get("conversation_history", [])
+        if not user_message and not assistant_response:
+            return
+
+        engine = self._engine
+        turn = engine._current_turn
+        seq = engine._seq_counter.get(turn, 0) + 1
+        engine._seq_counter[turn] = seq
+
+        from ca.store import write_turn_v5
+        write_turn_v5(
+            engine.store, self._session_id, turn, seq,
+            role='assistant', content=assistant_response,
+            finish_reason='stop',
+            written_at=time.time(),
+        )
+        logger.info("[CA_v5] post_llm_call: wrote asst_fin turn=%d seq=%d", turn, seq)
+
+        _snapshot = getattr(self, "_saved_history_snapshot", None)
+        if _snapshot is not None:
+            for i, orig_dict in enumerate(_snapshot):
+                if i >= len(conversation_history):
+                    break
+                ch = conversation_history[i]
+                orig_content = orig_dict.get("content")
+                if ch.get("content") != orig_content:
+                    ch["content"] = orig_content
+            self._saved_history_snapshot = None
+
+        history_copy = list(conversation_history) if conversation_history else []
+        engine.process_turn_async(user_message, assistant_response, history_copy)
+        logger.info("[CA_v5] post_llm_call: process_turn_async called for turn %d", turn)
+
+
+# ═══════════════════════════════════════════════════════════════
+# v5.0 Hook 分发函数（模块级，0 缩进）
+# ═══════════════════════════════════════════════════════════════
+
+def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
+    """v5: 写 seq 0 (user L2) → A-stage 替换。"""
+    session_id = kwargs.get("session_id", "")
+    with _engines_lock:
+        plugin = _engines.get(session_id)
+    if not plugin or plugin._engine_errored:
+        return None
+
+    user_message = kwargs.get("user_message", "")
+    conversation_history = kwargs.get("conversation_history", [])
+    engine = plugin._engine
+
+    turn = len([m for m in conversation_history if m.get("role") == "user"])
+    engine._current_turn = turn
+    engine._seq_counter[turn] = 0
+    engine._tool_seq_map.clear()
+
+    bg = False
+    try:
+        from tools.skill_provenance import get_current_write_origin
+        bg = (get_current_write_origin() == "background_review")
+    except ImportError:
+        pass
+
+    from ca.store import write_turn_v5
+    write_turn_v5(
+        engine.store, session_id, turn, seq=0,
+        role='user', content=user_message,
+        biz_category='bg_review' if bg else None,
+        written_at=time.time(),
+    )
+    logger.info("[CA_v5] pre_llm_call: wrote seq 0 turn=%d bg=%s", turn, bg)
+
+    if bg:
+        return None
+
+    return plugin.pre_llm_call_v5(**kwargs)
+
+
+def _on_post_api_request_v5(**kwargs: Any) -> None:
+    """v5: 写 thought L2 + tool 占位行。"""
+    session_id = kwargs.get("session_id", "")
+    with _engines_lock:
+        plugin = _engines.get(session_id)
+    if not plugin or plugin._engine_errored:
+        return
+    try:
+        plugin._engine._on_api_response_v5(
+            api_request_id=kwargs.get("api_request_id", ""),
+            assistant_message=kwargs.get("assistant_message"),
+            api_call_count=kwargs.get("api_call_count", 0),
+            turn_index=plugin._engine._current_turn,
+            finish_reason=kwargs.get("finish_reason", "stop"),
+            usage=kwargs.get("usage"),
+        )
+    except Exception as exc:
+        logger.warning("[CA_v5] _on_post_api_request failed: %s", exc, exc_info=True)
+
+
+def _on_post_tool_call_v5(**kwargs: Any) -> None:
+    """v5: 回填 tool L2 + per-tool L1。"""
+    session_id = kwargs.get("session_id", "")
+    with _engines_lock:
+        plugin = _engines.get(session_id)
+    if not plugin or plugin._engine_errored:
+        return
+    try:
+        plugin._engine._on_post_tool_call_v5(
+            tool_call_id=kwargs.get("tool_call_id", ""),
+            tool_name=kwargs.get("tool_name", ""),
+            args=kwargs.get("args", {}),
+            result=kwargs.get("result"),
+            status=kwargs.get("status", "ok"),
+            duration_ms=kwargs.get("duration_ms", 0),
+            error_type=kwargs.get("error_type"),
+            error_message=kwargs.get("error_message"),
+            api_request_id=kwargs.get("api_request_id", ""),
+        )
+    except Exception as exc:
+        logger.warning("[CA_v5] _on_post_tool_call failed: %s", exc, exc_info=True)
+
+
+def _on_post_llm_call_v5(**kwargs: Any) -> None:
+    """v5: 写 final assistant → snapshot 恢复 → C-stage。"""
+    session_id = kwargs.get("session_id", "")
+    with _engines_lock:
+        plugin = _engines.get(session_id)
+    if not plugin or plugin._engine_errored:
+        return
+    try:
+        plugin.post_llm_call_v5(**kwargs)
+    except Exception as exc:
+        logger.warning("[CA_v5] _on_post_llm_call failed: %s", exc, exc_info=True)
+
+
+def register_v5(ctx) -> None:
+    """注册 v5.0 hooks（替代 register()）。"""
+    ctx.register_hook("on_session_start", _on_session_start)
+    ctx.register_hook("on_session_end",   _on_session_end)
+    ctx.register_hook("on_session_reset", _on_session_reset)
+    ctx.register_hook("pre_llm_call",     _on_pre_llm_call_v5)
+    ctx.register_hook("post_llm_call",    _on_post_llm_call_v5)
+    ctx.register_hook("post_api_request", _on_post_api_request_v5)
+    ctx.register_hook("pre_tool_call",    _on_pre_tool_call_v5)
+    ctx.register_hook("post_tool_call",   _on_post_tool_call_v5)
+
+
+def _on_pre_tool_call_v5(**kwargs: Any) -> None:
+    """v5: 无操作（tool 占位行已在 post_api_request 写入）。"""
+    pass
