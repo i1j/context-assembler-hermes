@@ -1,7 +1,7 @@
 {
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/__init__.py": {
-    "mtime": 1781028310.8639336,
-    "ast_hash": "8cbe0597e82f7862009f644d472da697",
+    "mtime": 1781361297.802566,
+    "ast_hash": "cfe58c7cbdf262bb27fdcbabe5bef508",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_quality.py": {
@@ -10,13 +10,13 @@
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_plugin.py": {
-    "mtime": 1781023445.2879732,
+    "mtime": 1781092022.6680698,
     "ast_hash": "65463d89f13859633c1c2731a10a229e",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_pr3_injection.py": {
-    "mtime": 1781021887.5775843,
-    "ast_hash": "c9fd99d69bbca80bcaba0fdc57b9d670",
+    "mtime": 1781335834.164893,
+    "ast_hash": "c63fb8a5dfcbf9405700345c42217bab",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_v460.py": {
@@ -25,8 +25,8 @@
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_v440.py": {
-    "mtime": 1780996695.8956234,
-    "ast_hash": "ccc23ccd4daaed4279dac69988eb88ed",
+    "mtime": 1781092022.6680698,
+    "ast_hash": "c323d6b044e0104600c4297d74644dea",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_tool_buffer.py": {
@@ -34,39 +34,24 @@
     "ast_hash": "f2acbe7a308a7c4eeea63e2c44edd4e9",
     "semantic_hash": ""
   },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/debug_injection_demo.py": {
-    "mtime": 1781028849.6044235,
-    "ast_hash": "3ddad12feffe254b9c7917c19b04b721",
-    "semantic_hash": ""
-  },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_health.py": {
     "mtime": 1780982299.8394673,
     "ast_hash": "8007c726f511340673d93610c9472adb",
     "semantic_hash": ""
   },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_store_adapter.py": {
-    "mtime": 1780848421.8741102,
-    "ast_hash": "7fe443c975e3a116e6322e8d64828b12",
-    "semantic_hash": ""
-  },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_aligned_outcomes.py": {
-    "mtime": 1781026316.789033,
-    "ast_hash": "c4469a0a9cec1ab9e9ecdef20b293e67",
+    "mtime": 1781350389.4250462,
+    "ast_hash": "ce6602921ad98ff45272ab95cab9e894",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_config.py": {
-    "mtime": 1780823836.574508,
-    "ast_hash": "99edef68d3330ce733f7f74ba4450726",
+    "mtime": 1781405411.156346,
+    "ast_hash": "a833e8149878f41c6ca9a21fd7cd5d73",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_lifecycle.py": {
     "mtime": 1780808127.3785577,
     "ast_hash": "a1eb7d8e0c26fc906784b9d5b6dc0d8e",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/generate_tests.py": {
-    "mtime": 1780815757.1481984,
-    "ast_hash": "6a7ac8ce5b3587f07761262ac9e33815",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/conftest.py": {
@@ -85,8 +70,8 @@
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_c.py": {
-    "mtime": 1780982457.8187118,
-    "ast_hash": "afb81e8b970f06c28e7a393f9cfd7915",
+    "mtime": 1781363531.7216113,
+    "ast_hash": "976b7d0c65f9cf081b4b7a351befbe04",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_parse_v1.py": {
@@ -94,14 +79,9 @@
     "ast_hash": "e9c25f0721e9f6cb73722a06f37dae48",
     "semantic_hash": ""
   },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_execution_report_v4.3.4.json": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "29e5d0d95186d2bc17a7d5f016fce525",
-    "semantic_hash": ""
-  },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_a.py": {
-    "mtime": 1780982040.964852,
-    "ast_hash": "3f44583b99877ead128acdd291475aaf",
+    "mtime": 1781363531.7216113,
+    "ast_hash": "a40d1bebec42905246c34138219bb814",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_embedding.py": {
@@ -114,699 +94,9 @@
     "ast_hash": "c4ea4f9ab405b4963b20e16f624a28d3",
     "semantic_hash": ""
   },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/sim_real.py": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "45c4af6c09038e79ba8db24b9022a8b3",
-    "semantic_hash": ""
-  },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/test_store.py": {
-    "mtime": 1780982040.964852,
+    "mtime": 1781321642.656241,
     "ast_hash": "50ecab1840aa0e169501399d5fc38529",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/testcases/ContextAssembler_testcases_v4.3.4.json": {
-    "mtime": 1780589768.5481966,
-    "ast_hash": "7d26d9e1ca9a8a103d9b80ad0b99751d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/testcases/ContextAssembler_testcases_v1.3.json": {
-    "mtime": 1780589768.5481966,
-    "ast_hash": "1ce146406d9b90ff7ca50e57d7f5c2fc",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/testcases/ContextAssembler_testcases_v1.2.json": {
-    "mtime": 1780589768.5481966,
-    "ast_hash": "81aed6ff3f425b9023785583793b6d02",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/generate.py": {
-    "mtime": 1780589768.5481966,
-    "ast_hash": "a853ac47e5e5f6aa4abea2cd6d360170",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/dialogues/long_dialogues.json": {
-    "mtime": 1780589768.5481966,
-    "ast_hash": "7973fb7989ff8f15421c9084ae669776",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/dialogues/medium_dialogues.json": {
-    "mtime": 1780589768.5481966,
-    "ast_hash": "308888860bbb200a165dda2f68b83032",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/dialogues/short_dialogues.json": {
-    "mtime": 1780589768.5481966,
-    "ast_hash": "bf332c1b4465f9629c5a720564d3484b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_017.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "e5d852f998db2aa132496c4e9cb060fe",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_022.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "71ac754c91a886f32ff0668ca0f05df4",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_052.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "abfea264303dccd390a289419a867c22",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_086.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "fec50221ca2b746a0694c02733d6100f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_044.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "f2dc29fa0960bfc643122303cd8b5a9f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_070.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "dbbdb31f4d6a3c5ad9206223d7176606",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_031.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "3dda218794a3ba2f118030a1e5fb7e18",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_048.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "abfea264303dccd390a289419a867c22",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_054.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "abfea264303dccd390a289419a867c22",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_030.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "ab293a13f60b0ffafa5f74dd89ff4867",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_107.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "68b329da9893e34099c7d8ad5cb9c940",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_095.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "a91a649b9c331cf5e107507bc16f8323",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_041.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "fb4a15e40ee7bad30934c414e03b3d64",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_000.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "f10cef249023e1ebf57488f0e0b9885b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_093.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "97f9ae155ec0c1cd40c8a3baef8df6ca",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_091.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "97f9ae155ec0c1cd40c8a3baef8df6ca",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_108.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "68b329da9893e34099c7d8ad5cb9c940",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_029.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "ab293a13f60b0ffafa5f74dd89ff4867",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_014.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "f10cef249023e1ebf57488f0e0b9885b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_092.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "fec50221ca2b746a0694c02733d6100f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_015.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "e5d852f998db2aa132496c4e9cb060fe",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_023.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "e5d852f998db2aa132496c4e9cb060fe",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_101.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "a91a649b9c331cf5e107507bc16f8323",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_065.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "0d0b0d3d2c65e998d8c42580025a892c",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_010.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "f10cef249023e1ebf57488f0e0b9885b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_084.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "1ee1c9ff502f91ee96970b2626584409",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_005.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "0497ec57d545d5886df078f040d3297d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_006.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "f10cef249023e1ebf57488f0e0b9885b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_016.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "71ac754c91a886f32ff0668ca0f05df4",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_061.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "b3e89d1874e9de4b9cf8963da0e2c48d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_011.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "0497ec57d545d5886df078f040d3297d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_100.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "7be42da2999354a7eebe82311484e7e8",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_083.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "ebf9b20f0b57760b80ee67fc78cd04e5",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_105.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_077.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "ebf9b20f0b57760b80ee67fc78cd04e5",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_024.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "71ac754c91a886f32ff0668ca0f05df4",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_019.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "e5d852f998db2aa132496c4e9cb060fe",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_113.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "9a4c53a0bb29ebc1b732503b66d259d3",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_020.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "71ac754c91a886f32ff0668ca0f05df4",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_025.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "3dda218794a3ba2f118030a1e5fb7e18",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_085.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "97f9ae155ec0c1cd40c8a3baef8df6ca",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_040.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "f2dc29fa0960bfc643122303cd8b5a9f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_053.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "d6887ade639eae4cc17381a65255582b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_055.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "b3e89d1874e9de4b9cf8963da0e2c48d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_080.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "1ee1c9ff502f91ee96970b2626584409",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_047.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "d6887ade639eae4cc17381a65255582b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_057.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "b3e89d1874e9de4b9cf8963da0e2c48d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_069.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "0d0b0d3d2c65e998d8c42580025a892c",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_056.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "72f89e61aa6f0c4b4e40f7f7a13f3821",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_068.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "dbbdb31f4d6a3c5ad9206223d7176606",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_096.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "7be42da2999354a7eebe82311484e7e8",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_115.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "9a4c53a0bb29ebc1b732503b66d259d3",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_001.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "0497ec57d545d5886df078f040d3297d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_042.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "f2dc29fa0960bfc643122303cd8b5a9f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_071.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "0d0b0d3d2c65e998d8c42580025a892c",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_103.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "a91a649b9c331cf5e107507bc16f8323",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_033.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "ab293a13f60b0ffafa5f74dd89ff4867",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_043.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "fb4a15e40ee7bad30934c414e03b3d64",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_013.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "0497ec57d545d5886df078f040d3297d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_078.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "1ee1c9ff502f91ee96970b2626584409",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_050.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "abfea264303dccd390a289419a867c22",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_114.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "8d42d3ec7eadecc17673cfb0f1e53400",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_049.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "d6887ade639eae4cc17381a65255582b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_012.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "f10cef249023e1ebf57488f0e0b9885b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_075.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "ebf9b20f0b57760b80ee67fc78cd04e5",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_002.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "f10cef249023e1ebf57488f0e0b9885b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_112.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "8d42d3ec7eadecc17673cfb0f1e53400",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_035.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "fb4a15e40ee7bad30934c414e03b3d64",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_027.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "ab293a13f60b0ffafa5f74dd89ff4867",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_099.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "a91a649b9c331cf5e107507bc16f8323",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_032.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "ab293a13f60b0ffafa5f74dd89ff4867",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_004.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "f10cef249023e1ebf57488f0e0b9885b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_073.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "0d0b0d3d2c65e998d8c42580025a892c",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_028.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "3dda218794a3ba2f118030a1e5fb7e18",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_021.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "e5d852f998db2aa132496c4e9cb060fe",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_079.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "ebf9b20f0b57760b80ee67fc78cd04e5",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_082.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "1ee1c9ff502f91ee96970b2626584409",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_008.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "f10cef249023e1ebf57488f0e0b9885b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_067.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "0d0b0d3d2c65e998d8c42580025a892c",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_072.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "dbbdb31f4d6a3c5ad9206223d7176606",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_088.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "fec50221ca2b746a0694c02733d6100f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_051.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "d6887ade639eae4cc17381a65255582b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_036.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "f2dc29fa0960bfc643122303cd8b5a9f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_037.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "fb4a15e40ee7bad30934c414e03b3d64",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_094.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "fec50221ca2b746a0694c02733d6100f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_045.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "d6887ade639eae4cc17381a65255582b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_119.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "9a4c53a0bb29ebc1b732503b66d259d3",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_059.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "b3e89d1874e9de4b9cf8963da0e2c48d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_039.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "fb4a15e40ee7bad30934c414e03b3d64",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_046.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "abfea264303dccd390a289419a867c22",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_034.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "3dda218794a3ba2f118030a1e5fb7e18",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_062.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "72f89e61aa6f0c4b4e40f7f7a13f3821",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_007.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "0497ec57d545d5886df078f040d3297d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_064.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "72f89e61aa6f0c4b4e40f7f7a13f3821",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_111.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "9a4c53a0bb29ebc1b732503b66d259d3",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_109.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "68b329da9893e34099c7d8ad5cb9c940",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_060.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "72f89e61aa6f0c4b4e40f7f7a13f3821",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_118.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "8d42d3ec7eadecc17673cfb0f1e53400",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_104.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "7be42da2999354a7eebe82311484e7e8",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_066.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "dbbdb31f4d6a3c5ad9206223d7176606",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_038.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "f2dc29fa0960bfc643122303cd8b5a9f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_097.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "a91a649b9c331cf5e107507bc16f8323",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_026.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "ab293a13f60b0ffafa5f74dd89ff4867",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_106.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "628631f07321b22d8c176c200c855e1b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_076.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "1ee1c9ff502f91ee96970b2626584409",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_081.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "ebf9b20f0b57760b80ee67fc78cd04e5",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_074.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "dbbdb31f4d6a3c5ad9206223d7176606",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_110.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "8d42d3ec7eadecc17673cfb0f1e53400",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_003.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "0497ec57d545d5886df078f040d3297d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_098.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "7be42da2999354a7eebe82311484e7e8",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_063.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "b3e89d1874e9de4b9cf8963da0e2c48d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_116.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "8d42d3ec7eadecc17673cfb0f1e53400",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_009.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "0497ec57d545d5886df078f040d3297d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_102.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "7be42da2999354a7eebe82311484e7e8",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_117.json": {
-    "mtime": 1780589768.5602384,
-    "ast_hash": "9a4c53a0bb29ebc1b732503b66d259d3",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_058.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "72f89e61aa6f0c4b4e40f7f7a13f3821",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_090.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "fec50221ca2b746a0694c02733d6100f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_089.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "97f9ae155ec0c1cd40c8a3baef8df6ca",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_018.json": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "71ac754c91a886f32ff0668ca0f05df4",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/malformed_json/malformed_087.json": {
-    "mtime": 1780589768.5562246,
-    "ast_hash": "97f9ae155ec0c1cd40c8a3baef8df6ca",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/legacy/test_review_fixes.py": {
-    "mtime": 1780589768.5481966,
-    "ast_hash": "1e7449c763e4aec758145c71ba86399d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/legacy/test_smoke.py": {
-    "mtime": 1780815757.1519117,
-    "ast_hash": "eb2fe11eff6f8121eceb852254d243c7",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/legacy/test_ooda_parser.py": {
-    "mtime": 1780589768.5481966,
-    "ast_hash": "4ddfb7e8e7d16b6421ba8f11aeabb41f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/legacy/test_dedup.py": {
-    "mtime": 1780743514.3413565,
-    "ast_hash": "6a586bea8c56ddb570183454501278e7",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/legacy/test_l1_gen_speed.py": {
-    "mtime": 1780815757.1519117,
-    "ast_hash": "d8f2acfeb2f1237ec124ed2028cb621d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/legacy/test_stress_real.py": {
-    "mtime": 1780589768.5481966,
-    "ast_hash": "c0db53df2de0f5a092cd00e85a59d0cf",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/legacy/test_supplement_v3_2.py": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "b2d2182f6b52bc495041c0ebb6a98332",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/legacy/test_c_stage.py": {
-    "mtime": 1780815757.1481984,
-    "ast_hash": "f5acb976bb942088e950bee3b869bde8",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/legacy/test_a_stage.py": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "e4c00ccc9a1b927727bd773bcafc5ccc",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/legacy/test_performance.py": {
-    "mtime": 1780589768.5481966,
-    "ast_hash": "48806708dbbcffa00b4a8415a7b1a247",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/scripts/benchmark_l1.py": {
@@ -820,13 +110,13 @@
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/ca/ooda_parser.py": {
-    "mtime": 1780848438.2627006,
+    "mtime": 1781321642.6162357,
     "ast_hash": "118eea5280b74fb60c0cc7773c0497d8",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/ca/lstage.py": {
-    "mtime": 1781005456.7126155,
-    "ast_hash": "6f3b0031ee9549e0913e4ea7bb634c19",
+    "mtime": 1781348978.8362906,
+    "ast_hash": "1623465c4c0a7f002553c9ba4b37b22f",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/ca/health.py": {
@@ -840,18 +130,18 @@
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/ca/store.py": {
-    "mtime": 1781021461.8464146,
-    "ast_hash": "5822fbb502ce8d74d09c37dacf0ac2db",
+    "mtime": 1781321642.6202364,
+    "ast_hash": "19fb57a6531f47718787b2890914e203",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/ca/retrieval.py": {
-    "mtime": 1780810612.7792072,
-    "ast_hash": "c7436bc9806243b4b7cdfbdc5fcf0f87",
+    "mtime": 1781333705.244831,
+    "ast_hash": "190a1037267e022e7cc21e4ad58484f9",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/ca/tool_summarizer.py": {
-    "mtime": 1781026278.4426112,
-    "ast_hash": "585c5d275537b241a56b3d4069548e30",
+    "mtime": 1781350413.5217052,
+    "ast_hash": "175a0a97dfba08296e8546f7afd74d08",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/ca/post_process.py": {
@@ -865,8 +155,8 @@
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/ca/config.py": {
-    "mtime": 1781028380.4968235,
-    "ast_hash": "df21adeeaee35d166ee39ac11399bccd",
+    "mtime": 1781366320.5500448,
+    "ast_hash": "89364bc9fd67ff46ba4270eb5c4e5fb6",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/ca/embedding.py": {
@@ -880,503 +170,93 @@
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/ca/__init__.py": {
-    "mtime": 1781056882.041471,
-    "ast_hash": "c3abd74c567f89fa1d579a2ed93fecfe",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/test-plan-tool-turn-refactor.md": {
-    "mtime": 1780896345.7912726,
-    "ast_hash": "0edfdcce462a0c88f04c6256dd35e80f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/requirements-tool-turn-refactor.md": {
-    "mtime": 1780897374.72327,
-    "ast_hash": "68977a4933d0d79fd3c26b31cacb5a7c",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/pr1-review-decisions.md": {
-    "mtime": 1780928631.833914,
-    "ast_hash": "32b1f7eefe71a8358871013b9cafa975",
+    "mtime": 1781371109.7309048,
+    "ast_hash": "217750fbb28f8a4b75d6368f65d7c8ea",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/plugin.yaml": {
-    "mtime": 1780807313.3467433,
-    "ast_hash": "fa6c7cd0496734e4ba4b768f6aee114d",
+    "mtime": 1781321642.656241,
+    "ast_hash": "95ab4653abd5af7e80205f3d829f1a92",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/AGENTS.md": {
-    "mtime": 1781028326.7314358,
-    "ast_hash": "324e0467312d079b04e1b697a712d5f7",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/pr1-store-plan.md": {
-    "mtime": 1780928819.9555287,
-    "ast_hash": "f871d69505fe64496ca4c9e8feee56cf",
+    "mtime": 1781364577.3478155,
+    "ast_hash": "9d2a0ef1351202880dcc2774134111ef",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/changelog.md": {
-    "mtime": 1781029591.094289,
-    "ast_hash": "7e7091b76fe473b99c623c801e7f55f7",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/review/cross-review-dev-perspective.md": {
-    "mtime": 1780823514.5126095,
-    "ast_hash": "503ea86445360e97944e37cca43ebda0",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/review/cross-review-test-perspective.md": {
-    "mtime": 1780823521.7049532,
-    "ast_hash": "51fd17c9bdd1403d0db2c1cbdeb13c4f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/ca-l1-refactor/ca-l1-whitepaper-v1.2-gm.md": {
-    "mtime": 1780818625.0143638,
-    "ast_hash": "061c572f9906faf1a72bf823e3d52016",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/ca-l1-refactor/ca-l1-refactor-test-plan-v2.md": {
-    "mtime": 1780823631.6823614,
-    "ast_hash": "b6329ac44dc894be3470e100b1788e43",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/ca-l1-refactor/ca-l1-refactor-impl-plan-v2.md": {
-    "mtime": 1780823558.6506505,
-    "ast_hash": "34be88a655743648b718ad2b66e9c00c",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/ca-l1-refactor/ca-l1-refactor-technical-proposal-v1.md": {
-    "mtime": 1780818642.956318,
-    "ast_hash": "c4ee5637105199706e28229ffbbac04c",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/ca-l1-refactor/ca-l1-refactor-requirements-v2.md": {
-    "mtime": 1780831363.4068346,
-    "ast_hash": "d221faaf445b806c548c0a37084f3069",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/injection-live-inspection-report.md": {
-    "mtime": 1781029503.4050941,
-    "ast_hash": "851bee0a617af5b0318b462590147526",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/ca-deploy-debug-20260607.md": {
-    "mtime": 1780997732.4176872,
-    "ast_hash": "c886fa452dd9b79ede12cb3140f38b6f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/debug-20260609-tool-group-l2-reconstruction.md": {
-    "mtime": 1780981470.5747821,
-    "ast_hash": "53da3779fc8293eaf292f076b0844fd1",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/debug-20260609g-tool-group-format-unification.md": {
-    "mtime": 1781006342.1774733,
-    "ast_hash": "e7ea39c902cfa76bef125bd0b2689036",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/ca-devtest-workflow-selfcheck-report.md": {
-    "mtime": 1780929263.1705475,
-    "ast_hash": "7a02a0873526b08e14b7c9d633433a33",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/turn-session-20260610-triple-injection-and-doc-revision.md": {
-    "mtime": 1781029585.6551926,
-    "ast_hash": "655634f40968edf8be47b891fb1c8e47",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/debug-20260609-tool-group-architecture.md": {
-    "mtime": 1780995051.6857505,
-    "ast_hash": "d5c644ad0b63ac753e6a099269ae34d8",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/debug-20260609-tool-group-l2-injection-fix.md": {
-    "mtime": 1781000084.160406,
-    "ast_hash": "cdea9f13d1dc5136ff03d3b2633dee69",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/debug-20260609-cache-tool-group-gap.md": {
-    "mtime": 1780997360.143199,
-    "ast_hash": "9c7da5089387369a84e81fcfd1ce6edc",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/debug-20260609-1842-injection-layer-fix-batch.md": {
-    "mtime": 1781001763.268747,
-    "ast_hash": "af18d8a767c9472cc4d410430dd7173b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/debug-20260609f-remaining-fix-verification.md": {
-    "mtime": 1781002827.7793157,
-    "ast_hash": "1243cd016bdc5ee2f72f4c2853128efe",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/debug-20260609h-history-mutate-impl.md": {
-    "mtime": 1781010805.32718,
-    "ast_hash": "0d41aeaf9338e229554205cc7a471204",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/ca-debug-report-fix-verification.md": {
-    "mtime": 1780997597.6598547,
-    "ast_hash": "05527964fb2983741d8c4753172b6bb1",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/design/technical-plan.md": {
-    "mtime": 1781028508.344635,
-    "ast_hash": "51f5ad3017f031794419d91d3e87de87",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/design/tool-turn-refactor-req.md": {
-    "mtime": 1780920893.328381,
-    "ast_hash": "28ba57f8392415f2224484c712db0836",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/design/ca-to-reasonix-analysis.md": {
-    "mtime": 1780997597.6634545,
-    "ast_hash": "8303dafc90e700fd1ecaba8456a0ec2f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/design/system-overhead-measurement-analysis.md": {
-    "mtime": 1780982040.964852,
-    "ast_hash": "913b510aef146c394767c649d3771f00",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/design/retrospective-three-round-review.md": {
-    "mtime": 1780934956.8220139,
-    "ast_hash": "468580eca8153d9602a279f0f39d378e",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/design/tool-turn-refactor-test-req.md": {
-    "mtime": 1780924950.3734038,
-    "ast_hash": "f75d46b37dbe195b823c3da80430838d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/design/tool-turn-refactor-analysis.md": {
-    "mtime": 1780907335.551342,
-    "ast_hash": "da64d0d081a2f0ca62ea2c4975119c27",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/test-plans/ca-v5-test-plan.md": {
-    "mtime": 1780742269.2076929,
-    "ast_hash": "a66915abd7310e564f1a3a52a5937583",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/agents.md": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "0dbcc918d8e477feba0765dba20ea399",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/docs/v5.0.0-test-architecture.md": {
-    "mtime": 1780981919.4576578,
-    "ast_hash": "d1082e3a1a8e1be0b40a0ef5edd7d750",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/docs/qa-bug-report.md": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "1cdac78382e117a802218d86a6e51bb0",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/docs/test-report.md": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "6f03afb9310bfe6c5ed8e6efd831de97",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/docs/testplan.md": {
-    "mtime": 1780982040.964852,
-    "ast_hash": "c15e04a49e3d9b48731338a2876f6234",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/docs/bugs/obs-001-subdirectory-hint-tracker-dedup.md": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "80ae2d7b98f822ad8c10c73010aef95a",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/docs/bugs/bug-002-c-stage-async-timing.md": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "796d732d0d5bd0b22b5ddd90bf087da2",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/docs/bugs/bug-007-ooda-parser-core-change-colon-prefix.md": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "289238341110311965d8dca83e7626ec",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/docs/bugs/bug-005-plugin-update-model-api-mode.md": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "36e92f17fa1b03c488c7aa56931feec5",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/docs/bugs/bug-003-plugin-hooks-mismatch.md": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "3e8cc19636718202a1645dfb73f0649c",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/docs/bugs/bug-004-concurrency-timing.md": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "2cbe6b3b64665bf463433588c1506426",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/docs/bugs/bug-001-a-stage-tide-marker-offset.md": {
-    "mtime": 1780589768.5441825,
-    "ast_hash": "535eba83be52fa0e2d8ef52ab4189b47",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_014.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "2cbebb45a977b88a433c21bc0698a562",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_032.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "1f45ac1325a32839752e8794130ab479",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_043.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "7690618bef7fb00240bcb31c736c8ba1",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_024.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "7662b59e13c3ed089f5763fd05a9784d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_034.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "fe3e83edba2048ca660fc0b4cd43295f",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_011.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "9af1b04a7aaa239685088673a676f23e",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_033.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "a6b983785c601b8dfb1b4b59d1fdc284",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_018.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "7be72c5d12ab091bba73e47c470afee4",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_012.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "d14f60c64036329bf14da57fd9f1a8d2",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_017.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "5f5f06fc9f7f4c4977045000c92f44e4",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_037.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "da11347ad31ea715c53f36dfbc9067ea",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_023.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "fadc23eb1438acac1dd43b1b52753e2d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_027.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "eb694306d27df61032a6871b42515a15",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_015.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "4623be96861845dc12700b33421a8ee2",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_045.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "26d64e4859a9482e14754b36bab88a6d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_044.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "0922feff1ca61c6e7783cd370d583766",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_039.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "106feba9fa5c42710d27d9d5d17b5d3a",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_006.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "d9e29776d5c18138b2e2e9b7da321655",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_028.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "4091bee5a26e8bdabf047a225a5653be",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_041.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "45a81aa501bafcf4b93d2f1e880bab93",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_001.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "c4930dcf96084ee396e8e18ff028b64e",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_009.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "09bcad65b7bc41a7b8b4d2d0f255f0e6",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_005.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "fd53ec49ca96647d5320410e29ef8a46",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_004.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "ae7d0454f4514289070d6b15686d7fa2",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_007.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "825fd1c7259b25c4ba8c1c92ccc373a2",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_016.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "c653be0ebd6f3b56e1d2271fd0ca8532",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_019.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "3de6f667e613d384e0009426c2047267",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_008.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "6537efb3dc822fd68497159ee840078a",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_021.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "6537efb3dc822fd68497159ee840078a",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_048.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "6b65075b77191aaec30a98bddf8568f4",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_026.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "fc6cd85b49448939b47b82cceb9d519b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_050.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "1d956d7c997abf8cada56e6cb58532f4",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_013.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "ba3714ca936dce5812f96e37c9ef52ff",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_029.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "85cd43319c971e34bee293e96e0f2f12",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_046.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "be317af43ac83f8c82336ca32bd983be",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_030.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "4d9a73f108284227626369c960a230ca",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_022.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "26d64e4859a9482e14754b36bab88a6d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_020.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "079bd1618654cd8d160d25d2e0c48efc",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_025.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "9fd26c645b862796d6aa8056f5948fc4",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_040.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "039c1bb74410899d1d6dd0dac7c1eeff",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_036.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "9d25b0e837f0af3b9865f418da5723fe",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_035.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "beb10597d776745cdc5dbdd521f20144",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_038.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "47850dc707635f29f3d3fcea52c8aacf",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_002.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "9d25b0e837f0af3b9865f418da5723fe",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_042.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "e66461cc65a7c92536105bd2a6d639a1",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_010.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "eed8abef4b888323d2af1c96d34097c9",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_003.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "e7c0ec892f9d64cd0927d6ca67ad59d7",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_031.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "76a084f7c964dfd1915cce471e005f9d",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_049.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "1bbf40e01e32faf2d9e0d2386d5a458b",
-    "semantic_hash": ""
-  },
-  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/data/reference_summaries/v1.0/summary_047.txt": {
-    "mtime": 1780589768.5522106,
-    "ast_hash": "e126c6d72df4811db32b6d2fce868306",
+    "mtime": 1781364552.4465597,
+    "ast_hash": "c45f5f0396158e5b141aef569318c538",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/ca/settings.yaml": {
-    "mtime": 1780833017.0268633,
-    "ast_hash": "fc66af0f15222526fc01d096749d1e55",
+    "mtime": 1781361297.802566,
+    "ast_hash": "f684d8cd6c2d6db0703a3c9c759b2563",
     "semantic_hash": ""
   },
   "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/ca/tool_field_priority.yaml": {
     "mtime": 1780984271.7387917,
     "ast_hash": "a8d1ec75c3ff5513a6c3b00d9b8f185d",
+    "semantic_hash": ""
+  },
+  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/unit/test_stats.py": {
+    "mtime": 1781363847.9285157,
+    "ast_hash": "e486ce0549acd47499c5465894e01f70",
+    "semantic_hash": ""
+  },
+  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/unit/test_tool_summarizer.py": {
+    "mtime": 1781364016.7758741,
+    "ast_hash": "a23a094830398e8d91aaa4d970c888e5",
+    "semantic_hash": ""
+  },
+  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/unit/test_cache.py": {
+    "mtime": 1781363981.1614416,
+    "ast_hash": "b7a694c8d065f5d529629088723859aa",
+    "semantic_hash": ""
+  },
+  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/unit/test_retrieval.py": {
+    "mtime": 1781364010.567997,
+    "ast_hash": "2f149d6ad96f660a5e6a04bf462682a0",
+    "semantic_hash": ""
+  },
+  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/unit/__init__.py": {
+    "mtime": 1781363577.405338,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/integration/test_v521_topic.py": {
+    "mtime": 1781363908.9202623,
+    "ast_hash": "631aacfeba47cef34a8ff6efb0c98f75",
+    "semantic_hash": ""
+  },
+  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/tests/integration/__init__.py": {
+    "mtime": 1781363577.405338,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md": {
+    "mtime": 1781328302.3414872,
+    "ast_hash": "4aa807abf36a5bb9d85a9852c077b141",
+    "semantic_hash": ""
+  },
+  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/analysis/20260610-ca-mutation-thinking-rootcause.md": {
+    "mtime": 1781065542.2668316,
+    "ast_hash": "55e42b4ce7781a1703edc30ac7d1d137",
+    "semantic_hash": ""
+  },
+  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/debug/debug-2026-06-13-conv-encoding-ov-submit.md": {
+    "mtime": 1781371211.5416965,
+    "ast_hash": "173a2091d5bbc7e7bc2a5c64134685d6",
+    "semantic_hash": ""
+  },
+  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/design/ca-ov-topic-submit.md": {
+    "mtime": 1781367093.6715598,
+    "ast_hash": "0281eb093075c14d5eee6590a818ce2b",
+    "semantic_hash": ""
+  },
+  "/home/i1j/.hermes/profiles/tester/plugins/ca_assembler/docs/design/ca-conv-encoding.md": {
+    "mtime": 1781370689.384816,
+    "ast_hash": "204424df41a61aa38d8b443f4404494a",
     "semantic_hash": ""
   }
 }

@@ -1070,6 +1070,13 @@ class ContextAssembler:
             _accumulated += _l2_tk
             _tail_protected_turns.add(_turn)
 
+        # ── 排除旁路轮的话题检测 ──
+        # 尾区（最后 N 个对话轮）按原始数据保护，不参与话题分割
+        _topic_l1_texts = dict(l1_texts)
+        if _bypass_skip < len(_real_turns):
+            for _t in _real_turns[-_bypass_skip:]:
+                _topic_l1_texts.pop(_t, None)
+
         with stats.time_phase("embed_query"):
             try:
                 q_emb = self.embed_client.embed(user_message)
@@ -1090,7 +1097,7 @@ class ContextAssembler:
         # ── 话题分割（R1 + R2）──
         with stats.time_phase("topic_seg"):
             turn_to_topic, topic_data = self._compute_topic_groups(
-                l1_texts, l1_embeddings,
+                _topic_l1_texts, l1_embeddings,
                 jaccard_merge_threshold=self._topic_jaccard_threshold,
                 forced_split_turns=_forced_split_turns,
             )

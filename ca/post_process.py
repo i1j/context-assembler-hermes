@@ -51,11 +51,13 @@ def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
     core = data.get("core_change", "").strip()
     if core and core not in ("无", "本轮无新内容"):
         cleaned["core_change"] = core
+    _PLACEHOLDERS = {"", "无", "無", "none", "-", "- 无", "—", "— 无", "暂无", "无有效内容"}
     for field in ["new_materials", "objective_facts", "consensus", "todo"]:
         items = data.get(field, [])
         if not isinstance(items, list):
             items = []
-        items = [i for i in items if i and i.strip()][:3]
+        items = [i for i in items
+                 if i and i.strip() and i.strip() not in _PLACEHOLDERS][:3]
         if items:
             cleaned[field] = items
     if not cleaned:
