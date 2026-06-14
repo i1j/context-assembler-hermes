@@ -520,6 +520,14 @@ class ContextAssembler:
             # ── 写入编码表 ──
             if conversation_history is not None:
                 self._persist_conv_encoding(session_id, conversation_history)
+            # ── OpenViking 话题提交 ──
+            if Config.CA_OV_SUBMIT_ENABLED and self._pending_ov_submit is not None:
+                try:
+                    if self._fire_ov_submit(self._pending_ov_submit):
+                        self._pending_ov_submit = None
+                        logger.info("[CA] topic %d submitted to OpenViking", self._last_topic_id)
+                except Exception as exc:
+                    logger.warning("[CA] OV submit failed (will retry next turn): %s", exc)
 
     def _extract_tool_calls(self, messages: List[Dict]) -> List[Dict]:
         tool_turns = []
@@ -1093,6 +1101,31 @@ class ContextAssembler:
                 if _ideal is not None:
                     self._ideal_threshold_this_session = _ideal
                     logger.info("[CA] ideal_threshold_this_session=%.4f (used %.4f)", _ideal, self._topic_jaccard_threshold)
+
+        # ── OpenViking：话题切换检测 ──
+        if Config.CA_OV_SUBMIT_ENABLED and self._pending_ov_submit is None and turn_to_topic and l1_texts:
+            _latest_turn = max(l1_texts.keys())
+            if _latest_turn in turn_to_topic:
+                _current_topic_id = turn_to_topic[_latest_turn]
+                if self._last_topic_id is not None and _current_topic_id != self._last_topic_id:
+                    _old_topic = topic_data.get(self._last_topic_id)
+                    if _old_topic and not _old_topic.get("is_bg", True):
+                        _turn_indices = _old_topic.get("turn_indices", [])
+                        _tool_gl1: Dict[str, str] = {}
+                        for k, v in tool_group_l1_texts.items():
+                            if isinstance(k, (tuple, list)) and k[0] in _turn_indices:
+                                _tool_gl1[f"({k[0]},{k[1]})"] = v
+                        self._pending_ov_submit = _TopicSwitchData(
+                            topic_id=self._last_topic_id,
+                            turn_indices=_turn_indices,
+                            agg_text=_old_topic.get("agg_text", ""),
+                            l1_texts={t: l1_texts[t] for t in _turn_indices if t in l1_texts},
+                            tool_group_l1=_tool_gl1,
+                        )
+                        logger.info("[CA] topic switch detected: %d → %d, packaged topic %d (%d turns, %d tool_groups)",
+                                    self._last_topic_id, _current_topic_id, self._last_topic_id,
+                                    len(_turn_indices), len(_tool_gl1))
+                self._last_topic_id = _current_topic_id
 
         # ── 话题检索 + 三级定级 ──
         with stats.time_phase("topic_retrieval"):
@@ -2754,3 +2787,68 @@ class ContextAssembler:
         self._save_topic_meta(new_meta)
         logger.info("[CA] persist_ideal_threshold: ideal=%.4f global_sum=%.4f count=%d",
                     ideal, global_sum, global_count)
+
+    def _fire_ov_submit(self, ts: _TopicSwitchData) -> bool:
+        """将已完成话题的 L1 摘要提交到 OpenViking。
+
+        POST {OPENVIKING_ENDPOINT}/api/v1/content/write
+        URI: viking://user/{user}/memories/ca_topics/topic_{id}_{ts}.md
+
+        Returns:
+            True  — HTTP 200（成功）
+            False — 任何失败（网络、非 200、异常）
+        """
+        import urllib.request
+        import time as _time
+
+        endpoint = os.getenv("OPENVIKING_ENDPOINT", "http://localhost:1933")
+        ov_user = os.getenv("OPENVIKING_USER", "tester")
+        uri = f"viking://user/{ov_user}/memories/ca_topics/topic_{ts.topic_id}_{int(_time.time())}.md"
+
+        # 组装 Markdown
+        lines = [f"# Topic {ts.topic_id} — CA Conversation Summary"]
+        if ts.turn_indices:
+            lines.append(f"\n> Turns: {ts.turn_indices[0]}-{ts.turn_indices[-1]}")
+        lines.append(f"\n## Overview\n{ts.agg_text}")
+
+        for ti in sorted(ts.turn_indices):
+            l1 = ts.l1_texts.get(ti, "")
+            core = l1
+            if l1:
+                try:
+                    l1j = json.loads(l1)
+                    core = l1j.get("core_change", l1)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            lines.append(f"\n## Dialogue Turn {ti}\n{core}")
+
+        if ts.tool_group_l1:
+            lines.append("\n## Tool Groups")
+            for key in sorted(ts.tool_group_l1.keys()):
+                lines.append(f"\n### {key}\n{ts.tool_group_l1[key]}")
+
+        content = "\n".join(lines)
+
+        payload = json.dumps({
+            "uri": uri,
+            "content": content,
+            "mode": "create",
+        }).encode("utf-8")
+
+        try:
+            req = urllib.request.Request(
+                url=f"{endpoint}/api/v1/content/write",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status == 200:
+                    logger.info("[CA] OV submit success: topic=%d uri=%s", ts.topic_id, uri)
+                    return True
+                body = resp.read().decode("utf-8", errors="replace")[:200]
+                logger.warning("[CA] OV submit returned %d: %s", resp.status, body)
+                return False
+        except Exception as exc:
+            logger.warning("[CA] OV submit exception for topic %d: %s", ts.topic_id, exc)
+            return False
