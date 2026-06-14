@@ -356,7 +356,7 @@ class ContextAssembler:
                     logger.info("[CA] _run_f_stage turn %d: truncated, saved as pending backfill", turn_index)
                     return
 
-                fct_dict, parser_hdl, core_state = parse_v1_markdown_xml(response_text)
+                fct_dict, parser_hdl, _ = parse_v1_markdown_xml(response_text)
                 if not parser_hdl:
                     logger.warning("[CA-METRIC] ca.l0.skipped_empty: turn=%d", turn_index)
                     self.stats.skipped_empty += 1
@@ -364,9 +364,6 @@ class ContextAssembler:
                 # 直接传给 clean_increment（跳过 ooda_parser.parse，
                 # 后者只兼容旧格式 "标题：内容" 格式，不兼容 Markdown ### 标题）
                 cleaned = clean_increment(fct_dict)
-                # 状态注入：将 core_state 嵌入 fct_dict 内部字段
-                if core_state and core_state != ItemState.UNKNOWN:
-                    cleaned["_state"] = core_state.value
                 cleaned["_assemble_status"] = 0
                 dialogue_ok = True
 

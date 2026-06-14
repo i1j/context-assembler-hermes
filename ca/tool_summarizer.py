@@ -892,13 +892,13 @@ class ToolSummarizer:
     @staticmethod
     def generate_group_summary(thought: str,
                                 tool_results: List[Dict[str, Any]] = None) -> str:
-        """从 thought 提取工具组摘要（≤100 字符，按句尾截断）。
+        """从 thought 提取工具组摘要（软目标 100 字，超过 100 时在句尾截断）。
 
         tool_results 参数已弃用——仅保留签名兼容历史调用。
         返回纯文本（非 JSON），直接写入 l1_text 供 A-stage 注入。
 
         Returns:
-            纯文本摘要（≤100 字符）；如果 thought 为空或仅为过渡词则返回 ""
+            纯文本摘要；如果 thought 为空或仅为过渡词则返回 ""
         """
         text = (thought or "").strip()
         if not text:
@@ -912,11 +912,18 @@ class ToolSummarizer:
         if not text:
             return ""
 
-        # 优先按句尾截断（中文句号/问号/感叹号 + 英文句号/叹号/问号）
-        for sep in ("\n\n", "。", "！", "？", ".", "!", "?"):
-            cut = text.find(sep)
-            if cut != -1 and cut <= 90:  # 留 10 字符余量
-                return text[:cut + len(sep)]
-
-        # 退到常规截断
-        return _safe_truncate(text, 100)
+        # 按句尾分割后逐句累加，超过 100 字时在该句尾截断
+        import re
+        sentences = re.split(r'(?<=[。！？.!?])\s*', text)
+        result = ""
+        for s in sentences:
+            s = s.strip()
+            if not s:
+                continue
+            if len(result) + len(s) > 100 and result:
+                # 超过 100 字，包含当前句后返回
+                return (result + " " + s).strip()
+            if result:
+                result += " "
+            result += s
+        return result if result else _safe_truncate(text, 100)

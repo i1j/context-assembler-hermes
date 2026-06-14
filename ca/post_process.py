@@ -52,6 +52,9 @@ def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
     if core and core not in ("无", "本轮无新内容"):
         cleaned["core_change"] = core
     _PLACEHOLDERS = {"", "无", "無", "none", "-", "- 无", "—", "— 无", "暂无", "无有效内容"}
+    stag = data.get("stage_tag", "")
+    if stag in ("已实施", "计划", "探讨", "已取消"):
+        cleaned["stage_tag"] = stag
     for field in ["new_materials", "objective_facts", "consensus", "todo"]:
         items = data.get(field, [])
         if not isinstance(items, list):
@@ -70,6 +73,7 @@ MEANINGLESS_CORE: Set[str] = {"无", "暂无", "无有效增量", "无新增", "
                             "无变化", "无明显变化", "无核心变化", "无核心变更"}
 WHITESPACE_PATTERN = re.compile(r'\s+')
 CORE_CHANGE_PATTERN = re.compile(r'<core_change>(.*?)(?:</core_change>|\Z)', re.DOTALL | re.IGNORECASE)
+STAGE_TAG_PATTERN = re.compile(r'<stage_tag>(.*?)(?:</stage_tag>|\Z)', re.DOTALL | re.IGNORECASE)
 
 # 【状态前缀正则】：提取 【已实施】/【计划】/【探讨】
 # 匹配以 【内容】 开头的文本，捕获括号内 1-10 个字符
@@ -261,6 +265,14 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
         # 语义短路：无法提取核心变更，返回空结果
         return _build_empty_result()
 
+    # 2.5 提取 <stage_tag>...</stage_tag>
+    stage_tag = ""
+    stag_match = STAGE_TAG_PATTERN.search(text)
+    if stag_match:
+        raw = stag_match.group(1).strip()
+        if raw in ("已实施", "计划", "探讨", "已取消"):
+            stage_tag = raw
+
     # 3. 提取 Markdown 4 类标题下的列表项
     section_order = [
         ("现象与问题", "new_materials"),
@@ -318,6 +330,7 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
         section_items[current_section] = current_items[:3]
 
     # 填入 l1_dict
+    l1_dict["stage_tag"] = stage_tag
     for eng_key in l1_dict:
         if eng_key == "core_change":
             continue
