@@ -388,15 +388,16 @@ class ContextAssembler:
         except Exception as e:
             logger.error("F‑stage crash turn %d: %s", turn_index, e, exc_info=True)
             fallback = json.dumps({
-                "core_change": "本轮无新内容",
-                "_assemble_status": 1,
+                "core_change": user_elm or "本轮无新内容",
+                "_assemble_status": 0,
                 "new_materials": [], "objective_facts": [],
                 "consensus": [], "todo": []
             }, ensure_ascii=False)
+            hdl = (user_elm or "本轮无新内容")[:100]
             self._update_fct_v5(
-                session_id, turn_index, fallback, "本轮无新内容",
+                session_id, turn_index, fallback, hdl,
             )
-            self.cache.add_turn(turn_index, "本轮无新内容", fallback, None, None)
+            self.cache.add_turn(turn_index, hdl, fallback, None, None)
         finally:
             with self._task_lock:
                 self._pending_tasks.pop(turn_index, None)
