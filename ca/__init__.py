@@ -954,7 +954,6 @@ class ContextAssembler:
                     lines.append(f"  {joined}")
         return "\n".join(lines)
 
-    @staticmethod
     def _call_llm_for_fct(self, prev_fct, elm_text) -> Tuple[str, str]:
         """返回 (response_text, finish_reason)。
 
