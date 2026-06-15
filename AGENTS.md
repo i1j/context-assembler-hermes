@@ -434,20 +434,46 @@ print(water)
 
 ## 测试接口清单
 
-**全部 29 测试通过**（Phase 1-4 重构后）
+**全部 269 测试通过**（Phase 1-4 重构 + 测试体系 v5.0 对齐后）
 
 ```bash
 cd /home/i1j/.hermes/profiles/tester/plugins/ca_assembler
 python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts="
 ```
 
+**测试覆盖**：269 ✅ / 19 ⏭️ / 0 ❌
+
+| 测试文件 | 说明 | 状态 |
+|---------|------|------|
+| `test_plugin.py` | 插件适配层（生命周期、断路器、hook 注册） | ✅ 29 tests |
+| `test_store.py` | turn_cache + turn_stream CRUD | ✅ 33 tests |
+| `test_fstage.py` | Fct 处理（_extract_hdl、_format_fct_for_display、_is_valid_fct） | ✅ 19 tests |
+| `test_astage.py` | A-stage 替换逻辑 | ✅ 5 tests |
+| `test_estage.py` | E-stage 写即落盘 hook | ✅ 2 tests |
+| `test_v460.py` | 话题分割（遗留兼容） | ✅ 22 tests |
+| ... 其它 | config/parse/embedding/health/quality/system/circuit/summarizer | ✅ 剩余 tests |
+
+**已删除的死测试**（v5.0 移除的复用旧 API 测试）：
+- `test_a.py`、`test_c.py`、`test_aligned_outcomes.py`（全文件）
+- 6 条混文件死用例（引用已删除的 `assemble()`、`_compute_turn_plan_v2` 等）
+
 ### 调试记录
 
-详见 `docs/analysis/` 分析报告和 `docs/debug/` 调试记录。
+详见 `docs/analysis/` 分析报告、`docs/debug/` 调试记录和三源验证报告。
 
 ### 预算实测
 
 所有行 `_assemble_status=0`，budget 从未耗尽。详见 [v5.2 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md)。
+
+## 已知问题 / 调试记录
+
+| 问题 | 状态 | 修复 |
+|------|------|------|
+| `_call_llm_for_fct` `@staticmethod` 错标 | ✅ `c60d8f8` | 移除 `@staticmethod`，重启生效 |
+| F-stage fallback 写死占位符 | ✅ `dbe9e8e` | 改为复制 user_elm |
+| `_is_valid_fct` / `_format_fct_for_display` 残余 `fct_text` | ✅ `403255f` | 改为 `l1_text` |
+| `generate_group_summary` 无句尾标点不截断 | ✅ `9fb05cc` | 最终返回加 `_safe_truncate` |
+| 三源验证结果 | ✅ 已记录 | `docs/debug/debug-2026-06-15-triple-source-verify.md` |
 
 ## ⚠️ 关键概念：CA 不是 context engine
 

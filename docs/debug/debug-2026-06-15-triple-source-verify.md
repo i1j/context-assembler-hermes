@@ -37,50 +37,58 @@ user 消息数：state.db=9 vs turn_stream=9 ✅
 替换逻辑已通过测试套件验证（`test_astage.py: 5 passed`），
 但无运行时 dump 无法验证生产环境 A-stage 的实际注入效果。
 
-### F-stage（Fct 生成）：❌ `@staticmethod` bug 导致全部降级
+### F-stage LLM 调用：❌→✅ `@staticmethod` bug
 
-**根因**：`_call_llm_for_fct()` 声明为 `@staticmethod` 但实际是实例方法（访问 `self.stats`、
-`self._turn_counter`）。`@staticmethod` 阻止 Python 注入 `self`，导致参数错位：
-`self` 参数接收了 `prev_fct`，`prev_fct` 接收了 `elm_text`，`elm_text` 无参数 → TypeError。
+**根因**：`_call_llm_for_fct()` 声明为 `@staticmethod` 但实际是实例方法
+（访问 `self.stats`、`self._turn_counter`）。`@staticmethod` 阻止 Python 注入
+`self`，导致参数错位：`self` 参数收到 `prev_fct`、`prev_fct` 收到 `elm_text`、
+`elm_text` 无参数 → TypeError。
 
-**证据**：
-- agent.log: `TypeError: ContextAssembler._call_llm_for_fct() missing 1 required positional argument: 'elm_text'`
-- Ca_cache: 所有 9 个 user Fct 的 `core_change="本轮无新内容"`, `_assemble_status=1`
-- Ca_cache: 9/9 user Fct 无 `stage_tag`
+**影响**：agent.log 连续 9 轮 `TypeError: missing elm_text`。F-stage crash
+后走 `except Exception` fallback（line 388-398）。
 
-**影响范围**：全部 9 轮 F-stage LLM 调用失败，所有 user Fct 为降级输出。
+**修复**：移除 `@staticmethod` 装饰器（commit `c60d8f8`）
 
-### ToolSummarizer（per-tool Fct）：✅ 正常工作（不依赖 LLM）
+### F-stage fallback 占位符：⚠️→✅ 改为复制 user Elm
 
-- 187/188 tool 行有 Fct（99%）
-- 格式 `{"tool_name": "...", "tool_args": {...}, "result_summary": "...", "_assemble_status": 0}`
-- ToolSummarizer 是规则驱动，无 LLM 依赖，不受 `@staticmethod` bug 影响
+**旧行为**：fallback 写死 `core_change: "本轮无新内容"`、`_assemble_status: 1`。
+user Fct 的唯一消费端是话题分割（`_compute_topic_groups`），占位符等于零信息。
 
-### stage_tag：⚠️ 死代码状态
+**修复**：fallback 改为复制 `user_elm` 原文作为 `core_change`，hdl 同步更新
+（commit `dbe9e8e`）。`_assemble_status` 改为 `0`（非降级）。
 
-- 仅 2/232 Fct 行含 stage_tag。因 F-stage LLM 全部降级，`<stage_tag>` XML 解析路径从未执行。
+### ToolSummarizer（per-tool Fct）：✅ 正常工作
 
-## 修复
+- 187/188 tool 行有 Fct（99%），格式正确
+- 规则驱动，不依赖 LLM
 
-`ca/__init__.py:957`: 移除 `@staticmethod` 装饰器 ✅ 已提交
+### stage_tag：⚠️ 待 LLM 恢复后验证
 
-修复后效果验证：重启 Hermes gateway 后观察 agent.log 应不再有
-`TypeError: ... missing 1 required positional argument: 'elm_text'` 错误，
-且 Fct 的 core_change 应为有意义的摘要内容。
+因 F-stage LLM 未实际调用，`<stage_tag>` 解析路径从未执行。
 
-## 汇总
+## 验证汇总
 
 | 检查项 | 验证结果 | 说明 |
 |--------|---------|------|
 | E-stage 数据完整性 | ✅ | state.db ↔ turn_stream 逐行对齐 |
 | A-stage 注入逻辑 | ⚠️ | 单元测试通过（5/5），缺运行时 dump |
-| F-stage LLM 调用 | ❌→✅ | @staticmethod bug 已修复 |
-| User Fct 格式 | ✅ | 5 字段 JSON 结构正确 |
-| Tool Fct 格式 | ✅ | ToolSummarizer 正常工作 |
-| stage_tag 独立 | ⚠️ | 代码正确，部署后需验证（LLM 正常工作后） |
+| F-stage @staticmethod bug | ❌→✅ | 已修复，重启后生效 |
+| F-stage fallback 复制 Elm | ❌→✅ | 已修复 |
+| ToolSummarizer | ✅ | 187/188 tool Fct 正确 |
+| stage_tag 独立 | ⚠️ | 代码正确，部署后验证 |
+
+## 修复清单
+
+| 提交 | 变更 |
+|------|------|
+| `9fb05cc` | fix: generate_group_summary 截断无句尾标点的长文本 |
+| `403255f` | refactor: 测试体系 v5.0 对齐 + 生产 bug 修复（fct_text→l1_text 两处） |
+| `c60d8f8` | fix: _call_llm_for_fct @staticmethod 导致 F-stage 全部降级 |
+| `dbe9e8e` | fix: F-stage fallback 复制 user Elm 替代硬编码占位符 |
+| `517044f` | feat: 测试体系重构覆盖映射方法论 skill |
 
 ## 下一步
 
-1. 重启 tester gateway 以加载修复后的代码
-2. 启用 `CA_DEBUG=1` 获取运行时 dump
-3. 执行多轮对话后重新验证 A-stage 注入和 F-stage LLM 输出
+1. **重启 tester gateway** 以加载所有修复
+2. **启用 `CA_DEBUG=1`** 获取运行时 dump
+3. **多轮对话后** 重新验证 A-stage 注入效果和 F-stage LLM 输出
