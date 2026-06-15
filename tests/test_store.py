@@ -536,3 +536,85 @@ def test_v5_write_tool_group_readonly_skip(tmp_path):
     result = store.write_tool_group("sid", 1, 1, [])
     assert result is False
     store.close()
+
+# =============================================================================
+# v5.0 turn_stream 读取/更新 — F-stage 支持
+# =============================================================================
+
+
+class TestV5TurnStreamRead:
+    """read_turn_elm_rows / read_fct_v5 / read_prev_fct / update_seq0_fct_v5"""
+
+    def test_read_turn_elm_rows_empty(self):
+        from ca.store import read_turn_elm_rows, write_turn_v5
+        from ca.store import SQLiteStore as Store
+        s = Store(db_path=":memory:")
+        rows = read_turn_elm_rows(s, "t", 1)
+        assert rows == []
+
+    def test_read_turn_elm_rows_write_back(self):
+        from ca.store import read_turn_elm_rows, write_turn_v5
+        from ca.store import SQLiteStore as Store
+        s = Store(db_path=":memory:")
+        write_turn_v5(s, "t", 1, 0, role="user", content="hello")
+        write_turn_v5(s, "t", 1, 1, role="assistant", content="world")
+        rows = read_turn_elm_rows(s, "t", 1)
+        assert len(rows) == 2
+        assert rows[0][0] == 0  # seq
+        assert rows[0][1] == "user"
+        assert rows[0][2] == "hello"
+        assert rows[1][0] == 1
+        assert rows[1][1] == "assistant"
+        assert rows[1][2] == "world"
+
+    def test_read_fct_v5_returns_l1_text(self):
+        from ca.store import read_fct_v5, write_turn_v5
+        from ca.store import SQLiteStore as Store
+        s = Store(db_path=":memory:")
+        write_turn_v5(s, "t", 1, 0, role="user", content="hi", l1_text='{"core_change":"test"}')
+        result = read_fct_v5(s, "t", 1, 0)
+        assert "core_change" in result
+
+    def test_read_fct_v5_missing_returns_empty(self):
+        from ca.store import read_fct_v5
+        from ca.store import SQLiteStore as Store
+        s = Store(db_path=":memory:")
+        assert read_fct_v5(s, "t", 99, 0) == ""
+
+    def test_read_prev_fct_returns_previous_turn(self):
+        from ca.store import read_prev_fct, write_turn_v5, read_fct_v5
+        from ca.store import SQLiteStore as Store
+        s = Store(db_path=":memory:")
+        write_turn_v5(s, "t", 1, 0, role="user", content="first", l1_text='{"core_change":"a"}')
+        write_turn_v5(s, "t", 2, 0, role="user", content="second", l1_text='{"core_change":"b"}')
+        prev = read_prev_fct(s, "t", 2)
+        assert "core_change" in prev
+        assert read_fct_v5(s, "t", 1, 0) == prev
+
+    def test_read_prev_fct_turn_0_returns_empty(self):
+        from ca.store import read_prev_fct
+        from ca.store import SQLiteStore as Store
+        s = Store(db_path=":memory:")
+        assert read_prev_fct(s, "t", 0) == ""
+
+    def test_update_seq0_fct_v5_updates_l1_l0(self):
+        from ca.store import update_seq0_fct_v5, read_fct_v5, write_turn_v5
+        from ca.store import SQLiteStore as Store
+        s = Store(db_path=":memory:")
+        write_turn_v5(s, "t", 1, 0, role="user", content="original", l1_text="old")
+        ok = update_seq0_fct_v5(s, "t", 1, fct_text='{"core_change":"new"}', hdl_text="hdl_new")
+        assert ok is True
+        assert read_fct_v5(s, "t", 1, 0) == '{"core_change":"new"}'
+        # Hdl not exposed via read_fct_v5; verify via raw query
+        cur = s.conn.execute("SELECT l0_text FROM turn_stream WHERE session_id=? AND turn=? AND seq=0", ("t", 1))
+        assert cur.fetchone()[0] == "hdl_new"
+
+    def test_update_seq0_fct_v5_only_affects_seq_0(self):
+        from ca.store import update_seq0_fct_v5, write_turn_v5
+        from ca.store import SQLiteStore as Store
+        s = Store(db_path=":memory:")
+        write_turn_v5(s, "t", 1, 0, role="user", content="u", l1_text="old")
+        write_turn_v5(s, "t", 1, 1, role="assistant", content="a", l1_text="other")
+        update_seq0_fct_v5(s, "t", 1, fct_text="new_fct", hdl_text="new_hdl")
+        cur = s.conn.execute("SELECT l1_text FROM turn_stream WHERE session_id=? AND turn=? AND seq=1", ("t", 1))
+        assert cur.fetchone()[0] == "other"  # unchanged

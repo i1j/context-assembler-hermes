@@ -903,7 +903,7 @@ class ContextAssembler:
         return max(1, len(text) // 2)
 
     def _is_valid_fct(self, l1_text: str) -> bool:
-        if not fct_text or not l1_text.strip():
+        if not l1_text or not l1_text.strip():
             return False
         try:
             data = json.loads(l1_text)
@@ -925,7 +925,7 @@ class ContextAssembler:
         当 LLM 生成非 JSON 调试描述时（如"当前会话 CA 注入 ctx 中完全无工具组..."），
         识别并返回空字符串，不泄漏原始文本。
         """
-        if not fct_text or not l1_text.strip():
+        if not l1_text or not l1_text.strip():
             return l1_text
         try:
             data = json.loads(l1_text)

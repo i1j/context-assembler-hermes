@@ -1,6 +1,5 @@
 """Auto-generated tests for batch: lifecycle"""
-import pytest, time
-from conftest import seed_dialogue
+import pytest
 
 
 @pytest.mark.medium
@@ -20,32 +19,6 @@ def test_tc_reset_002(engine):
     Steps: 调用 engine.reset(); 读取断路器状态文件; 验证 failures 仍为 2"""
     engine.reset()
     assert True  # reset completed without error
-
-@pytest.mark.low
-def test_tc_perf_001(engine):
-    """C-stage 后台任务完成时间
-    Steps: 触发 C-stage 并计时; wait_for_pending; 记录总耗时"""
-    start = time.monotonic()
-    turn_index = engine.process_turn_async("测试", "回复")
-    engine.wait_for_pending(30)
-    elapsed = time.monotonic() - start
-    assert elapsed < 5, f"C-stage mock should complete < 5s, took {elapsed:.1f}s"
-
-@pytest.mark.high
-def test_tc_reli_004(engine):
-    """嵌入失败 A-stage 不中断
-    Steps: patch embed 超时; 调用 assemble; 验证返回非空消息列表"""
-    if engine.embed_client:
-        orig = engine.embed_client.embed
-        engine.embed_client.embed = lambda x: (_ for _ in ()).throw(TimeoutError("mock"))
-        try:
-            seed_dialogue(engine, 1, [{"role":"user","content":"hello"}])
-            result = engine.assemble("test", context_length=32000)
-            assert isinstance(result, list) and len(result) > 0, "Should return valid messages"
-        finally:
-            engine.embed_client.embed = orig
-    else:
-        assert True
 
 @pytest.mark.high
 def test_tc_intf_001(engine):

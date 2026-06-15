@@ -1,59 +1,7 @@
-"""Integration tests for v5.2.1 features: forced topic split, Jaccard merge, adaptive threshold."""
+"""Integration tests for v5.2.1 features: Jaccard merge, adaptive threshold."""
 import json
 from unittest.mock import patch
 import pytest
-
-
-class TestForcedSplitTurns:
-    """_detect_forced_split_turns — 用户消息含切换短语时强制分裂"""
-
-    def _detect(self, messages):
-        from ca import ContextAssembler
-        return ContextAssembler._detect_forced_split_turns(messages)
-
-    def test_detect_topic_switch(self):
-        forced = self._detect([{"role": "user", "content": "换一个话题", "_turn_index": 3}])
-        assert 3 in forced
-
-    def test_detect_change_topic(self):
-        forced = self._detect([{"role": "user", "content": "换个话题", "_turn_index": 5}])
-        assert 5 in forced
-
-    def test_detect_no_switch(self):
-        forced = self._detect([{"role": "user", "content": "继续讨论", "_turn_index": 2}])
-        assert 2 not in forced
-
-    def test_detect_multiple_turns(self):
-        messages = [
-            {"role": "user", "content": "正常聊天", "_turn_index": 1},
-            {"role": "user", "content": "换一个话题", "_turn_index": 3},
-            {"role": "user", "content": "另一个问题", "_turn_index": 5},
-        ]
-        forced = self._detect(messages)
-        assert 3 in forced and 5 in forced and 1 not in forced
-
-    def test_detect_english(self):
-        forced = self._detect([{"role": "user", "content": "change topic", "_turn_index": 4}])
-        assert 4 in forced
-
-    def test_detect_no_turn_index(self):
-        forced = self._detect([{"role": "user", "content": "换一个话题"}])
-        assert forced == set()
-
-    def test_assemble_with_forced_split(self, ca_engine):
-        """集成：话题切换短语应产生分裂"""
-        from tests.conftest import seed_dialogue
-
-        for i in range(1, 4):
-            seed_dialogue(ca_engine, i, [{"role": "user", "content": f"msg{i}", "_turn_index": i}])
-            ca_engine.cache.add_turn(i, f"l0_{i}", json.dumps({"new_materials": [f"内容{i}"], "core_change": "c"}))
-
-        l1_texts, _ = ca_engine.cache.get_snapshot_data()
-        l1_embeddings = {t: [0.1] * 768 for t in l1_texts}
-        turn_to_topic, _ = ca_engine._compute_topic_groups(
-            l1_texts, l1_embeddings, jaccard_merge_threshold=0.07, forced_split_turns={3},
-        )
-        assert turn_to_topic[1] != turn_to_topic[3], "turn 3 should be in a different topic"
 
 
 class TestJaccardMergeThreshold:

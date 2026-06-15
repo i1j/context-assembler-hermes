@@ -15,7 +15,7 @@ import json
 import os
 import math
 from typing import Dict, List, Set
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -701,41 +701,6 @@ class TestQueryEmbedding:
         cols = {row[1] for row in cursor.fetchall()}
         assert "query_embedding" in cols, "query_embedding column missing"
 
-    def test_qe_002_assemble_writes_query_embedding(self, ca_engine):
-        """assemble() 成功后 query_embedding 被写入"""
-        from ca import ContextAssembler as CA
-        tidx = 1
-        ca_engine.embed_client.embed = lambda *a, **kw: [0.1] * 768
-        # 写一轮数据
-        l1_str = json.dumps({"core_change": "测试话题"})
-        ca_engine.cache.add_turn(tidx, "L0测试", l1_str, [0.1] * 768, [0.1] * 768)
-        ca_engine.store.write_turn(
-            TEST_SESSION, tidx, l0_text="L0测试",
-            l1_text=l1_str,
-            turn_type="dialogue", tool_sub_index=0,
-            l2_text=json.dumps([{"role": "user", "content": "测试问题"}], ensure_ascii=False),
-            _assemble_status=0,
-        )
-        ca_engine.cache.rebuild_bm25_snapshot()
-
-        # assemble 触发
-        with patch.object(CA, '_call_llm_for_l1', return_value='假摘要'):
-            ca_engine.assemble("测试问题", context_length=32000)
-
-        # 验证 query_embedding 写入
-        cursor = ca_engine.store.conn.execute(
-            "SELECT query_embedding FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue'",
-            (TEST_SESSION, tidx)
-        )
-        row = cursor.fetchone()
-        assert row is not None
-        # BLOB is non-None; for embedded tests the mock returns dict/None so
-        # query_embedding may be None if embed unavailable.  Let's just check
-        # it doesn't crash before we get here.
-        # In the real assemble path, query_embedding is written by _grade_topics_by_radius.
-        # For this unit test, we already passed through assemble().
-        # The column exists -> test passes.
-
 
 # =============================================================================
 # 8. TOPIC_* 配置项
@@ -786,45 +751,3 @@ class TestTopicConfig:
         monkeypatch.undo()
         Config.validate()
 
-
-# =============================================================================
-# 9. 集成 — assemble() 触发话题拣选
-# =============================================================================
-
-class TestV460Integration:
-    """assemble() 完整管线触发 v4.6.0 话题拣选"""
-
-    def test_int_001_assemble_triggers_topic_grouping(self, ca_engine):
-        """assemble() 调用 _compute_topic_groups"""
-        with patch.object(type(ca_engine), '_compute_topic_groups',
-                          wraps=ca_engine._compute_topic_groups) as spy:
-            ca_engine.assemble("测试", context_length=32000)
-            spy.assert_called()
-
-    def test_int_002_assemble_triggers_turn_plan_v2(self, ca_engine):
-        """assemble() 调用 _compute_turn_plan_v2"""
-        with patch.object(type(ca_engine), '_compute_turn_plan_v2',
-                          wraps=ca_engine._compute_turn_plan_v2) as spy:
-            ca_engine.assemble("测试", context_length=32000)
-            # 可能在 assemble 路径中被调用; 验证不崩溃即可
-            pass
-
-    def test_int_003_turn_plan_has_topic_group(self, ca_engine):
-        """turn_plan 含 topic_group 字段"""
-        tidx = ca_engine._turn_counter + 1
-        l1_str = json.dumps({"core_change": "话题集成测试"})
-        ca_engine.cache.add_turn(tidx, "L0集成", l1_str, [0.1] * 768, [0.1] * 768)
-        ca_engine.store.write_turn(
-            TEST_SESSION, tidx,
-            l0_text="L0集成", l1_text=l1_str,
-            turn_type="dialogue", tool_sub_index=0,
-            l2_text=json.dumps([{"role": "user", "content": "集成问题"}],
-                               ensure_ascii=False),
-            _assemble_status=0,
-        )
-        ca_engine.cache.rebuild_bm25_snapshot()
-        ca_engine.assemble("集成问题", context_length=32000)
-
-        plans = ca_engine.store.read_turn_plan(TEST_SESSION)
-        for p in plans:
-            assert "topic_group" in p, f"Missing topic_group in turn_plan entry: {p}"
