@@ -926,4 +926,8 @@ class ToolSummarizer:
             if result:
                 result += " "
             result += s
-        return result if result else _safe_truncate(text, 100)
+        if result:
+            if len(result) > 100:
+                return _safe_truncate(result, 100)
+            return result
+        return _safe_truncate(text, 100)
