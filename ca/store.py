@@ -1357,6 +1357,33 @@ def read_fct_v5(store, session_id: str, turn: int, seq: int) -> str:
         return ""
 
 
+def read_role_v5(store, session_id: str, turn: int, seq: int) -> Optional[str]:
+    """点查：返回 (turn, seq) 的 role，该行不存在则返回 None。"""
+    try:
+        cur = store.conn.execute(
+            "SELECT role FROM turn_stream WHERE session_id=? AND turn=? AND seq=?",
+            (session_id, turn, seq),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+
+
+def get_turn_ca_rows(store, session_id: str, turn: int) -> list:
+    """返回该 turn 在 turn_stream 中的所有 (seq, role, finish_reason, tool_calls_json, Fct)。
+    按 seq 升序。空列表 = 该 turn 无 CA 数据。"""
+    try:
+        cur = store.conn.execute(
+            "SELECT seq, role, finish_reason, tool_calls_json, Fct FROM turn_stream "
+            "WHERE session_id=? AND turn=? ORDER BY seq",
+            (session_id, turn),
+        )
+        return cur.fetchall()
+    except sqlite3.Error:
+        return []
+
+
 def read_turn_elm_rows(store, session_id: str, turn: int) -> list:
     """Read all Elm rows for a turn from turn_stream.
 

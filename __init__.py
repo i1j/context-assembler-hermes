@@ -297,7 +297,16 @@ class CAContextAssemblerPlugin:
     # ═════════════════════════════════════════════════════
 
     def _simple_mutation_mode_v5(self, conversation_history: list) -> Optional[str]:
-        """v5: 从 turn_stream 查 Fct 替换。无 plan 依赖。"""
+        """v5: 轮内按角色类型匹配注入 Fct。
+
+        策略（C 方案）：
+          - 每个 turn 由 user 在 conv_hist 中的位置锚定。
+          - 拉该 turn 在 CA 的所有行，按角色分队列：
+            thought（assistant, 不含 fin）和 tool。
+          - conv_hist 的 thought/tool 行依次从对应队列中取。
+          - 队列用尽则保留原始 Elm，队列多余自然孤行。
+          - fin 行（assistant, finish_reason='stop'）不进入任何队列。
+        """
         if not conversation_history:
             return None
         self._saved_history_snapshot = [{**m} for m in conversation_history]
@@ -305,6 +314,9 @@ class CAContextAssemblerPlugin:
         store = self._engine.store
         sid = self._session_id
 
+        from ca.store import get_turn_ca_rows
+
+        # 尾巴保护：最后 3 个 user turn 不处理
         tail_boundary = 0
         _user_count = 0
         for i in range(len(conversation_history) - 1, -1, -1):
@@ -314,37 +326,82 @@ class CAContextAssemblerPlugin:
                     tail_boundary = i
                     break
 
-        turn = 0
-        seq = 0
-        replaced = 0
-        skipped = 0
-
+        # Phase 1: 按 turn 收集 conv_hist 中需匹配的行
+        # turn_rows[turn_num] = [(conv_idx, type), ...]
+        # type: "thought" | "tool" | "fin"
+        turn_rows: dict = {}
+        current_turn = 0
         for i, msg in enumerate(conversation_history):
             role = msg.get("role", "")
             if role == "system":
                 continue
             if role == "user":
-                turn += 1
-                seq = 0
+                current_turn += 1
                 continue
-            seq += 1
             if i >= tail_boundary:
                 continue
-            if role == "user":
-                continue
+
             if role == "assistant" and not msg.get("tool_calls"):
+                row_type = "fin"
+            elif role == "assistant":
+                row_type = "thought"
+            elif role == "tool":
+                row_type = "tool"
+            else:
                 continue
 
-            from ca.store import read_fct_v5
-            l1 = read_fct_v5(store, sid, turn, seq)
-            if l1:
-                msg["content"] = l1
-                replaced += 1
-            else:
-                skipped += 1
+            turn_rows.setdefault(current_turn, []).append((i, row_type))
 
-        logger.info("[CA_v5] simple_mutation: replaced %d + skipped %d (tail=%d, turns=%d)",
-                    replaced, skipped, tail_boundary, turn)
+        # Phase 2: 逐 turn 做角色队列匹配
+        replaced = 0
+        skipped = 0
+
+        for turn_num, rows in turn_rows.items():
+            if turn_num <= 0:
+                continue
+
+            ca_rows = get_turn_ca_rows(store, sid, turn_num)
+            if not ca_rows:
+                skipped += sum(1 for _, t in rows if t != "fin")
+                continue
+
+            # 按角色分队列：thought（排除 fin）和 tool
+            ca_thoughts: list = []
+            ca_tools: list = []
+            for _seq, role, finish_reason, tc_json, fct in ca_rows:
+                if role == "user":
+                    continue
+                if role == "assistant" and finish_reason == "stop":
+                    continue  # fin，不放任何队列
+                if role == "assistant":
+                    ca_thoughts.append(fct or "")
+                elif role == "tool":
+                    ca_tools.append(fct or "")
+
+            # 逐个匹配
+            ti, tj = 0, 0
+            for conv_idx, row_type in rows:
+                if row_type == "fin":
+                    continue
+
+                if row_type == "thought":
+                    if ti < len(ca_thoughts):
+                        conversation_history[conv_idx]["content"] = ca_thoughts[ti]
+                        ti += 1
+                        replaced += 1
+                    else:
+                        skipped += 1
+                else:  # tool
+                    if tj < len(ca_tools):
+                        conversation_history[conv_idx]["content"] = ca_tools[tj]
+                        tj += 1
+                        replaced += 1
+                    else:
+                        skipped += 1
+
+        last_turn = max(turn_rows, default=0)
+        logger.info("[CA_v5] simple_mutation: replaced=%d + skipped=%d (tail=%d, turns=%d)",
+                    replaced, skipped, tail_boundary, last_turn)
         return None
 
     def pre_llm_call_v5(self, **kwargs: Any) -> Optional[str]:
