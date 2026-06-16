@@ -10,15 +10,15 @@ from ca.store import SQLiteStore
 def test_tc_s_001(engine):
     """持久化
     Steps: 写入 turn; 重启 store; 读取验证"""
-    engine.store.write_turn("test_sess", 0, l0_text="l0", l1_text='{"core":"test"}',
-                            l0_embedding=None, l1_embedding=None,
+    engine.store.write_turn("test_sess", 0, hdl_text="l0", fct_text='{"core":"test"}',
+                            hdl_embedding=None, fct_embedding=None,
                             bm25_tokens=None, token_offset=0)
     db_path = engine.store._db_path
     engine2 = SQLiteStore(db_path)
     try:
         rec = engine2.read_turn("test_sess", 0)
         assert rec is not None, "Data should persist after store reopen"
-        assert rec["l0_text"] == "l0"
+        assert rec["Hdl"] == "l0"
     finally:
         engine2.close()
 
@@ -30,8 +30,8 @@ def test_tc_s_002(engine):
     from concurrent.futures import ThreadPoolExecutor
 
     def write(idx):
-        return engine.store.write_turn("test", idx, l0_text=f"l0_{idx}", l1_text='{"x":1}',
-                                       l0_embedding=None, l1_embedding=None,
+        return engine.store.write_turn("test", idx, hdl_text=f"l0_{idx}", fct_text='{"x":1}',
+                                       hdl_embedding=None, fct_embedding=None,
                                        bm25_tokens=None, token_offset=0)
 
     with ThreadPoolExecutor(max_workers=10) as pool:
@@ -46,8 +46,8 @@ def test_tc_s_002a(engine):
     from concurrent.futures import ThreadPoolExecutor
 
     def write_same(i):
-        return engine.store.write_turn("conflict", 0, l0_text=f"l0_{i}", l1_text='{"x":1}',
-                                       l0_embedding=None, l1_embedding=None,
+        return engine.store.write_turn("conflict", 0, hdl_text=f"l0_{i}", fct_text='{"x":1}',
+                                       hdl_embedding=None, fct_embedding=None,
                                        bm25_tokens=None, token_offset=0)
 
     with ThreadPoolExecutor(max_workers=5) as pool:
@@ -60,8 +60,8 @@ def test_tc_s_003(engine):
     """WAL 大小
     Steps: 写入并 checkpoint; 检查 WAL 文件大小"""
     for i in range(500):
-        engine.store.write_turn("test_sess", i, l0_text=f"l0_{i}", l1_text='{"x":1}',
-                                l0_embedding=None, l1_embedding=None,
+        engine.store.write_turn("test_sess", i, hdl_text=f"l0_{i}", fct_text='{"x":1}',
+                                hdl_embedding=None, fct_embedding=None,
                                 bm25_tokens=None, token_offset=0)
     wal_path = str(engine.store._db_path) + "-wal"
     if os.path.exists(wal_path):
@@ -92,8 +92,8 @@ def test_tc_s_004(engine):
     t.start()
     assert lock_held.wait(timeout=5), "Locker thread failed to acquire lock"
 
-    result = engine.store.write_turn("retry_test", 0, l0_text="l0", l1_text="l1",
-                                     l0_embedding=None, l1_embedding=None,
+    result = engine.store.write_turn("retry_test", 0, hdl_text="l0", fct_text="l1",
+                                     hdl_embedding=None, fct_embedding=None,
                                      bm25_tokens=None, token_offset=0)
     done.wait(timeout=5)
     t.join(timeout=5)
@@ -101,7 +101,7 @@ def test_tc_s_004(engine):
     assert result == True, "write_turn should succeed after retrying past the lock"
     rec = engine.store.read_turn("retry_test", 0)
     assert rec is not None, "Data should be persisted after retry"
-    assert rec["l0_text"] == "l0"
+    assert rec["Hdl"] == "l0"
 
 
 @pytest.mark.medium
@@ -111,8 +111,8 @@ def test_tc_s_005(engine):
     empty_max = engine.store.max_turn_index("empty_sess")
     assert empty_max == -1, f"Empty DB max_turn_index should be -1, got {empty_max}"
     for ti in [0, 2, 5]:
-        engine.store.write_turn("fifo_sess", ti, l0_text=f"l0_{ti}", l1_text='{"x":1}',
-                                l0_embedding=None, l1_embedding=None,
+        engine.store.write_turn("fifo_sess", ti, hdl_text=f"l0_{ti}", fct_text='{"x":1}',
+                                hdl_embedding=None, fct_embedding=None,
                                 bm25_tokens=None, token_offset=0)
     max_ti = engine.store.max_turn_index("fifo_sess")
     assert max_ti == 5, f"max_turn_index should be 5, got {max_ti}"
@@ -127,8 +127,8 @@ def test_tc_s_006(engine):
 
     with patch.object(engine.store, 'write_turn', failing_write):
         try:
-            engine.store.write_turn("test", 0, l0_text="l0", l1_text="l1",
-                                     l0_embedding=None, l1_embedding=None,
+            engine.store.write_turn("test", 0, hdl_text="l0", fct_text="l1",
+                                     hdl_embedding=None, fct_embedding=None,
                                      bm25_tokens=None, token_offset=0)
         except OSError:
             result = False
@@ -146,8 +146,8 @@ def test_tc_s_007(engine):
     # 不能在实例上 patch。改为验证 write_turn 在底层报错时正确处理。
     tidx = 42
     with patch.object(engine.store, 'write_turn', return_value=False):
-        result = engine.store.write_turn("atomic_test", tidx, l0_text="l0", l1_text="l1",
-                                         l0_embedding=None, l1_embedding=None,
+        result = engine.store.write_turn("atomic_test", tidx, hdl_text="l0", fct_text="l1",
+                                         hdl_embedding=None, fct_embedding=None,
                                          bm25_tokens=None, token_offset=0)
     assert result is False
     rec = engine.store.read_turn("atomic_test", tidx)
@@ -158,13 +158,13 @@ def test_tc_s_007(engine):
 def test_tc_s_008(engine):
     """数据老化清理
     Steps: 写入数据; 读取验证"""
-    engine.store.write_turn("old_sess", 0, l0_text="l0", l1_text="l1",
-                            l0_embedding=None, l1_embedding=None,
+    engine.store.write_turn("old_sess", 0, hdl_text="l0", fct_text="l1",
+                            hdl_embedding=None, fct_embedding=None,
                             bm25_tokens=None, token_offset=0)
     rec = engine.store.read_turn("old_sess", 0)
     assert rec is not None, "Written data should be readable"
-    assert rec["l0_text"] == "l0"
-    assert rec["l1_text"] == "l1"
+    assert rec["Hdl"] == "l0"
+    assert rec["Fct"] == "l1"
 
 
 @pytest.mark.low
@@ -173,8 +173,8 @@ def test_tc_s_009(engine):
     Steps: 调用 list_session_ids 两次; 写入新会话; 验证缓存刷新"""
     ids1 = engine.store.list_session_ids()
     ids2 = engine.store.list_session_ids()
-    engine.store.write_turn("new_sess", 0, l0_text="l0", l1_text="l1",
-                            l0_embedding=None, l1_embedding=None,
+    engine.store.write_turn("new_sess", 0, hdl_text="l0", fct_text="l1",
+                            hdl_embedding=None, fct_embedding=None,
                             bm25_tokens=None, token_offset=0)
     ids3 = engine.store.list_session_ids()
     assert True
@@ -201,8 +201,8 @@ def test_tc_s_010(engine):
     t.start()
     assert lock_held.wait(timeout=5), "Locker thread failed to acquire lock"
 
-    result = engine.store.write_turn("retry_test2", 0, l0_text="l0", l1_text="l1",
-                                     l0_embedding=None, l1_embedding=None,
+    result = engine.store.write_turn("retry_test2", 0, hdl_text="l0", fct_text="l1",
+                                     hdl_embedding=None, fct_embedding=None,
                                      bm25_tokens=None, token_offset=0)
     done.wait(timeout=5)
     t.join(timeout=5)
@@ -210,7 +210,7 @@ def test_tc_s_010(engine):
     assert result == True, "write_turn should return True after retries"
     rec = engine.store.read_turn("retry_test2", 0)
     assert rec is not None, "Write should succeed after retries"
-    assert rec["l0_text"] == "l0"
+    assert rec["Hdl"] == "l0"
 
 
 @pytest.mark.high
@@ -220,9 +220,9 @@ def test_tc_s_012_wal_mode_validated(tmp_path):
     from ca.store import SQLiteStore
     db = tmp_path / "test_wal.db"
     store = SQLiteStore(db_path=str(db))
-    store.write_turn("test_wal", 1, l0_text="wal_test")
+    store.write_turn("test_wal", 1, hdl_text="wal_test")
     rec = store.read_turn("test_wal", 1)
-    assert rec is not None and rec["l0_text"] == "wal_test"
+    assert rec is not None and rec["Hdl"] == "wal_test"
     # 验证数据库确实是 WAL 模式
     import sqlite3
     conn = sqlite3.connect(str(db))
@@ -242,7 +242,7 @@ def test_v5_schema_created(tmp_path):
     db = tmp_path / "test_v5.db"
     store = SQLiteStore(db_path=str(db))
     # 第一次写操作触发 schema 创建
-    store.write_turn("sid", 1, l0_text="test", l1_text="{}", token_offset=0)
+    store.write_turn("sid", 1, hdl_text="test", fct_text="{}", token_offset=0)
     store.close()
     import sqlite3
     conn = sqlite3.connect(str(db))
@@ -259,7 +259,7 @@ def test_v5_schema_created(tmp_path):
     conn2.close()
     assert "turn_type" in xcols, f"Missing turn_type generated column: {list(xcols.keys())}"
     assert "tool_sub_index" in xcols, f"Missing tool_sub_index generated column"
-    assert "l2_text" in xcols, f"Missing l2_text generated column"
+    assert "Elm" in xcols, f"Missing elm_text generated column"
 
 
 @pytest.mark.high
@@ -268,7 +268,7 @@ def test_v5_turn_plan_pk_extended(tmp_path):
     Steps: 新建 store → 写入触发 schema → 检查 turn_plan 列"""
     db = tmp_path / "test_v5_tp.db"
     store = SQLiteStore(db_path=str(db))
-    store.write_turn("sid", 1, l0_text="test", l1_text="{}", token_offset=0)
+    store.write_turn("sid", 1, hdl_text="test", fct_text="{}", token_offset=0)
     store.close()
     import sqlite3
     conn = sqlite3.connect(str(db))
@@ -285,27 +285,27 @@ def test_v5_write_turn_old_params_backward(tmp_path):
     db = tmp_path / "test_v5_bw.db"
     store = SQLiteStore(db_path=str(db))
     store.write_turn("sid", 1, turn_type="dialogue", tool_sub_index=0,
-                     l0_text="l0_val", l1_text="l1_val", token_offset=100)
+                     hdl_text="l0_val", fct_text="l1_val", token_offset=100)
     rec = store.read_turn("sid", 1)
     assert rec is not None
-    assert rec["l0_text"] == "l0_val"
+    assert rec["Hdl"] == "l0_val"
     assert rec["turn_type"] == "dialogue"
     store.close()
 
 
 @pytest.mark.medium
 def test_v5_write_turn_l2_text_backward(tmp_path):
-    """write_turn l2_text → content 向后兼容映射
-    Steps: l2_text=JSON → 读出 content 等于该 JSON"""
+    """write_turn Elm → content 向后兼容映射
+    Steps: Elm=JSON → 读出 content 等于该 JSON"""
     import json
     db = tmp_path / "test_v5_l2.db"
     store = SQLiteStore(db_path=str(db))
     l2_val = json.dumps([{"role": "user", "content": "hello"}])
     store.write_turn("sid", 1, turn_type="dialogue", tool_sub_index=0,
-                     l2_text=l2_val, l0_text="", l1_text="{}", token_offset=0)
+                     elm_text=l2_val, hdl_text="", fct_text="{}", token_offset=0)
     rec = store.read_turn("sid", 1)
     assert rec is not None
-    assert rec["l2_text"] == l2_val  # 虚拟列
+    assert rec["Elm"] == l2_val  # 虚拟列
     store.close()
 
 
@@ -315,7 +315,7 @@ def test_v5_read_session_turn_type_mapping(tmp_path):
     Steps: 写入 role='user' → read_session 返回 turn_type='dialogue'"""
     db = tmp_path / "test_v5_rs.db"
     store = SQLiteStore(db_path=str(db))
-    store.write_turn("sid", 1, role="user", l0_text="l0", l1_text="{}", token_offset=0)
+    store.write_turn("sid", 1, role="user", hdl_text="l0", fct_text="{}", token_offset=0)
     records = store.read_session("sid")
     assert len(records) == 1
     assert records[0]["turn_type"] == "dialogue", f"Got {records[0]['turn_type']}"
@@ -329,9 +329,9 @@ def test_v5_max_turn_index_uses_role(tmp_path):
     Steps: 写入 user + tool 行 → max_turn_index 只计 user 行"""
     db = tmp_path / "test_v5_mti.db"
     store = SQLiteStore(db_path=str(db))
-    store.write_turn("sid", 1, role="user", l0_text="u1", l1_text="{}", token_offset=0)
-    store.write_turn("sid", 2, role="user", l0_text="u2", l1_text="{}", token_offset=0)
-    store.write_turn("sid", 3, role="tool", l0_text="", l1_text="", token_offset=50,
+    store.write_turn("sid", 1, role="user", hdl_text="u1", fct_text="{}", token_offset=0)
+    store.write_turn("sid", 2, role="user", hdl_text="u2", fct_text="{}", token_offset=0)
+    store.write_turn("sid", 3, role="tool", hdl_text="", fct_text="", token_offset=50,
                      api_call_count=1, seq_index=1)
     assert store.max_turn_index("sid") == 2  # 只计 user 行
     store.close()
@@ -346,7 +346,7 @@ def test_v5_write_turn_plan_read_back(tmp_path):
     entries = [{
         "turn_index": 1, "api_call_count": 0, "seq_index": 0,
         "turn_type": "dialogue", "target_level": "L0",
-        "decision_reason": "middle", "l2_tokens": 10,
+        "decision_reason": "middle", "elm_tokens": 10,
         "summary_tokens": 5, "tokens_saved": 5,
     }]
     result = store.write_turn_plan("sid", entries)
@@ -366,7 +366,7 @@ def test_v5_readonly_guard(tmp_path):
     conn = sqlite3.connect(str(db))
     conn.execute("CREATE TABLE turn_cache (session_id TEXT, turn_index INTEGER, "
                  "turn_type TEXT, tool_sub_index INTEGER, "
-                 "l0_text TEXT, l1_text TEXT, token_offset INTEGER, "
+                 "Hdl TEXT, Fct TEXT, token_offset INTEGER, "
                  "PRIMARY KEY (session_id, turn_index, turn_type, tool_sub_index))")
     conn.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT)")
     conn.execute("INSERT INTO _meta (key, value) VALUES ('schema_version', '4')")
@@ -391,8 +391,8 @@ def test_v5_readonly_mode(tmp_path):
             session_id TEXT, turn_index INTEGER,
             turn_type TEXT NOT NULL DEFAULT 'dialogue',
             tool_sub_index INTEGER NOT NULL DEFAULT 0,
-            l0_text TEXT, l1_text TEXT, l2_text TEXT,
-            l0_embedding BLOB, l1_embedding BLOB,
+            Hdl TEXT, Fct TEXT, Elm TEXT,
+            hdl_embedding BLOB, fct_embedding BLOB,
             bm25_tokens TEXT,
             token_offset INTEGER, backfill_attempts INTEGER DEFAULT 0,
             _assemble_status INTEGER DEFAULT 0,
@@ -404,7 +404,7 @@ def test_v5_readonly_mode(tmp_path):
             session_id TEXT, turn_index INTEGER,
             turn_type TEXT, tool_sub_index INTEGER,
             target_level TEXT, decision_reason TEXT,
-            l2_tokens INTEGER, summary_tokens INTEGER, tokens_saved INTEGER,
+            elm_tokens INTEGER, summary_tokens INTEGER, tokens_saved INTEGER,
             rrf_score REAL, upgrade_rank INTEGER,
             budget_remaining INTEGER, topic_group INTEGER, created_at TEXT,
             PRIMARY KEY (session_id, turn_index, turn_type, tool_sub_index)
@@ -412,7 +412,7 @@ def test_v5_readonly_mode(tmp_path):
         CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT);
         INSERT INTO _meta (key, value) VALUES ('schema_version', '4');
     """)
-    conn.execute("INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, l0_text, l1_text, token_offset) "
+    conn.execute("INSERT INTO turn_cache (session_id, turn_index, turn_type, tool_sub_index, Hdl, Fct, token_offset) "
                  "VALUES ('sid', 1, 'dialogue', 0, 'l0', 'l1', 0)")
     conn.commit()
     conn.close()
@@ -420,9 +420,9 @@ def test_v5_readonly_mode(tmp_path):
     store = SQLiteStore(db_path=str(db), readonly=True)
     recs = store.read_session("sid")
     assert len(recs) == 1
-    assert recs[0]["l0_text"] == "l0"
+    assert recs[0]["Hdl"] == "l0"
     # readonly 写入应静默跳过
-    result = store.write_turn("sid", 2, l0_text="l0_new")
+    result = store.write_turn("sid", 2, hdl_text="l0_new")
     assert result is False, "readonly write should return False"
     store.close()
 
@@ -436,7 +436,7 @@ def test_v5_write_turn_with_new_params(tmp_path):
     store.write_turn("sid", 1, role="assistant", api_call_count=1, seq_index=0,
                      content="thought text", tool_calls_json='[{"id":"call_1"}]',
                      finish_reason="tool_calls",
-                     l0_text="", l1_text="{}", token_offset=0)
+                     hdl_text="", fct_text="{}", token_offset=0)
     records = store.read_session("sid")
     assert len(records) == 1
     r = records[0]
@@ -458,12 +458,12 @@ def test_v5_write_tool_group_stub(tmp_path):
         {"role": "assistant", "api_call_count": 1, "seq_index": 0,
          "content": "我来查文件", "tool_calls_json": '[{"id":"c1","function":{"name":"read_file","arguments":"{\\"path\\":\\"/a\\"}"}}]',
          "finish_reason": "tool_calls", "api_request_id": "req_001",
-         "l1_text": '{"group_intent":"查文件","group_result":"ok","tool_count":1,"state":"ok"}'},
+         "Fct": '{"group_intent":"查文件","group_result":"ok","tool_count":1,"state":"ok"}'},
         # tool 行
         {"role": "tool", "api_call_count": 1, "seq_index": 1,
          "content": "file content", "tool_call_id": "c1", "tool_name": "read_file",
          "status": "ok", "duration_ms": 150, "api_request_id": "req_001",
-         "l1_text": '{"tool_name":"read_file","result_summary":"file content","status":"ok"}'},
+         "Fct": '{"tool_name":"read_file","result_summary":"file content","status":"ok"}'},
     ]
     result = store.write_tool_group("sid", 1, 1, rows)
     assert result is True
@@ -489,28 +489,28 @@ def test_v5_write_tool_group_multiple_api(tmp_path):
     db = tmp_path / "test_v5_multi_api.db"
     store = SQLiteStore(db_path=str(db))
     # 先写 user 行 (must exist for ordering)
-    store.write_turn("sid", 1, l0_text="hello", l1_text="{}", token_offset=0)
+    store.write_turn("sid", 1, hdl_text="hello", fct_text="{}", token_offset=0)
     # API 组 1 (2 tools)
     rows1 = [
         {"role": "assistant", "api_call_count": 1, "seq_index": 0,
          "content": "查文件", "tool_calls_json": "[]", "finish_reason": "tool_calls",
-         "api_request_id": "req_001", "l1_text": "{}"},
+         "api_request_id": "req_001", "Fct": "{}"},
         {"role": "tool", "api_call_count": 1, "seq_index": 1,
          "content": "a.py", "tool_call_id": "c1", "tool_name": "read_file",
-         "status": "ok", "duration_ms": 100, "api_request_id": "req_001", "l1_text": "{}"},
+         "status": "ok", "duration_ms": 100, "api_request_id": "req_001", "Fct": "{}"},
         {"role": "tool", "api_call_count": 1, "seq_index": 2,
          "content": "b.py", "tool_call_id": "c2", "tool_name": "read_file",
-         "status": "ok", "duration_ms": 50, "api_request_id": "req_001", "l1_text": "{}"},
+         "status": "ok", "duration_ms": 50, "api_request_id": "req_001", "Fct": "{}"},
     ]
     store.write_tool_group("sid", 1, 1, rows1)
     # API 组 2 (1 tool)
     rows2 = [
         {"role": "assistant", "api_call_count": 2, "seq_index": 0,
          "content": "继续查", "tool_calls_json": "[]", "finish_reason": "tool_calls",
-         "api_request_id": "req_002", "l1_text": "{}"},
+         "api_request_id": "req_002", "Fct": "{}"},
         {"role": "tool", "api_call_count": 2, "seq_index": 1,
          "content": "c.py", "tool_call_id": "c3", "tool_name": "search_files",
-         "status": "ok", "duration_ms": 80, "api_request_id": "req_002", "l1_text": "{}"},
+         "status": "ok", "duration_ms": 80, "api_request_id": "req_002", "Fct": "{}"},
     ]
     store.write_tool_group("sid", 1, 2, rows2)
 
@@ -567,11 +567,11 @@ class TestV5TurnStreamRead:
         assert rows[1][1] == "assistant"
         assert rows[1][2] == "world"
 
-    def test_read_fct_v5_returns_l1_text(self):
+    def test_read_fct_v5_returns_fct_text(self):
         from ca.store import read_fct_v5, write_turn_v5
         from ca.store import SQLiteStore as Store
         s = Store(db_path=":memory:")
-        write_turn_v5(s, "t", 1, 0, role="user", content="hi", l1_text='{"core_change":"test"}')
+        write_turn_v5(s, "t", 1, 0, role="user", content="hi", fct_text='{"core_change":"test"}')
         result = read_fct_v5(s, "t", 1, 0)
         assert "core_change" in result
 
@@ -585,8 +585,8 @@ class TestV5TurnStreamRead:
         from ca.store import read_prev_fct, write_turn_v5, read_fct_v5
         from ca.store import SQLiteStore as Store
         s = Store(db_path=":memory:")
-        write_turn_v5(s, "t", 1, 0, role="user", content="first", l1_text='{"core_change":"a"}')
-        write_turn_v5(s, "t", 2, 0, role="user", content="second", l1_text='{"core_change":"b"}')
+        write_turn_v5(s, "t", 1, 0, role="user", content="first", fct_text='{"core_change":"a"}')
+        write_turn_v5(s, "t", 2, 0, role="user", content="second", fct_text='{"core_change":"b"}')
         prev = read_prev_fct(s, "t", 2)
         assert "core_change" in prev
         assert read_fct_v5(s, "t", 1, 0) == prev
@@ -601,20 +601,20 @@ class TestV5TurnStreamRead:
         from ca.store import update_seq0_fct_v5, read_fct_v5, write_turn_v5
         from ca.store import SQLiteStore as Store
         s = Store(db_path=":memory:")
-        write_turn_v5(s, "t", 1, 0, role="user", content="original", l1_text="old")
+        write_turn_v5(s, "t", 1, 0, role="user", content="original", fct_text="old")
         ok = update_seq0_fct_v5(s, "t", 1, fct_text='{"core_change":"new"}', hdl_text="hdl_new")
         assert ok is True
         assert read_fct_v5(s, "t", 1, 0) == '{"core_change":"new"}'
         # Hdl not exposed via read_fct_v5; verify via raw query
-        cur = s.conn.execute("SELECT l0_text FROM turn_stream WHERE session_id=? AND turn=? AND seq=0", ("t", 1))
+        cur = s.conn.execute("SELECT Hdl FROM turn_stream WHERE session_id=? AND turn=? AND seq=0", ("t", 1))
         assert cur.fetchone()[0] == "hdl_new"
 
     def test_update_seq0_fct_v5_only_affects_seq_0(self):
         from ca.store import update_seq0_fct_v5, write_turn_v5
         from ca.store import SQLiteStore as Store
         s = Store(db_path=":memory:")
-        write_turn_v5(s, "t", 1, 0, role="user", content="u", l1_text="old")
-        write_turn_v5(s, "t", 1, 1, role="assistant", content="a", l1_text="other")
+        write_turn_v5(s, "t", 1, 0, role="user", content="u", fct_text="old")
+        write_turn_v5(s, "t", 1, 1, role="assistant", content="a", fct_text="other")
         update_seq0_fct_v5(s, "t", 1, fct_text="new_fct", hdl_text="new_hdl")
-        cur = s.conn.execute("SELECT l1_text FROM turn_stream WHERE session_id=? AND turn=? AND seq=1", ("t", 1))
+        cur = s.conn.execute("SELECT Fct FROM turn_stream WHERE session_id=? AND turn=? AND seq=1", ("t", 1))
         assert cur.fetchone()[0] == "other"  # unchanged

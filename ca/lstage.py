@@ -63,14 +63,14 @@ class BackfillThread(threading.Thread):
         for rec in records:
             if self.stop_event.is_set():
                 break
-            l2_text = rec.get("l2_text")
-            if not l2_text:
+            elm_text = rec.get("Elm")
+            if not elm_text:
                 continue
             try:
                 if self.turn_type == "dialogue":
-                    self._backfill_dialogue(rec, l2_text)
+                    self._backfill_dialogue(rec, elm_text)
                 else:
-                    self._backfill_tool(rec, l2_text)
+                    self._backfill_tool(rec, elm_text)
                 count += 1
                 self.engine.stats.tool_backfill_success += 1
             except Exception as e:
@@ -81,11 +81,11 @@ class BackfillThread(threading.Thread):
         if count > 0:
             logger.debug("L‑stage %s backfilled %d turns", self.turn_type, count)
 
-    def _backfill_dialogue(self, rec: Dict, l2_text: str):
+    def _backfill_dialogue(self, rec: Dict, elm_text: str):
         """回填对话轮 L1，并提取工具调用回填为 tool_group。"""
         prev_l1 = self._get_prev_l1(rec["turn_index"])
         try:
-            response_text, finish_reason = self.engine._call_llm_for_fct(prev_l1, l2_text)
+            response_text, finish_reason = self.engine._call_llm_for_fct(prev_l1, elm_text)
         except FctTruncatedException as e:
             logger.warning("[CA-METRIC] ca.fct.truncated_fallback: turn=%d, finish_reason=truncated, len=%d",
                            rec["turn_index"], len(e.response_text))
@@ -99,9 +99,9 @@ class BackfillThread(threading.Thread):
                 error_l1 = '{"core_change":"本轮无新内容","_assemble_status":2,"_l_error":true}'
                 self.engine.store.write_turn(
                     session_id, turn_index,
-                    l0_text="补全失败", l1_text=error_l1,
+                    hdl_text="补全失败", fct_text=error_l1,
                     turn_type=turn_type, tool_sub_index=sub_index,
-                    l2_text=rec.get("l2_text"), _assemble_status=2,
+                    elm_text=rec.get("Elm"), _assemble_status=2,
                 )
                 self.engine.store.conn.execute(
                     "UPDATE turn_cache SET backfill_attempts=? WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?",
@@ -111,29 +111,29 @@ class BackfillThread(threading.Thread):
                 logger.warning("Permanent backfill failure for turn %d (truncated)", turn_index)
             return
 
-        l1_dict, l0_text, core_state = parse_v1_markdown_xml(response_text)
-        cleaned = clean_increment(l1_dict)
+        fct_dict, hdl_text, core_state = parse_v1_markdown_xml(response_text)
+        cleaned = clean_increment(fct_dict)
         if "core_change" not in cleaned:
             cleaned["core_change"] = "本轮无新内容"
-        l1_str = json.dumps(cleaned, ensure_ascii=False)
+        fct_json = json.dumps(cleaned, ensure_ascii=False)
         l0 = self.engine._extract_l0(cleaned)
         try:
-            l1_emb = self.engine.embed_client.embed(l1_str)
-            # l0_emb 不再使用（2026-06-13，见 graphify 分析报告）
-            # l0_emb = self.engine.embed_client.embed(l0)
-            l0_emb = None
+            fct_emb = self.engine.embed_client.embed(fct_json)
+            # hdl_emb 不再使用（2026-06-13，见 graphify 分析报告）
+            # hdl_emb = self.engine.embed_client.embed(l0)
+            hdl_emb = None
         except Exception:
-            l1_emb = None
-            l0_emb = None
-        self._update_record(rec, l0, l1_str, l0_emb, l1_emb)
+            fct_emb = None
+            hdl_emb = None
+        self._update_record(rec, l0, fct_json, hdl_emb, fct_emb)
 
         # 提取工具调用，回填 tool_group
-        self._backfill_tool_group(rec, l2_text)
+        self._backfill_tool_group(rec, elm_text)
 
-    def _backfill_tool_group(self, rec: Dict, l2_text: str):
-        """从 l2_text 中提取工具调用，回填为 tool_group 格式（v5）。"""
+    def _backfill_tool_group(self, rec: Dict, elm_text: str):
+        """从 Elm 中提取工具调用，回填为 tool_group 格式（v5）。"""
         try:
-            msgs = json.loads(l2_text)
+            msgs = json.loads(elm_text)
         except (json.JSONDecodeError, TypeError):
             return
         if not isinstance(msgs, list):
@@ -158,13 +158,13 @@ class BackfillThread(threading.Thread):
                 continue
 
             try:
-                l1_emb = self.engine.embed_client.embed(json.dumps(tool_l1, ensure_ascii=False))
-                # l0_emb 不再使用（2026-06-13，见 graphify 分析报告）
-                # l0_emb = self.engine.embed_client.embed(tool_l0)
-                l0_emb = None
+                fct_emb = self.engine.embed_client.embed(json.dumps(tool_l1, ensure_ascii=False))
+                # hdl_emb 不再使用（2026-06-13，见 graphify 分析报告）
+                # hdl_emb = self.engine.embed_client.embed(tool_l0)
+                hdl_emb = None
             except Exception:
-                l1_emb = None
-                l0_emb = None
+                fct_emb = None
+                hdl_emb = None
 
             tool_content = json.dumps([r.get("content", "") for r in tc_responses], ensure_ascii=False)
             tc_id = tc_call.get("id", "")
@@ -174,10 +174,10 @@ class BackfillThread(threading.Thread):
             # ① 写 tool 行（v5 格式）
             self.engine.store.write_turn(
                 session_id, turn_idx,
-                l0_text=tool_l0,
-                l1_text=json.dumps(tool_l1, ensure_ascii=False),
-                l0_embedding=None,
-                l1_embedding=l1_emb,
+                hdl_text=tool_l0,
+                fct_text=json.dumps(tool_l1, ensure_ascii=False),
+                hdl_embedding=None,
+                fct_embedding=fct_emb,
                 api_call_count=api_count, seq_index=sub_index,
                 role='tool', content=tool_content,
                 tool_call_id=tc_id,
@@ -212,8 +212,8 @@ class BackfillThread(threading.Thread):
         group_summary = ToolSummarizer.generate_group_summary(thought, tool_results_for_summary)
 
         # ③ 组 L0
-        group_l0_parts = [s["l0"] for s in per_tool_summaries[:5]]
-        group_l0 = " | ".join(group_l0_parts)
+        group_hdl_parts = [s["l0"] for s in per_tool_summaries[:5]]
+        group_hdl = " | ".join(group_hdl_parts)
         if len(per_tool_summaries) > 5:
             group_l0 += "..."
 
@@ -224,9 +224,9 @@ class BackfillThread(threading.Thread):
         # ⑤ 写 assistant{tc} 行
         self.engine.store.write_turn(
             session_id, turn_idx,
-            l0_text=group_l0,
-            l1_text=json.dumps(group_summary, ensure_ascii=False),
-            l0_embedding=None, l1_embedding=None,
+            hdl_text=group_l0,
+            fct_text=json.dumps(group_summary, ensure_ascii=False),
+            hdl_embedding=None, fct_embedding=None,
             api_call_count=api_count, seq_index=0,
             role='assistant', content=thought,
             tool_calls_json=tool_calls_json,
@@ -240,22 +240,22 @@ class BackfillThread(threading.Thread):
             group_l0, json.dumps(group_summary, ensure_ascii=False),
         )
 
-    def _backfill_tool(self, rec: Dict, l2_text: str):
+    def _backfill_tool(self, rec: Dict, elm_text: str):
         """回填旧 per-tool 记录（legacy 兼容），转为 tool_group 格式。"""
-        self._backfill_tool_group(rec, l2_text)
+        self._backfill_tool_group(rec, elm_text)
 
-    def _update_record(self, rec, l0, l1, l0_emb, l1_emb):
+    def _update_record(self, rec, l0, l1, hdl_emb, fct_emb):
         """更新对话轮记录（不更新工具轮——已由 _backfill_tool_group 处理）。"""
         session_id = self.engine._session_id
         turn_index = rec["turn_index"]
         self.engine.store.write_turn(
             session_id, turn_index,
-            l0_text=l0, l1_text=l1,
-            l0_embedding=l0_emb, l1_embedding=l1_emb,
+            hdl_text=l0, fct_text=l1,
+            hdl_embedding=hdl_emb, fct_embedding=fct_emb,
             turn_type="dialogue", tool_sub_index=0,
-            l2_text=rec.get("l2_text"), _assemble_status=0,
+            elm_text=rec.get("Elm"), _assemble_status=0,
         )
-        self.engine.cache.add_turn(turn_index, l0, l1, l0_emb, l1_emb)
+        self.engine.cache.add_turn(turn_index, l0, l1, hdl_emb, fct_emb)
 
     def _handle_failure(self, rec: Dict):
         session_id = self.engine._session_id
@@ -270,9 +270,9 @@ class BackfillThread(threading.Thread):
                 error_l1 = '{"error":"补全失败","result_summary":"无法生成摘要","_assemble_status":2,"_l_error":true}'
             self.engine.store.write_turn(
                 session_id, turn_index,
-                l0_text="补全失败", l1_text=error_l1,
+                hdl_text="补全失败", fct_text=error_l1,
                 turn_type=turn_type, tool_sub_index=sub_index,
-                l2_text=rec.get("l2_text"), _assemble_status=2,
+                elm_text=rec.get("Elm"), _assemble_status=2,
             )
             self.engine.store.conn.execute(
                 "UPDATE turn_cache SET backfill_attempts=? WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?",
@@ -288,9 +288,9 @@ class BackfillThread(threading.Thread):
         if prev_turn < 0:
             return None
         rec = self.engine.store.read_turn(self.engine._session_id, prev_turn)
-        if rec and rec.get("l1_text"):
+        if rec and rec.get("Fct"):
             try:
-                data = json.loads(rec["l1_text"])
+                data = json.loads(rec["Fct"])
                 if data.get("core_change") != "本轮无新内容":
                     return data
             except Exception:

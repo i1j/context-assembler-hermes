@@ -297,7 +297,7 @@ class CAContextAssemblerPlugin:
     # ═════════════════════════════════════════════════════
 
     def _simple_mutation_mode_v5(self, conversation_history: list) -> Optional[str]:
-        """v5: 从 turn_stream 查 l1_text 替换。无 plan 依赖。"""
+        """v5: 从 turn_stream 查 Fct 替换。无 plan 依赖。"""
         if not conversation_history:
             return None
         self._saved_history_snapshot = [{**m} for m in conversation_history]

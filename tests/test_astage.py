@@ -31,10 +31,10 @@ class TestSimpleMutationModeV5:
         from ca.store import write_turn_v5
         write_turn_v5(ca_engine.store, "test", 2, 1,
                       role="assistant", content="orig2",
-                      l1_text='工具组：文件读取')
+                      fct_text='工具组：文件读取')
         write_turn_v5(ca_engine.store, "test", 2, 2,
                       role="tool", content="result2",
-                      l1_text='read_file → 成功')
+                      fct_text='read_file → 成功')
 
         plugin = self._make_plugin(ca_engine)
         # 5 users → 3rd-from-last user = index 6 (user #3)
@@ -67,10 +67,10 @@ class TestSimpleMutationModeV5:
         from ca.store import write_turn_v5
         # 保护区外 (turn 2): 有 Fct
         write_turn_v5(ca_engine.store, "test", 2, 2,
-                      role="tool", content="old2", l1_text="新Fct2")
+                      role="tool", content="old2", fct_text="新Fct2")
         # 尾区内 (turn 4): 有 Fct 但不该被替换
         write_turn_v5(ca_engine.store, "test", 4, 2,
-                      role="tool", content="old4", l1_text="新Fct4")
+                      role="tool", content="old4", fct_text="新Fct4")
 
         plugin = self._make_plugin(ca_engine)
         conv = [

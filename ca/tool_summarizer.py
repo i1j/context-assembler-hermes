@@ -895,7 +895,7 @@ class ToolSummarizer:
         """从 thought 提取工具组摘要（软目标 100 字，超过 100 时在句尾截断）。
 
         tool_results 参数已弃用——仅保留签名兼容历史调用。
-        返回纯文本（非 JSON），直接写入 l1_text 供 A-stage 注入。
+        返回纯文本（非 JSON），直接写入 Fct 供 A-stage 注入。
 
         Returns:
             纯文本摘要；如果 thought 为空或仅为过渡词则返回 ""

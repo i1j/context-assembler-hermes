@@ -37,8 +37,8 @@
 |------|------|
 | `prev_l1` | `prev_fct` (函数参数/变量) |
 | `l1_str` | `fct_str` |
-| `l2_text` | `elm_text` (仅 F-stage 相关处) |
-| `l0_text` | `hdl_text` (仅 F-stage 相关处) |
+| `Elm` | `elm_text` (仅 F-stage 相关处) |
+| `Hdl` | `hdl_text` (仅 F-stage 相关处) |
 | `l0_emb` / `l1_emb` | `hdl_emb` / `fct_emb` |
 | `l1_dict` | `fct_dict` |
 | `parser_hdl` | 新增变量名 |
@@ -55,7 +55,7 @@
 
 ### DB 列名
 
-未改。`l1_text` / `l0_text` 在 SQLite 中保持原名，Python 层用别名访问（`fct_text`/`hdl_text` 作为函数参数名）。
+未改。`Fct` / `Hdl` 在 SQLite 中保持原名，Python 层用别名访问（`fct_text`/`hdl_text` 作为函数参数名）。
 
 ## Phase 2 详解 — F-stage 数据源改为 DB
 

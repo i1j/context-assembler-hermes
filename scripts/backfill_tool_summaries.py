@@ -24,13 +24,13 @@ if _PLUGIN_DIR not in sys.path:
 from ca.tool_summarizer import ToolSummarizer
 
 
-def is_raw_json_l0(l0_text, tool_name):
+def is_raw_json_l0(hdl_text, tool_name):
     """判断一条 L0 是否是 raw JSON 格式（需要回填）"""
-    if not l0_text:
+    if not hdl_text:
         return True
     prefix = f"{tool_name}: "
-    if l0_text.startswith(prefix):
-        body = l0_text[len(prefix):]
+    if hdl_text.startswith(prefix):
+        body = hdl_text[len(prefix):]
         if body.startswith("{"):
             return True  # raw JSON
         if body in ("失败", "无返回数据", ""):
@@ -49,23 +49,23 @@ def backfill_db(db_path):
     cur.execute("PRAGMA table_info(turn_cache)")
     cols = {row[1] for row in cur.fetchall()}
     has_sub_index = "tool_sub_index" in cols
-    has_l2_text = "l2_text" in cols
+    has_elm_text = "Elm" in cols
     
-    if not has_l2_text:
-        print("  no l2_text column (old schema)")
+    if not has_elm_text:
+        print("  no elm_text column (old schema)")
         conn.close()
         return
     
     if has_sub_index:
         cur.execute("""
-            SELECT rowid, turn_index, tool_sub_index, l2_text, l0_text, l1_text
+            SELECT rowid, turn_index, tool_sub_index, Elm, Hdl, Fct
             FROM turn_cache
             WHERE turn_type='tool'
             ORDER BY turn_index, tool_sub_index
         """)
     else:
         cur.execute("""
-            SELECT rowid, turn_index, 0 as tool_sub_index, l2_text, l0_text, l1_text
+            SELECT rowid, turn_index, 0 as tool_sub_index, Elm, Hdl, Fct
             FROM turn_cache
             WHERE turn_type='tool'
             ORDER BY turn_index
@@ -82,9 +82,9 @@ def backfill_db(db_path):
     fixed = 0
     skipped_struct = 0
     skipped_no_change = 0
-    for rowid, turn_idx, sub_idx, l2_text, old_l0, old_l1 in rows:
+    for rowid, turn_idx, sub_idx, elm_text, old_l0, old_l1 in rows:
         try:
-            msgs = json.loads(l2_text)
+            msgs = json.loads(elm_text)
         except (json.JSONDecodeError, TypeError):
             continue
         if not isinstance(msgs, list):
@@ -121,10 +121,10 @@ def backfill_db(db_path):
             skipped_no_change += 1
             continue
         
-        new_l1_str = json.dumps(new_l1, ensure_ascii=False)
+        new_fct_json = json.dumps(new_l1, ensure_ascii=False)
         cur.execute(
-            "UPDATE turn_cache SET l0_text=?, l1_text=? WHERE rowid=?",
-            (new_l0[:100], new_l1_str, rowid)
+            "UPDATE turn_cache SET Hdl=?, fct_text=? WHERE rowid=?",
+            (new_l0[:100], new_fct_json, rowid)
         )
         fixed += 1
     

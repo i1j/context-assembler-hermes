@@ -4,9 +4,9 @@
 
 | 项          | 值                                                                                |
 | ----------- | --------------------------------------------------------------------------------- |
-| 版本        | v5.0 (F-stage)                                                                     |
-| 注入方式    | 简化替换（`_simple_mutation_mode_v5_v5`） — turn_stream 查 Fct 替换 tool 行，尾部保护 |
-| plugin.yaml | v5.2.1（待同步）                                                                    |
+| 版本        | v5.5.0 (命名统一)                                                                |
+| 注入方式    | 简化替换（`_simple_mutation_mode_v5`） — turn_stream 查 Fct 替换 tool 行，尾部保护 |
+| plugin.yaml | v5.5.0                                                                    |
 | 部署方式    | 自包含独立副本                                                                    |
 | 插件路径    | `~/.hermes/profiles/tester/plugins/ca_assembler/`                               |
 | 核心引擎    | `ca/` 子目录（入口 `ca/__init__.py` → `ContextAssembler`）                 |
@@ -96,7 +96,7 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
 - `_simple_mutation_mode_v5(conversation_history)`：
   1. 保存完整消息快照到 `_saved_history_snapshot`
   2. 尾部保护区：倒数第 3 个 user 消息之后 → 原文保留
-  3. 保护区外：assistant{tc}/tool 行用 turn_stream 的 l1_text（Fct）替换
+  3. 保护区外：assistant{tc}/tool 行用 turn_stream 的 Fct（Fct）替换
   4. user 行始终原文保留
   5. 返回 None（history 已原地替换）
 
@@ -137,7 +137,7 @@ def _on_post_api_request_v5(**kwargs: Any) -> None:
 **E-stage 行为**（写即落盘，不经过 buffer）：
 
 1. 提取 `assistant_message.content` 作为 thought Elm
-2. 写入 `turn_stream (turn, seq=1)`：`role='assistant', content=thought, l1_text=thought Fct`
+2. 写入 `turn_stream (turn, seq=1)`：`role='assistant', content=thought, Fct=thought Fct`
 3. 如有 tool_calls，为每个工具写入占位行：`role='tool', status='pending'`
 4. 记录 `_tool_seq_map[tool_call_id] = (turn, seq)` 供回填
 
@@ -162,7 +162,7 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 
 1. 查 `_tool_seq_map[tool_call_id]` 定位 (turn, seq)
 2. 写入 `turn_stream (turn, seq)`：`role='tool', content=result, status, duration_ms`
-3. 同步生成 per-tool Fct（`ToolSummarizer.summarize()`），写入 l1_text/l0_text
+3. 同步生成 per-tool Fct（`ToolSummarizer.summarize()`），写入 Fct/Hdl
 
 ## 存储结构
 
@@ -174,7 +174,7 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 
 当前 profile 实际路径：`~/.hermes/profiles/tester/ca_cache/{session_id}.db`
 
-### turn_stream 表（v5.0 E-stage 新表）
+### turn_stream 表（turn_stream 表）
 
 **主键**：`(session_id, turn, seq)`
 
@@ -195,10 +195,10 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 | `usage_*`        | INTEGER | LLM token 用量                             |
 | `biz_category`   | TEXT    | `bg_review` 或 NULL                        |
 | `written_at`     | REAL    | time.time() 写入时间戳                     |
-| `l1_text`        | TEXT    | Fct（结构化摘要 JSON，C/F-stage 写入）     |
-| `l0_text`        | TEXT    | Hdl（一句话标题，C/F-stage 写入）          |
+| `Fct`        | TEXT    | Fct（结构化摘要 JSON，C/F-stage 写入）     |
+| `Hdl`        | TEXT    | Hdl（一句话标题，C/F-stage 写入）          |
 
-每行 = 一条消息切片。E-stage 写即落盘，F-stage 回写 l1_text/l0_text。
+每行 = 一条消息切片。E-stage 写即落盘，F-stage 回写 Fct/Hdl。
 
 ### turn_cache 表（旧表，兼容保留）
 
@@ -222,10 +222,10 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 | `error_type`        | TEXT    | 错误类型                                                  |
 | `error_message`     | TEXT    | 错误消息                                                  |
 | `usage_json`        | TEXT    | Token 用量 JSON                                           |
-| `l1_text`           | TEXT    | CA 摘要 JSON                                              |
-| `l0_text`           | TEXT    | 单行摘要（≤100 字符）                                    |
-| `l0_embedding`      | BLOB    | Hdl 嵌入向量（4096 字节）                                  |
-| `l1_embedding`      | BLOB    | Fct 嵌入向量（4096 字节）                                  |
+| `Fct`           | TEXT    | CA 摘要 JSON                                              |
+| `Hdl`           | TEXT    | 单行摘要（≤100 字符）                                    |
+| `hdl_embedding`      | BLOB    | Hdl 嵌入向量（4096 字节）                                  |
+| `fct_embedding`      | BLOB    | Fct 嵌入向量（4096 字节）                                  |
 | `bm25_tokens`       | TEXT    | BM25 分词                                                 |
 | `token_offset`      | INTEGER | 累计 Token 偏移                                           |
 | `query_embedding`   | BLOB    | 用户消息嵌入向量                                          |
@@ -245,7 +245,7 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 ### 存储特性（turn_stream）
 
 - **Elm 是原始数据**：每条消息切片独立存储，按 (turn, seq) 排序
-- **Fct 含 Hdl**：l1_text 存结构化摘要（含 stage_tag），l0_text 是 Hdl（一句话标题）
+- **Fct 含 Hdl**：Fct 存结构化摘要（含 stage_tag），Hdl 是 Hdl（一句话标题）
 - **全量嵌入**：成功时 hdl + fct 均为 4096 字节 BLOB
 - **WAL 模式**：Store 初始化时设置 PRAGMA journal_mode=WAL
 
@@ -253,12 +253,12 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 
 | 缓存                    | Key 类型                      | 说明                                             |
 | ----------------------- | ----------------------------- | ------------------------------------------------ |
-| `l0_texts`            | `Dict[int, str]`            | 对话轮 Hdl 文本，key=turn_index                   |
-| `l1_texts`            | `Dict[int, str]`            | 对话轮 Fct JSON，key=turn_index                   |
-| `tool_l0_texts`       | `Dict[Tuple[int,int], str]` | 个体工具 L0，key=(turn_index, seq_index)         |
-| `tool_l1_texts`       | `Dict[Tuple[int,int], str]` | 个体工具 Fct JSON，key=(turn_index, seq_index)    |
-| `tool_group_l0_texts` | `Dict[Tuple[int,int], str]` | 工具组 L0，key=(turn_index, api_call_count)      |
-| `tool_group_l1_texts` | `Dict[Tuple[int,int], str]` | 工具组 Fct JSON，key=(turn_index, api_call_count) |
+| `Hdls`            | `Dict[int, str]`            | 对话轮 Hdl 文本，key=turn_index                   |
+| `Fcts`            | `Dict[int, str]`            | 对话轮 Fct JSON，key=turn_index                   |
+| `tool_Hdls`       | `Dict[Tuple[int,int], str]` | 个体工具 L0，key=(turn_index, seq_index)         |
+| `tool_Fcts`       | `Dict[Tuple[int,int], str]` | 个体工具 Fct JSON，key=(turn_index, seq_index)    |
+| `tool_group_Hdls` | `Dict[Tuple[int,int], str]` | 工具组 L0，key=(turn_index, api_call_count)      |
+| `tool_group_Fcts` | `Dict[Tuple[int,int], str]` | 工具组 Fct JSON，key=(turn_index, api_call_count) |
 
 `add_tool_group()` 已由 E-stage 写即落盘替代，仅在 `cache.add_turn()` 中同步缓存。
 
@@ -378,7 +378,7 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 
 ## Fct 摘要生成架构
 
-关键模块表见上。数据流详见 [v5.2 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md#2-l0_embedding-孤儿数据清理)。
+关键模块表见上。数据流详见 [v5.2 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md#2-hdl_embedding-孤儿数据清理)。
 
 ## 断路器
 
@@ -434,7 +434,7 @@ print(water)
 
 ## 测试接口清单
 
-**全部 269 测试通过**（Phase 1-4 重构 + 测试体系 v5.0 对齐后）
+**全部 269 测试通过**
 
 ```bash
 cd /home/i1j/.hermes/profiles/tester/plugins/ca_assembler
@@ -453,7 +453,7 @@ python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts="
 | `test_v460.py` | 话题分割（遗留兼容） | ✅ 22 tests |
 | ... 其它 | config/parse/embedding/health/quality/system/circuit/summarizer | ✅ 剩余 tests |
 
-**已删除的死测试**（v5.0 移除的复用旧 API 测试）：
+**已删除的死测试**：
 - `test_a.py`、`test_c.py`、`test_aligned_outcomes.py`（全文件）
 - 6 条混文件死用例（引用已删除的 `assemble()`、`_compute_turn_plan_v2` 等）
 
@@ -471,7 +471,7 @@ python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts="
 |------|------|------|
 | `_call_llm_for_fct` `@staticmethod` 错标 | ✅ `c60d8f8` | 移除 `@staticmethod`，重启生效 |
 | F-stage fallback 写死占位符 | ✅ `dbe9e8e` | 改为复制 user_elm |
-| `_is_valid_fct` / `_format_fct_for_display` 残余 `fct_text` | ✅ `403255f` | 改为 `l1_text` |
+| `_is_valid_fct` / `_format_fct_for_display` 残余 `fct_text` | ✅ `403255f` | 改为 `Fct` |
 | `generate_group_summary` 无句尾标点不截断 | ✅ `9fb05cc` | 最终返回加 `_safe_truncate` |
 | 三源验证结果 | ✅ 已记录 | `docs/debug/debug-2026-06-15-triple-source-verify.md` |
 

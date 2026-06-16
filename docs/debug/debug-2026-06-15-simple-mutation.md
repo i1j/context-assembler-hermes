@@ -24,12 +24,12 @@ def _simple_mutation_mode(self, result, conversation_history: list) -> Optional[
 | `user`（全文） | 原文保留 |
 | `assistant_fin`（全文） | 原文保留 |
 | `assistant{tc}`（保护区外） | `store.read_turn_texts(…, 'tool_group', api_count)` → `_format_tool_group_assembly(l1)` |
-| `tool`（保护区外） | `store.read_tool_rows_for_group(…, api_count)` → 按 `seq_index` 取 `l1_text` |
+| `tool`（保护区外） | `store.read_tool_rows_for_group(…, api_count)` → 按 `seq_index` 取 `Fct` |
 
 ### 不依赖
 
 - `turn_plan` / `tool_plan` / `bypass_turns`（来自 `_AssemblePlanResult`，仅用 `result` 的 degraded 判断）
-- `AssemblyCache`（`tool_l1_texts` 的 `(turn, seq)` 碰撞 key）
+- `AssemblyCache`（`tool_Fcts` 的 `(turn, seq)` 碰撞 key）
 - `_conv_encoding` / `conv_encoding` DB 表
 - `_build_aligned_outcomes()` 方法
 - `_compute_tool_plan_v2()` 方法

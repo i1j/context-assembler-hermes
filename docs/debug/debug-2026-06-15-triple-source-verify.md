@@ -13,7 +13,7 @@
 
 ## 验证方法
 
-比对 state.db 原始消息（role+content）与 ca_cache turn_stream（seq+role+content+l1_text），
+比对 state.db 原始消息（role+content）与 ca_cache turn_stream（seq+role+content+Fct），
 逐行验证 turn 1 的完整数据流。
 
 ## 验证结果
@@ -82,7 +82,7 @@ user Fct 的唯一消费端是话题分割（`_compute_topic_groups`），占位
 | 提交 | 变更 |
 |------|------|
 | `9fb05cc` | fix: generate_group_summary 截断无句尾标点的长文本 |
-| `403255f` | refactor: 测试体系 v5.0 对齐 + 生产 bug 修复（fct_text→l1_text 两处） |
+| `403255f` | refactor: 测试体系 v5.0 对齐 + 生产 bug 修复（fct_text→Fct 两处） |
 | `c60d8f8` | fix: _call_llm_for_fct @staticmethod 导致 F-stage 全部降级 |
 | `dbe9e8e` | fix: F-stage fallback 复制 user Elm 替代硬编码占位符 |
 | `517044f` | feat: 测试体系重构覆盖映射方法论 skill |

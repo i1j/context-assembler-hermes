@@ -34,7 +34,7 @@
 | **v4.3.2‑ooda‑fix**    | 2026-06-01 | 调查：OODA 解析器冒号剥离 | `_extract_sections` content 提取后前导冒号未剥离，导致 `core_change` 带 `：` 前缀（如 `：对话中多次查询...`）。 | **已归档** |
 || **v5.0-pr4‑inject‑fix** | 2026-06-09 | 注入层微修复批 | read_turn_texts l1/l0 缺 api_call_count 过滤（同 turn 多工具组 l1 相同）；_format_group_summary thought+intent 重复；L0 工具组缺 "工具组：" 前缀；_format_l1_for_display 占位符噪声。 | **已修复** |
 | **v4.4.0‑ooda‑fix**    | 2026-06-03 | 修复：OODA 解析器前导冒号 | 在 `_extract_sections` content 提取后追加 `.lstrip(\":：　 \")`，去除全角/半角冒号。 | **已修复** |
-| **v5.2**               | 2026-06-13 | 缓存分析 + 注入重构 | ① l0_embedding 孤儿数据清除（从未被消费，注释全部计算链路+删死代码 `retrieve_l0_upgrade`）② `tool_plan` 独立 tool 行决策（v5.2）：`_AssemblePlanResult.tool_plan`, `_compute_tool_plan_v2`, `_build_aligned_outcomes`/`_build_messages_from_plan` 签名扩展, `_format_tool_group_assembly` 精简为仅 header, tool 行输出 `[~/N/M]` 独立标签 ③ `_mutation_mode` 中 bg_review 轮由 `\" \"` 改为从 DB 读取 L1/L0 填充。详见 [v5.1 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md)。 | **发布** |
+| **v5.2**               | 2026-06-13 | 缓存分析 + 注入重构 | ① hdl_embedding 孤儿数据清除（从未被消费，注释全部计算链路+删死代码 `retrieve_l0_upgrade`）② `tool_plan` 独立 tool 行决策（v5.2）：`_AssemblePlanResult.tool_plan`, `_compute_tool_plan_v2`, `_build_aligned_outcomes`/`_build_messages_from_plan` 签名扩展, `_format_tool_group_assembly` 精简为仅 header, tool 行输出 `[~/N/M]` 独立标签 ③ `_mutation_mode` 中 bg_review 轮由 `\" \"` 改为从 DB 读取 L1/L0 填充。详见 [v5.1 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md)。 | **发布** |
 | **v5.2.1**               | 2026-06-14 | 话题分割修复 + 自适应阈值 | ① `_add_bigrams` 集合无心化修复 (`sorted(s)`) ② `_compute_topic_groups` 新增 Jaccard 独立合并路径，默认 0.18，不依赖 todo_overlap ③ 自适应阈值模块：`_load_start_threshold`, `_compute_ideal_threshold`, `persist_ideal_threshold`，持久化至 `{ca_cache}/topic_threshold_meta.json` ④ 会话内阈值固定，跨会话加权漂移 (`0.6×last + 0.4×avg`) ⑤ `session_reset` 时持久化 ideal，`session_start` 时加载起始阈值 | **已实施** |
 
 ---
@@ -348,7 +348,7 @@ v4.2                  v4.3 → v4.3-s1 → v4.3-s2    v4.3.1 → v4.3.1 修订
 |------|------|---------|
 | `_compute_turn_plan()` | 统一决策逻辑，返回 `List[TurnPlanEntry]` | `ca/__init__.py` |
 | `_build_messages_from_plan()` | 按 plan entry 的 `target_level` 从 `store.read_turn_texts()` 读取对应 level 文本构建消息列表 | `ca/__init__.py` |
-| `store.read_turn_texts()` | 返回 `(l2_text, l1_text, l0_text)` 三元组 | `ca/store.py` |
+| `store.read_turn_texts()` | 返回 `(Elm, Fct, Hdl)` 三元组 | `ca/store.py` |
 
 **核心改进**：
 - 决策统一：head/tail/middle/upgrades 判断逻辑只有一处（`_compute_turn_plan`），不再分散在两个方法中
@@ -465,7 +465,7 @@ v4.2                  v4.3 → v4.3-s1 → v4.3-s2    v4.3.1 → v4.3.1 修订
 
 | 变更 | 说明 | 代码位置 |
 |------|------|---------|
-| **ca/post_process.py** | 新增 `ItemState` 枚举（DONE/PLANNED/DISCUSSING/UNKNOWN）+ `STATE_PREFIX_REGEX`（含模块级 fail-fast assert）+ `_normalize_state()`（作用域隔离归一化）+ `parse_core_change_state()`（结构化透传，含管理动作降级）；标题统一"决策与共识"→"决策与方案"；`parse_v1_markdown_xml` 返回三元组 `(l1_dict, l0_text, core_state)` | `ca/post_process.py` |
+| **ca/post_process.py** | 新增 `ItemState` 枚举（DONE/PLANNED/DISCUSSING/UNKNOWN）+ `STATE_PREFIX_REGEX`（含模块级 fail-fast assert）+ `_normalize_state()`（作用域隔离归一化）+ `parse_core_change_state()`（结构化透传，含管理动作降级）；标题统一"决策与共识"→"决策与方案"；`parse_v1_markdown_xml` 返回三元组 `(l1_dict, Hdl, core_state)` | `ca/post_process.py` |
 | **ca/prompts.py** | v1.6 Final 版本，`<example>` 标签 3 场景示例，人设"研发对话意图分析器"，优先级规则（已实施 > 计划 > 探讨），`【】`状态标签 | `ca/prompts.py` |
 | **ca/ooda_parser.py** | `TITLE_ALIASES` 增加"决策与方案" | `ca/ooda_parser.py` |
 | **ca/store.py** | 新增 `_infer_legacy_state()`（文本自检推断历史状态）+ `MANAGEMENT_ACTION_KEYWORDS` 集成 + `format_previous_summary_for_prompt` 适配 | `ca/store.py` |
@@ -480,7 +480,7 @@ v4.2                  v4.3 → v4.3-s1 → v4.3-s2    v4.3.1 → v4.3.1 修订
 | 变更 | 说明 | 代码位置 |
 |------|------|---------|
 | **v5 turn_cache schema** | 新主键 `(session_id, turn_index, api_call_count, seq_index)`；消息独立列（role/content/tool_call_id/tool_name/tool_calls_json/finish_reason）；元数据列（api_request_id/duration_ms/status/error_type/error_message/usage_json） | `ca/store.py` |
-| **v4 向后兼容** | `turn_type` / `tool_sub_index` / `l2_text` 作为 `GENERATED ALWAYS AS STORED` 虚拟列保留至 PR2 | `ca/store.py` |
+| **v4 向后兼容** | `turn_type` / `tool_sub_index` / `Elm` 作为 `GENERATED ALWAYS AS STORED` 虚拟列保留至 PR2 | `ca/store.py` |
 | **turn_plan PK 扩展** | 含 `api_call_count` + `seq_index`，支持逐工具调度 | `ca/store.py` |
 | **Readonly 模式** | `SQLiteStore(path, readonly=True)` 以 `?mode=ro` 打开 v4 旧库只读 | `ca/store.py` |
 | **版本路由** | `_readonly` 标志控制 v4/v5 查询路径 | `ca/store.py` |
@@ -517,14 +517,14 @@ v4.2                  v4.3 → v4.3-s1 → v4.3-s2    v4.3.1 → v4.3.1 修订
 
 | 变更 | 说明 | 代码位置 |
 |------|------|---------|
-| **`_rebuild_messages_from_cache` 版本路由** | v5 从新列重建消息，v4 从 l2_text JSON 重建。含向后兼容扩展（旧 l2_text JSON 数组在 content 中时自动展开） | `ca/__init__.py` |
+| **`_rebuild_messages_from_cache` 版本路由** | v5 从新列重建消息，v4 从 Elm JSON 重建。含向后兼容扩展（旧 Elm JSON 数组在 content 中时自动展开） | `ca/__init__.py` |
 | **`TurnPlanEntry` 扩展** | 新增 `api_call_count`/`seq_index` 字段，`as_dict()` 同步输出 | `ca/__init__.py` |
-| **`_compute_turn_plan_v2` 三级判定** | 新增工具组条目，从 cache `tool_group_l1_texts` 读取摘要 | `ca/__init__.py` |
+| **`_compute_turn_plan_v2` 三级判定** | 新增工具组条目，从 cache `tool_group_Fcts` 读取摘要 | `ca/__init__.py` |
 | **`_build_messages_from_plan` 三级注入** | 工具组条目注入 `[~/N/g]` 标记，调用 `_format_group_summary()` 格式化 | `ca/__init__.py` |
 | **`_format_group_summary()`** | 工具组 L1 JSON → 可读文本，格式 `工具组：intent→result（N个，state）` | `ca/__init__.py` |
 | **`_CA_TAG_RE` 更新** | `r'^\[~/\d+(?:/\d+|/g)?\]\s*'` 匹配三类标记 | `ca/__init__.py` |
 | **`_deduplicate_messages` 适配** | 注释更新三位格式 `[~/N/0]`/`[~/N/g]`/`[~/N/M]` | `ca/__init__.py` |
-| **`AssemblyCache` 工具组缓存** | 新增 `tool_group_l1_texts`/`tool_group_l0_texts`，`CacheBuilder.build()` 检测 `tool_calls_json` 非空行关联到工具组 | `ca/cache.py` |
+| **`AssemblyCache` 工具组缓存** | 新增 `tool_group_Fcts`/`tool_group_Hdls`，`CacheBuilder.build()` 检测 `tool_calls_json` 非空行关联到工具组 | `ca/cache.py` |
 | **`store.py` 适配** | `read_turn_texts`/`read_assemble_status`/`increment_backfill_attempts` 支持 `turn_type="tool_group"` 映射 role='assistant' | `ca/store.py` |
 
 **测试**：新增 `test_pr3_injection.py`（8 测试），覆盖版本路由(3)、三级判定注入(3)、cache 新主键(1)、端到端(1)。**零新增回归**。
@@ -536,7 +536,7 @@ v4.2                  v4.3 → v4.3-s1 → v4.3-s2    v4.3.1 → v4.3.1 修订
 | 2026-06-06 | 去重标记留最先+原位指向 | 首次出现位置不动→前缀稳定，标记在删位不污染幸存者 | v4.5.1 |
 | 2026-06-07 | PDD 范式替代纯 OODA 文本 | LLM 输出 Markdown+XML，Python 防御性解析，消除 OODA 解析不稳定根因 | v4.7.0 |
 | 2026-06-08 | L1 状态感知链路 | `【】` 状态前缀 + 归一化，对抗小模型&quot;完成时态&quot;幻觉 | v4.7.1 |
-| 2026-06-09 | v5 turn_cache schema 重构 | 消息独立列替代 l2_text JSON，工具轮逐工具调度 | v5.0-pr1 |
+| 2026-06-09 | v5 turn_cache schema 重构 | 消息独立列替代 Elm JSON，工具轮逐工具调度 | v5.0-pr1 |
 | 2026-06-09 | ToolGroupBuffer 替代消息遍历 | 实时 buffer 采集替代 post_llm_call 全量遍历 | v5.0-pr2 |
 ||| 2026-06-09 | 三级注入标记 `[~/N/g]` | 工具组独立于对话轮注入，格式统一三位标记 | v5.0-pr3 |
 ||| 2026-06-10 | bypass 尾区保护 | `_bypass_skip=3`，保护最后 2 完整对话轮 + 当前 Q | v5.1 |
@@ -546,3 +546,5 @@ v4.2                  v4.3 → v4.3-s1 → v4.3-s2    v4.3.1 → v4.3.1 修订
 ||| 2026-06-12 | tool 行 content 清空 | content→单空格，94 行 340K chars → 94 chars | v5.1 |
 ||| 2026-06-12 | bg_review 内容清空 + 尾区保护 | mutation 循环内按位置边界保护尾区 bg_review | v5.1 |
 || 2026-06-09 | 工具组 L2：thought 原文 → 完整消息序列展开 | `_extend_with_l2` 替代只提 thought；covered 集加 `(turn_idx, "tool")` 防重复；L1 fallback 用 `_format_group_summary` 替代 raw JSON `l1_display` | v5.0-pr3 |
+
+| **v5.5.0**            | 2026-06-16 | 命名统一        | 全部 `l1_text`/`l0_text`/`l2_text` 重命名为 `Fct`/`Hdl`/`Elm`（DB 列名 + Python 标识符 + 文档术语）。`l1_embedding`/`l0_embedding`/`l2_tokens` 同步重命名。279 个 DB 文件 ALTER TABLE 迁移。| 

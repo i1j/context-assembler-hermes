@@ -240,10 +240,10 @@ def _json_to_v1_markdown(data: dict) -> str:
 
 
 def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[str], Optional[ItemState]]:
-    """解析 LLM 输出的 4 类 Markdown + XML 格式，返回 (l1_dict, l0_text, core_state)。
+    """解析 LLM 输出的 4 类 Markdown + XML 格式，返回 (l1_dict, Hdl, core_state)。
 
-    l1_dict 包含 5 类英 key（core_change, new_materials, objective_facts, consensus, todo）。
-    l0_text 是 core_change 的首句，最多 100 字。
+    fct_dict 包含 5 类英 key（core_change, new_materials, objective_facts, consensus, todo）。
+    Hdl 是 core_change 的首句，最多 100 字。
     core_state 是 core_change 的状态枚举（ItemState）。
     """
     if not llm_output or not llm_output.strip():
@@ -281,9 +281,9 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
         ("后续行动", "todo"),
     ]
 
-    l1_dict: Dict[str, Any] = {"core_change": core_text or "本轮无新内容"}
+    fct_dict: Dict[str, Any] = {"core_change": core_text or "本轮无新内容"}
     for eng_key in ["new_materials", "objective_facts", "consensus", "todo"]:
-        l1_dict[eng_key] = []
+        fct_dict[eng_key] = []
 
     # 按顺序查找各章节
     lines = text.split("\n")
@@ -329,34 +329,34 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
     if current_section is not None and current_items:
         section_items[current_section] = current_items[:3]
 
-    # 填入 l1_dict
-    l1_dict["stage_tag"] = stage_tag
-    for eng_key in l1_dict:
+    # 填入 fct_dict
+    fct_dict["stage_tag"] = stage_tag
+    for eng_key in fct_dict:
         if eng_key == "core_change":
             continue
         if eng_key in section_items:
-            l1_dict[eng_key] = section_items[eng_key][:3]
+            fct_dict[eng_key] = section_items[eng_key][:3]
 
-    # 4. 状态提取 + l0_text
+    # 4. 状态提取 + hdl_text
     core_state: Optional[ItemState] = None
-    l0_text: Optional[str] = None
+    hdl_text: Optional[str] = None
     if core_text:
         # 状态提取
         normalized_core, core_state = parse_core_change_state(core_text)
-        # 更新 l1_dict 中的 core_change 为带状态前缀的版本
-        l1_dict["core_change"] = normalized_core
-        # l0_text = 首句[:100]
+        # 更新 fct_dict 中的 core_change 为带状态前缀的版本
+        fct_dict["core_change"] = normalized_core
+        # hdl_text = 首句[:100]
         first_sentence = normalized_core
         for sep in ["。", "！", "？", ".", "!", "?"]:
             if sep in normalized_core:
                 parts = normalized_core.split(sep, 1)
                 first_sentence = parts[0] + sep
                 break
-        l0_text = _safe_truncate(first_sentence, max_len=100)
-        if l0_text in MEANINGLESS_CORE:
-            l0_text = None
+        hdl_text = _safe_truncate(first_sentence, max_len=100)
+        if hdl_text in MEANINGLESS_CORE:
+            hdl_text = None
 
-    if l0_text is None:
-        logger.warning("[CA-METRIC] ca.l0.skipped_empty: l0_text is None/empty")
+    if hdl_text is None:
+        logger.warning("[CA-METRIC] ca.l0.skipped_empty: hdl_text is None/empty")
 
-    return (l1_dict, l0_text, core_state)
+    return (fct_dict, hdl_text, core_state)

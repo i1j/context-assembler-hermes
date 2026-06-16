@@ -7,22 +7,22 @@ import pytest
 class TestJaccardMergeThreshold:
     """Jaccard 独立合并路径"""
 
-    def _compute(self, engine, l1_data, threshold):
-        l1_texts = {i: json.dumps(d) for i, d in l1_data.items()}
-        l1_embeddings = {i: [0.1 + i * 0.01] * 768 for i in l1_data}
-        turn_to_topic, _ = engine._compute_topic_groups(l1_texts, l1_embeddings, jaccard_merge_threshold=threshold)
+    def _compute(self, engine, fct_data, threshold):
+        fct_texts = {i: json.dumps(d) for i, d in fct_data.items()}
+        fct_embeddings = {i: [0.1 + i * 0.01] * 768 for i in fct_data}
+        turn_to_topic, _ = engine._compute_topic_groups(fct_texts, fct_embeddings, jaccard_merge_threshold=threshold)
         return turn_to_topic
 
     def test_high_threshold_prevents_merge(self, ca_engine):
         base = {"new_materials": ["A"], "core_change": "a", "todo": [], "objective_facts": [], "consensus": []}
-        l1_data = {1: {**base, "new_materials": ["内容A"]}, 2: {**base, "new_materials": ["内容B"]}}
-        tt = self._compute(ca_engine, l1_data, threshold=100.0)
+        fct_data = {1: {**base, "new_materials": ["内容A"]}, 2: {**base, "new_materials": ["内容B"]}}
+        tt = self._compute(ca_engine, fct_data, threshold=100.0)
         assert tt[1] != tt[2]
 
     def test_low_threshold_merges(self, ca_engine):
         base = {"new_materials": ["A"], "core_change": "a", "todo": [], "objective_facts": [], "consensus": []}
-        l1_data = {1: {**base, "new_materials": ["内容A"]}, 2: {**base, "new_materials": ["内容B"]}}
-        tt = self._compute(ca_engine, l1_data, threshold=0.001)
+        fct_data = {1: {**base, "new_materials": ["内容A"]}, 2: {**base, "new_materials": ["内容B"]}}
+        tt = self._compute(ca_engine, fct_data, threshold=0.001)
         assert tt[1] == tt[2]
 
 

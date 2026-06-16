@@ -69,10 +69,10 @@ class Retriever:
     def __init__(self, snapshot: BM25Snapshot):
         self._bm25 = snapshot.bm25
         self._turn_indices = snapshot.turn_indices
-        self._l1_embeddings = snapshot.l1_embeddings
+        self._fct_embeddings = snapshot.fct_embeddings
         self._tool_bm25 = snapshot.tool_bm25
         self._tool_turn_keys = snapshot.tool_turn_keys
-        self._tool_l1_embeddings = snapshot.tool_l1_embeddings
+        self._tool_fct_embeddings = snapshot.tool_fct_embeddings
 
     def retrieve(self, user_input: str,
                  query_embedding: Optional[List[float]] = None,
@@ -100,10 +100,10 @@ class Retriever:
             bm25_keys = [k for k, _ in scored]
 
         vec_keys: List[TurnKey] = []
-        vec_hits = len(self._l1_embeddings)
-        if self._l1_embeddings and query_embedding:
+        vec_hits = len(self._fct_embeddings)
+        if self._fct_embeddings and query_embedding:
             normalized_embeddings = {}
-            for k, v in self._l1_embeddings.items():
+            for k, v in self._fct_embeddings.items():
                 if isinstance(k, int):
                     normalized_embeddings[(k, 0)] = v
                 else:
@@ -144,14 +144,14 @@ class Retriever:
         bm25_scores = self._tool_bm25.get_scores(tokenise(query_text))
         bm25_hits = sum(1 for s in bm25_scores if s > 0)
 
-        vec_hits = len(self._tool_l1_embeddings)
+        vec_hits = len(self._tool_fct_embeddings)
         vec_keys: List[TurnKey] = []
-        if self._tool_l1_embeddings and query_embedding:
-            valid_embeddings = {k: v for k, v in self._tool_l1_embeddings.items()
+        if self._tool_fct_embeddings and query_embedding:
+            valid_embeddings = {k: v for k, v in self._tool_fct_embeddings.items()
                                 if len(v) == len(query_embedding)}
-            if len(valid_embeddings) != len(self._tool_l1_embeddings):
+            if len(valid_embeddings) != len(self._tool_fct_embeddings):
                 logger.warning("Filtered %d tool embedding(s) with mismatched dimensions",
-                               len(self._tool_l1_embeddings) - len(valid_embeddings))
+                               len(self._tool_fct_embeddings) - len(valid_embeddings))
             if valid_embeddings:
                 ranked = cosine_similarity_batch(query_embedding, valid_embeddings)
                 vec_keys = [k for k, _ in ranked]

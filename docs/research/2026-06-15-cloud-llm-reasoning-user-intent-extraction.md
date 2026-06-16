@@ -27,7 +27,7 @@ thought = getattr(assistant_message, "content", "") or ""
 ## 用户 Fct 提取方案（探索阶段）
 
 ### 思路
-在 E-stage `_on_post_api_request_v5` 中捕获 `assistant_message.reasoning`，从其中提取 numbered list（`1. ... 2. ... 3. ...`）作为用户 Fct，写入 turn_stream (turn, seq=0) 的 l1_text。
+在 E-stage `_on_post_api_request_v5` 中捕获 `assistant_message.reasoning`，从其中提取 numbered list（`1. ... 2. ... 3. ...`）作为用户 Fct，写入 turn_stream (turn, seq=0) 的 Fct。
 
 ### reasoning 典型结构
 ```

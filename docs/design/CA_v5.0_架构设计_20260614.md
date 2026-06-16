@@ -2,7 +2,7 @@
 
 ## 1. 动机
 
-v4/v5 hybrid schema（turn_type / tool_sub_index / l2_text / api_call_count 等混合主键）、内存 buffer `_tool_buffer`、C-stage PK 碰撞 L2 覆盖、conv_encoding 分离表等历史债积累过多。全线重写，不向后兼容。
+v4/v5 hybrid schema（turn_type / tool_sub_index / Elm / api_call_count 等混合主键）、内存 buffer `_tool_buffer`、C-stage PK 碰撞 L2 覆盖、conv_encoding 分离表等历史债积累过多。全线重写，不向后兼容。
 
 **核心原则：**
 
@@ -277,7 +277,7 @@ def _on_post_llm_call(**kwargs):
 
 ## 5. C-stage：摘要生成
 
-C-stage 在 daemon 线程异步执行，只写 l1_text/l0_text，不碰 content。
+C-stage 在 daemon 线程异步执行，只写 Fct/Hdl，不碰 content。
 
 ### 5.1 写入路径
 
@@ -389,7 +389,7 @@ def _simple_mutation_mode(self, result, conversation_history):
 SELECT l1_text FROM turn_stream WHERE session_id=? AND turn=? AND seq=?
 ```
 
-返回非空 l1_text。C-stage 尚未完成的行 l1_text 为 null → skipped。
+返回非空 Fct。C-stage 尚未完成的行 Fct 为 null → skipped。
 
 ## 7. 删除清单
 
@@ -408,10 +408,10 @@ SELECT l1_text FROM turn_stream WHERE session_id=? AND turn=? AND seq=?
 | `_load_conv_encoding()` | ca/__init__.py | 同上 |
 | `EncodingRow` | ca/__init__.py | 同上 |
 | `_phase_dialogue_turn_l1()` | ca/__init__.py | 旧路径 |
-| C-stage 中写 l2_text / turn_type / tool_sub_index | ca/__init__.py | 改为只 UPDATE l1/l0 |
+| C-stage 中写 Elm / turn_type / tool_sub_index | ca/__init__.py | 改为只 UPDATE l1/l0 |
 | `write_turn()` 的 v4 兼容参数映射 | ca/store.py | 全用新参数 |
 | `turn_type` 列 | store | 不再需要 |
-| `l2_text` 列 | store | content 就是 L2 |
+| `Elm` 列 | store | content 就是 L2 |
 | `tool_sub_index` 列 | store | seq 统一替代 |
 | `api_call_count` 作为 PK 列 | store | 不在 PK 中（保留为普通列的可选项已放弃） |
 | `test_tool_buffer.py` | tests/ | 整套 buffer 测试 |
@@ -420,11 +420,11 @@ SELECT l1_text FROM turn_stream WHERE session_id=? AND turn=? AND seq=?
 
 ## 8. 框架预留
 
-当前 `l1_text` / `l0_text` 列写入 C-stage 摘要，A-stage 固定取 `l1_text`。后续可扩展：
+当前 `Fct` / `Hdl` 列写入 C-stage 摘要，A-stage 固定取 `Fct`。后续可扩展：
 
 - **层级选择**：A-stage 按 turn 属性（biz_category / token_budget / role）决定取 l1 还是 l0
 - **多分支规则**：添加规则表，按 (turn, role, biz_category) 路由到不同摘要类型
-- **增量摘要**：C-stage 不仅写当前轮，还可写跨轮聚合摘要（预留 l1_text 字段为 TEXT 类型无需改 schema）
+- **增量摘要**：C-stage 不仅写当前轮，还可写跨轮聚合摘要（预留 Fct 字段为 TEXT 类型无需改 schema）
 
 不影响 E-stage 的写入路径和数据结构。
 

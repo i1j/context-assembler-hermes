@@ -1,7 +1,7 @@
 # CA v5.1 — 缓存分析与注入重构报告
 
 **日期**: 2026-06-13
-**范围**: cache 现状分析 + l0_embedding 孤儿清除 + tool_plan 注入重构 + bg_review 填充
+**范围**: cache 现状分析 + hdl_embedding 孤儿清除 + tool_plan 注入重构 + bg_review 填充
 
 ---
 
@@ -18,9 +18,9 @@
 
 | 组 | Key 类型 | 字段 | 来源 |
 |---|---------|------|------|
-| 对话轮 | `int` turn_index | `l0_texts`, `l1_texts` + 嵌入 | `_run_c_stage()` → `add_turn()` |
-| 个体工具 | `(int,int)` (turn,seq) | `tool_l0_texts`, `tool_l1_texts` + 嵌入 | `CacheBuilder.build()`（从 DB 重建） |
-| 工具组 | `(int,int)` (turn,api_call_count) | `tool_group_l0_texts`, `tool_group_l1_texts` | `flush_tool_buffer()` → `add_tool_group()` |
+| 对话轮 | `int` turn_index | `Hdls`, `Fcts` + 嵌入 | `_run_c_stage()` → `add_turn()` |
+| 个体工具 | `(int,int)` (turn,seq) | `tool_Hdls`, `tool_Fcts` + 嵌入 | `CacheBuilder.build()`（从 DB 重建） |
+| 工具组 | `(int,int)` (turn,api_call_count) | `tool_group_Hdls`, `tool_group_Fcts` | `flush_tool_buffer()` → `add_tool_group()` |
 
 ### 1.3 数据流（graphify 动态边验证）
 
@@ -49,28 +49,28 @@
 
 ---
 
-## 2. l0_embedding 孤儿数据清理
+## 2. hdl_embedding 孤儿数据清理
 
 ### 2.1 发现
 
-`l0_embedding` 只来源于对话轮（user 行）的 C-stage LLM 调用，但：
+`hdl_embedding` 只来源于对话轮（user 行）的 C-stage LLM 调用，但：
 
 | 消费端 | 结果 |
 |--------|------|
-| `rebuild_bm25_snapshot()` | ❌ 不包含 l0_embeddings |
-| `Retriever.retrieve()` | ❌ 只用 l1_embeddings |
+| `rebuild_bm25_snapshot()` | ❌ 不包含 hdl_embeddings |
+| `Retriever.retrieve()` | ❌ 只用 fct_embeddings |
 | `TopicRetriever.retrieve()` | ❌ 只用 topic 形心 |
-| `_compute_topic_groups()` | ❌ 只用 l1_embeddings |
-| `_build_aligned_outcomes()` | ❌ 只读 l0_texts（文本） |
+| `_compute_topic_groups()` | ❌ 只用 fct_embeddings |
+| `_build_aligned_outcomes()` | ❌ 只读 Hdls（文本） |
 | `retrieve_l0_upgrade()` | **死代码，无人调用** |
 
-每次 C-stage 调用 `embed_client.embed(l0_text)` 的 ~200-500ms 完全是浪费。
+每次 C-stage 调用 `embed_client.embed(Hdl)` 的 ~200-500ms 完全是浪费。
 
 ### 2.2 处理
 
 | 文件 | 改动 |
 |------|------|
-| `ca/__init__.py` _run_c_stage | 注释掉 `l0_emb = self.embed_client.embed(l0_text)` |
+| `ca/__init__.py` _run_c_stage | 注释掉 `l0_emb = self.embed_client.embed(Hdl)` |
 | `ca/lstage.py` 对话轮 backfill | 注释掉 `l0_emb = self.engine.embed_client.embed(l0)` |
 | `ca/lstage.py` 工具轮 backfill | 注释掉 `l0_emb = self.engine.embed_client.embed(tool_l0)` |
 | `ca/retrieval.py` | 删除死代码 `retrieve_l0_upgrade()` |
@@ -162,9 +162,9 @@ bg_review 轮被从 plan 中完全过滤（不走话题分级/预算/保护区�
 
 | 行类型 | 优先 | 降级 | 兜底 |
 |-------|------|------|------|
-| user | `_format_l1_for_display(l1)` | `l0_text` | `" "` |
-| assistant{tc} | `_format_tool_group_assembly(l1)` → header | `l0_text` | `" "` |
-| tool | **`l0_text`（无 `[~/N/M]` 标签）** | — | `" "` |
+| user | `_format_l1_for_display(l1)` | `Hdl` | `" "` |
+| assistant{tc} | `_format_tool_group_assembly(l1)` → header | `Hdl` | `" "` |
+| tool | **`Hdl`（无 `[~/N/M]` 标签）** | — | `" "` |
 | final assistant | — | — | `" "` |
 
 ### 4.3 匹配保护
@@ -195,7 +195,7 @@ tool 行按 `(api_call_count, seq_index, role)` 三字段匹配 DB 记录。任�
 
 ### 5.1 嵌入覆盖率极低
 
-只有 user 行（23/332 = 7%）有 L0/L1 嵌入。工具行和 assistant{tc} 行虽然写了 l1_text，但从不写嵌入。`BM25Snapshot` 不包含 `tool_group_l1_texts`，TopicRetriever 对工具组内容不可见。
+只有 user 行（23/332 = 7%）有 L0/L1 嵌入。工具行和 assistant{tc} 行虽然写了 Fct，但从不写嵌入。`BM25Snapshot` 不包含 `tool_group_Fcts`，TopicRetriever 对工具组内容不可见。
 
 ### 5.2 旧 DB 从未清理
 

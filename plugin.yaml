@@ -1,5 +1,5 @@
 name: ca_assembler
-version: 5.1
+version: 5.5.0
 description: >
   ContextAssembler v5.1 — Hermes 插件，增量 L0/L1/L2 分层摘要 + plan-based 消息组装 +
   工具轮结构化摘要（10 个结构化 handler）+ L‑stage 异步补全 + 全指纹去重（原位标记）

@@ -261,7 +261,7 @@ class TestGradeTopicsByRadius:
         assert grades[1] == "L1", f"Expected L1, got {grades[1]}"
         engine.destroy()
 
-    def test_gr_006_retrieved_l1_override(self):
+    def test_gr_006_retrieved_fct_override(self):
         """远距离但已检索命中 → L1"""
         engine = ContextAssembler(db_path=":memory:", session_id="t")
         q = [0.5] * 768
@@ -476,25 +476,25 @@ class TestComputeTurnPlanV2:
         from ca import ContextAssembler
         return ContextAssembler(db_path=":memory:", session_id=TEST_SESSION)
 
-    def _write_dialogue(self, engine, turn, l1_fields: dict,
-                        l0_text="", assemble_status=0):
+    def _write_turn_data(self, engine, turn, fct_fields: dict,
+                        hdl_text="", assemble_status=0):
         engine.store.write_turn(
             TEST_SESSION, turn,
-            l0_text=l0_text,
-            l1_text=json.dumps(l1_fields, ensure_ascii=False),
+            hdl_text=hdl_text,
+            fct_text=json.dumps(fct_fields, ensure_ascii=False),
             turn_type="dialogue", tool_sub_index=0,
-            l2_text=json.dumps([{"role": "user", "content": "test"}], ensure_ascii=False),
+            elm_text=json.dumps([{"role": "user", "content": "test"}], ensure_ascii=False),
             _assemble_status=assemble_status,
         )
 
     def _write_tool(self, engine, turn, sub=1,
-                    l1_fields: dict = None, l0_text="", assemble_status=0):
+                    fct_fields: dict = None, hdl_text="", assemble_status=0):
         engine.store.write_turn(
             TEST_SESSION, turn,
-            l0_text=l0_text,
-            l1_text=json.dumps(l1_fields or {}, ensure_ascii=False),
+            hdl_text=hdl_text,
+            fct_text=json.dumps(fct_fields or {}, ensure_ascii=False),
             turn_type="tool", tool_sub_index=sub,
-            l2_text=json.dumps([{"role": "tool", "tool_call_id": "t1", "content": "ok"}],
+            elm_text=json.dumps([{"role": "tool", "tool_call_id": "t1", "content": "ok"}],
                                ensure_ascii=False),
             _assemble_status=assemble_status,
         )
@@ -540,7 +540,7 @@ class TestComputeTurnPlanV2:
         assert d.decision_reason == "topic_bg"
         engine.destroy()
 
-    def test_tpv2_003_l2_grade_topic_core(self):
+    def test_tpv2_003_elm_grade_topic_core(self):
         """L2 grade 对话轮 → L2 (topic_core)"""
         engine = self._make_engine()
         self._write_dialogue(engine, 1, {"core_change": "核心"})
@@ -559,7 +559,7 @@ class TestComputeTurnPlanV2:
         assert d.decision_reason == "topic_core"
         engine.destroy()
 
-    def test_tpv2_004_l1_grade_baseline(self):
+    def test_tpv2_004_fct_grade_baseline(self):
         """L1 grade 对话轮 → L1 (topic_baseline)"""
         engine = self._make_engine()
         self._write_dialogue(engine, 1, {"core_change": "baseline"})
@@ -578,7 +578,7 @@ class TestComputeTurnPlanV2:
         assert d.decision_reason == "topic_baseline"
         engine.destroy()
 
-    def test_tpv2_005_l0_grade_degraded(self):
+    def test_tpv2_005_hdl_grade_degraded(self):
         """L0 grade 对话轮 → L0 (topic_degraded)"""
         engine = self._make_engine()
         self._write_dialogue(engine, 1, {"core_change": "远"})

@@ -8,7 +8,7 @@ ca/store.py — SQLite 持久化存储层 (v4.4.0 alpha)
 - 内存缓存 session_id 列表（24h TTL），写操作后失效。
 - 嵌入 BLOB 安全解包（损坏时返回 None）。
 - 表结构完整性检查，损坏自动重建。
-- 新增列：turn_type, tool_sub_index, backfill_attempts, l2_text, _assemble_status。
+- 新增列：turn_type, tool_sub_index, backfill_attempts, Elm, _assemble_status。
 - 提供独立迁移脚本（见 migration_v4_3_to_v4_4.py）。
 """
 
@@ -37,7 +37,7 @@ INITIAL_BACKFILL_ATTEMPTS = 0
 #   assistant{tc}:   api>=1, seq=0, role='assistant', tool_calls_json IS NOT NULL
 #   tool:            api>=1, seq>=1, role='tool', tool_call_id IS NOT NULL
 #   final assistant: api=999999, seq=0, role='assistant', finish_reason='stop'
-# v4 遗留列 (turn_type, tool_sub_index, l2_text) 保留至 PR2 以支持过渡期查询
+# v4 遗留列 (turn_type, tool_sub_index, elm_text) 保留至 PR2 以支持过渡期查询
 _SCHEMA_SQL_V5 = f"""
 CREATE TABLE IF NOT EXISTS turn_cache (
     session_id    TEXT    NOT NULL,
@@ -62,10 +62,10 @@ CREATE TABLE IF NOT EXISTS turn_cache (
     usage_json    TEXT,
 
     -- CA 摘要列
-    l0_text       TEXT    NOT NULL DEFAULT '',
-    l1_text       TEXT    NOT NULL DEFAULT '',
-    l0_embedding  BLOB,
-    l1_embedding  BLOB,
+    Hdl       TEXT    NOT NULL DEFAULT '',
+    Fct       TEXT    NOT NULL DEFAULT '',
+    hdl_embedding  BLOB,
+    fct_embedding  BLOB,
     bm25_tokens   TEXT,
     token_offset  INTEGER NOT NULL DEFAULT 0,
     query_embedding BLOB,
@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS turn_cache (
         CASE WHEN role='user' OR role='assistant' THEN 'dialogue' ELSE 'tool' END
     ) STORED,
     tool_sub_index INTEGER GENERATED ALWAYS AS (seq_index) STORED,
-    l2_text       TEXT    GENERATED ALWAYS AS (content) STORED,
+    Elm       TEXT    GENERATED ALWAYS AS (content) STORED,
 
     created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
 
@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS turn_plan (
     decision_reason TEXT   NOT NULL DEFAULT 'middle',
 
     -- Token 信息
-    l2_tokens      INTEGER NOT NULL DEFAULT 0,
+    elm_tokens      INTEGER NOT NULL DEFAULT 0,
     summary_tokens INTEGER NOT NULL DEFAULT 0,
     tokens_saved   INTEGER NOT NULL DEFAULT 0,
 
@@ -361,15 +361,15 @@ class SQLiteStore:
         session_id: str,
         turn_index: int,
         *,
-        l0_text: str = "",
-        l1_text: str = "",
-        l0_embedding: Optional[List[float]] = None,
-        l1_embedding: Optional[List[float]] = None,
+        hdl_text: str = "",
+        fct_text: str = "",
+        hdl_embedding: Optional[List[float]] = None,
+        fct_embedding: Optional[List[float]] = None,
         bm25_tokens: Optional[List[str]] = None,
         token_offset: int = 0,
         turn_type: str = "dialogue",
         tool_sub_index: int = 0,
-        l2_text: Optional[str] = None,
+        elm_text: Optional[str] = None,
         _assemble_status: int = 0,
         max_retries: Optional[int] = None,
         # v5 新增参数（Optional，向后兼容）
@@ -402,9 +402,9 @@ class SQLiteStore:
         if role is None:
             # turn_type='dialogue' → role='user'（对话轮首行恒为用户消息）
             role = 'user' if turn_type == 'dialogue' else turn_type
-        # 向后兼容：l2_text（旧 v4 列）→ content（v5 生成 l2_text 的源列）
-        if content is None and l2_text is not None:
-            content = l2_text
+        # 向后兼容：elm_text（旧 v4 列）→ content（v5 生成 elm_text 的源列）
+        if content is None and elm_text is not None:
+            content = elm_text
 
         for attempt in range(effective_retries):
             try:
@@ -413,12 +413,12 @@ class SQLiteStore:
                        (session_id, turn_index, api_call_count, seq_index,
                         role, content, tool_call_id, tool_name, tool_calls_json, finish_reason,
                         api_request_id, duration_ms, status, error_type, error_message, usage_json,
-                        l0_text, l1_text, l0_embedding, l1_embedding, bm25_tokens, token_offset,
+                        Hdl, Fct, hdl_embedding, fct_embedding, bm25_tokens, token_offset,
                         query_embedding, biz_category, _assemble_status, backfill_attempts)
                        VALUES (:session_id, :turn_index, :api_call_count, :seq_index,
                                :role, :content, :tool_call_id, :tool_name, :tool_calls_json, :finish_reason,
                                :api_request_id, :duration_ms, :status, :error_type, :error_message, :usage_json,
-                               :l0_text, :l1_text, :l0_embedding, :l1_embedding, :bm25_tokens, :token_offset,
+                               :Hdl, :Fct, :hdl_embedding, :fct_embedding, :bm25_tokens, :token_offset,
                                :query_embedding, :biz_category, :_assemble_status, :backfill_attempts)""",
                     {
                         "session_id": session_id,
@@ -437,10 +437,10 @@ class SQLiteStore:
                         "error_type": error_type,
                         "error_message": error_message,
                         "usage_json": usage_json,
-                        "l0_text": l0_text,
-                        "l1_text": l1_text,
-                        "l0_embedding": _pack_f32(l0_embedding) if l0_embedding else None,
-                        "l1_embedding": _pack_f32(l1_embedding) if l1_embedding else None,
+                        "Hdl": hdl_text,
+                        "Fct": fct_text,
+                        "hdl_embedding": _pack_f32(hdl_embedding) if hdl_embedding else None,
+                        "fct_embedding": _pack_f32(fct_embedding) if fct_embedding else None,
                         "bm25_tokens": json.dumps(bm25_tokens, ensure_ascii=False) if bm25_tokens else None,
                         "token_offset": token_offset,
                         "query_embedding": None,
@@ -473,11 +473,11 @@ class SQLiteStore:
             return True
 
         defaults = {
-            "turn_index": 0, "l0_text": "", "l1_text": "",
-            "l0_embedding": None, "l1_embedding": None,
+            "turn_index": 0, "Hdl": "", "Fct": "",
+            "hdl_embedding": None, "fct_embedding": None,
             "bm25_tokens": None, "token_offset": 0,
             "turn_type": "dialogue", "tool_sub_index": 0,
-            "l2_text": None, "_assemble_status": 0,
+            "Elm": None, "_assemble_status": 0,
             # v5 defaults
             "api_call_count": 0, "seq_index": 0, "role": "user",
             "content": None, "tool_call_id": None, "tool_name": None,
@@ -497,12 +497,12 @@ class SQLiteStore:
                        (session_id, turn_index, api_call_count, seq_index,
                         role, content, tool_call_id, tool_name, tool_calls_json, finish_reason,
                         api_request_id, duration_ms, status, error_type, error_message, usage_json,
-                        l0_text, l1_text, l0_embedding, l1_embedding, bm25_tokens, token_offset,
+                        Hdl, Fct, hdl_embedding, fct_embedding, bm25_tokens, token_offset,
                         query_embedding, biz_category, _assemble_status, backfill_attempts)
                        VALUES (:session_id, :turn_index, :api_call_count, :seq_index,
                                :role, :content, :tool_call_id, :tool_name, :tool_calls_json, :finish_reason,
                                :api_request_id, :duration_ms, :status, :error_type, :error_message, :usage_json,
-                               :l0_text, :l1_text, :l0_embedding, :l1_embedding, :bm25_tokens, :token_offset,
+                               :Hdl, :Fct, :hdl_embedding, :fct_embedding, :bm25_tokens, :token_offset,
                                :query_embedding, :biz_category, :_assemble_status, :backfill_attempts)""",
                     {
                         "session_id": session_id,
@@ -521,10 +521,10 @@ class SQLiteStore:
                         "error_type": vals.get("error_type"),
                         "error_message": vals.get("error_message"),
                         "usage_json": vals.get("usage_json"),
-                        "l0_text": vals["l0_text"],
-                        "l1_text": vals["l1_text"],
-                        "l0_embedding": _pack_f32(vals["l0_embedding"]) if vals["l0_embedding"] else None,
-                        "l1_embedding": _pack_f32(vals["l1_embedding"]) if vals["l1_embedding"] else None,
+                        "Hdl": vals["Hdl"],
+                        "Fct": vals["Fct"],
+                        "hdl_embedding": _pack_f32(vals["hdl_embedding"]) if vals["hdl_embedding"] else None,
+                        "fct_embedding": _pack_f32(vals["fct_embedding"]) if vals["fct_embedding"] else None,
                         "bm25_tokens": json.dumps(vals["bm25_tokens"], ensure_ascii=False) if vals["bm25_tokens"] else None,
                         "token_offset": vals["token_offset"],
                         "query_embedding": None,
@@ -549,27 +549,27 @@ class SQLiteStore:
     def read_session(self, session_id: str) -> List[TurnRecord]:
         if self._readonly:
             cur = self.conn.execute(
-                """SELECT turn_index, l0_text, l1_text, l0_embedding, l1_embedding,
+                """SELECT turn_index, Hdl, Fct, hdl_embedding, fct_embedding,
                           bm25_tokens, token_offset, turn_type, backfill_attempts,
-                          tool_sub_index, l2_text, _assemble_status
+                          tool_sub_index, Elm, _assemble_status
                    FROM turn_cache WHERE session_id=? ORDER BY turn_index ASC""",
                 (session_id,),
             )
             rows = []
             for row in cur:
                 rows.append({
-                    "turn_index": row[0], "l0_text": row[1] or "", "l1_text": row[2] or "",
-                    "l0_embedding": _unpack_f32(row[3]) if row[3] else None,
-                    "l1_embedding": _unpack_f32(row[4]) if row[4] else None,
+                    "turn_index": row[0], "Hdl": row[1] or "", "Fct": row[2] or "",
+                    "hdl_embedding": _unpack_f32(row[3]) if row[3] else None,
+                    "fct_embedding": _unpack_f32(row[4]) if row[4] else None,
                     "bm25_tokens": json.loads(row[5]) if row[5] else [],
                     "token_offset": row[6], "turn_type": row[7] or "dialogue",
                     "backfill_attempts": row[8] or 0, "tool_sub_index": row[9] or 0,
-                    "l2_text": row[10], "_assemble_status": row[11] or 0,
+                    "Elm": row[10], "_assemble_status": row[11] or 0,
                 })
             return rows
         # v5 新库：新列 + role→turn_type 映射 + 新 ORDER BY
         cur = self.conn.execute(
-            """SELECT turn_index, l0_text, l1_text, l0_embedding, l1_embedding,
+            """SELECT turn_index, Hdl, Fct, hdl_embedding, fct_embedding,
                       bm25_tokens, token_offset, role, backfill_attempts,
                       seq_index, api_call_count, content, tool_call_id, tool_name,
                       tool_calls_json, finish_reason, api_request_id, duration_ms,
@@ -584,9 +584,9 @@ class SQLiteStore:
             # role→turn_type 映射
             mapped_turn_type = 'tool' if role_val == 'tool' else 'dialogue'
             rows.append({
-                "turn_index": r[0], "l0_text": r[1] or "", "l1_text": r[2] or "",
-                "l0_embedding": _unpack_f32(r[3]) if r[3] else None,
-                "l1_embedding": _unpack_f32(r[4]) if r[4] else None,
+                "turn_index": r[0], "Hdl": r[1] or "", "Fct": r[2] or "",
+                "hdl_embedding": _unpack_f32(r[3]) if r[3] else None,
+                "fct_embedding": _unpack_f32(r[4]) if r[4] else None,
                 "bm25_tokens": json.loads(r[5]) if r[5] else [],
                 "token_offset": r[6], "turn_type": mapped_turn_type,
                 "backfill_attempts": r[8] or 0,
@@ -605,16 +605,16 @@ class SQLiteStore:
                 "error_message": r[20],
                 "usage_json": r[21],
                 "_assemble_status": r[22] or 0,
-                "l2_text": r[11],  # l2_text ≈ content（向后兼容）
+                "Elm": r[11],  # elm_text ≈ content（向后兼容）
             })
         return rows
 
     def read_turn(self, session_id: str, turn_index: int) -> Optional[TurnRecord]:
         if self._readonly:
             cur = self.conn.execute(
-                """SELECT turn_index, l0_text, l1_text, l0_embedding, l1_embedding,
+                """SELECT turn_index, Hdl, Fct, hdl_embedding, fct_embedding,
                           bm25_tokens, token_offset, turn_type, backfill_attempts,
-                          tool_sub_index, l2_text, _assemble_status
+                          tool_sub_index, Elm, _assemble_status
                    FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue' LIMIT 1""",
                 (session_id, turn_index),
             )
@@ -622,16 +622,16 @@ class SQLiteStore:
             if row is None:
                 return None
             return {
-                "turn_index": row[0], "l0_text": row[1] or "", "l1_text": row[2] or "",
-                "l0_embedding": _unpack_f32(row[3]) if row[3] else None,
-                "l1_embedding": _unpack_f32(row[4]) if row[4] else None,
+                "turn_index": row[0], "Hdl": row[1] or "", "Fct": row[2] or "",
+                "hdl_embedding": _unpack_f32(row[3]) if row[3] else None,
+                "fct_embedding": _unpack_f32(row[4]) if row[4] else None,
                 "bm25_tokens": json.loads(row[5]) if row[5] else [],
                 "token_offset": row[6], "turn_type": row[7], "backfill_attempts": row[8],
-                "tool_sub_index": row[9] or 0, "l2_text": row[10], "_assemble_status": row[11],
+                "tool_sub_index": row[9] or 0, "Elm": row[10], "_assemble_status": row[11],
             }
         # v5: 查询 user 行，硬编码 turn_type='dialogue'
         cur = self.conn.execute(
-            """SELECT turn_index, l0_text, l1_text, l0_embedding, l1_embedding,
+            """SELECT turn_index, Hdl, Fct, hdl_embedding, fct_embedding,
                       bm25_tokens, token_offset, backfill_attempts,
                       seq_index, api_call_count, content, _assemble_status
                FROM turn_cache
@@ -643,13 +643,13 @@ class SQLiteStore:
         if row is None:
             return None
         return {
-            "turn_index": row[0], "l0_text": row[1] or "", "l1_text": row[2] or "",
-            "l0_embedding": _unpack_f32(row[3]) if row[3] else None,
-            "l1_embedding": _unpack_f32(row[4]) if row[4] else None,
+            "turn_index": row[0], "Hdl": row[1] or "", "Fct": row[2] or "",
+            "hdl_embedding": _unpack_f32(row[3]) if row[3] else None,
+            "fct_embedding": _unpack_f32(row[4]) if row[4] else None,
             "bm25_tokens": json.loads(row[5]) if row[5] else [],
             "token_offset": row[6], "turn_type": "dialogue",
             "backfill_attempts": row[7], "tool_sub_index": row[8] or 0,
-            "l2_text": row[10], "_assemble_status": row[11] or 0,
+            "Elm": row[10], "_assemble_status": row[11] or 0,
             "seq_index": row[8] or 0, "api_call_count": row[9] or 0,
             "content": row[10],
         }
@@ -702,9 +702,9 @@ class SQLiteStore:
     def get_pending_backfill(self, session_id: str, turn_type: str) -> List[TurnRecord]:
         if self._readonly:
             cur = self.conn.execute(
-                """SELECT turn_index, l0_text, l1_text, l0_embedding, l1_embedding,
+                """SELECT turn_index, Hdl, Fct, hdl_embedding, fct_embedding,
                           bm25_tokens, token_offset, turn_type, backfill_attempts,
-                          tool_sub_index, l2_text, _assemble_status
+                          tool_sub_index, Elm, _assemble_status
                    FROM turn_cache
                    WHERE session_id=? AND turn_type=? AND _assemble_status=1
                    ORDER BY turn_index ASC""",
@@ -713,12 +713,12 @@ class SQLiteStore:
             rows = []
             for row in cur:
                 rows.append({
-                    "turn_index": row[0], "l0_text": row[1] or "", "l1_text": row[2] or "",
-                    "l0_embedding": _unpack_f32(row[3]) if row[3] else None,
-                    "l1_embedding": _unpack_f32(row[4]) if row[4] else None,
+                    "turn_index": row[0], "Hdl": row[1] or "", "Fct": row[2] or "",
+                    "hdl_embedding": _unpack_f32(row[3]) if row[3] else None,
+                    "fct_embedding": _unpack_f32(row[4]) if row[4] else None,
                     "bm25_tokens": json.loads(row[5]) if row[5] else [],
                     "token_offset": row[6], "turn_type": row[7], "backfill_attempts": row[8],
-                    "tool_sub_index": row[9] or 0, "l2_text": row[10], "_assemble_status": row[11],
+                    "tool_sub_index": row[9] or 0, "Elm": row[10], "_assemble_status": row[11],
                 })
             return rows
         # v5: turn_type 参数映射为 role 查询
@@ -727,7 +727,7 @@ class SQLiteStore:
         role_filter = ('user', 'assistant') if turn_type == 'dialogue' else ('tool',)
         placeholders = ','.join('?' for _ in role_filter)
         cur = self.conn.execute(
-            f"""SELECT turn_index, l0_text, l1_text, l0_embedding, l1_embedding,
+            f"""SELECT turn_index, Hdl, Fct, hdl_embedding, fct_embedding,
                        bm25_tokens, token_offset, role, backfill_attempts,
                        seq_index, content, _assemble_status
                 FROM turn_cache
@@ -738,13 +738,13 @@ class SQLiteStore:
         rows = []
         for row in cur:
             rows.append({
-                "turn_index": row[0], "l0_text": row[1] or "", "l1_text": row[2] or "",
-                "l0_embedding": _unpack_f32(row[3]) if row[3] else None,
-                "l1_embedding": _unpack_f32(row[4]) if row[4] else None,
+                "turn_index": row[0], "Hdl": row[1] or "", "Fct": row[2] or "",
+                "hdl_embedding": _unpack_f32(row[3]) if row[3] else None,
+                "fct_embedding": _unpack_f32(row[4]) if row[4] else None,
                 "bm25_tokens": json.loads(row[5]) if row[5] else [],
                 "token_offset": row[6], "turn_type": turn_type,
                 "backfill_attempts": row[8],
-                "tool_sub_index": row[9] or 0, "l2_text": row[10], "_assemble_status": row[11] or 0,
+                "tool_sub_index": row[9] or 0, "Elm": row[10], "_assemble_status": row[11] or 0,
             })
         return rows
 
@@ -767,14 +767,14 @@ class SQLiteStore:
                         turn_type: str = "dialogue",
                         tool_sub_index: int = 0,
                         tool_group_api_count: Optional[int] = None) -> Tuple[Optional[str], str, str]:
-        """返回该 turn 的 (l2_text, l1_text, l0_text) 三元组。
+        """返回该 turn 的 (Elm, Fct, Hdl) 三元组。
 
-        l2_text 可能为 None（如果该 turn 未存储 L2），l1/l0 至少为空字符串。
+        Elm 可能为 None（如果该 turn 未存储 L2），l1/l0 至少为空字符串。
         调用方根据 target_level 选择对应字段构建消息。
         """
         if self._readonly:
             cur = self.conn.execute(
-                """SELECT l2_text, l1_text, l0_text
+                """SELECT Elm, Fct, Hdl
                    FROM turn_cache
                    WHERE session_id=? AND turn_index=? AND turn_type=? AND tool_sub_index=?""",
                 (session_id, turn_index, turn_type, tool_sub_index),
@@ -834,19 +834,19 @@ class SQLiteStore:
                         "tool_call_id": r[3] or "",
                     })
 
-            l2_text = json.dumps(msgs, ensure_ascii=False) if msgs else None
+            elm_text = json.dumps(msgs, ensure_ascii=False) if msgs else None
 
             # l1/l0 从 assistant{tc} 行读（同 turn 多工具组需按 api_call_count 区分）
             if tool_group_api_count is not None:
                 cur = self.conn.execute(
-                    """SELECT l1_text, l0_text
+                    """SELECT Fct, Hdl
                        FROM turn_cache
                        WHERE session_id=? AND turn_index=? AND role='assistant' AND seq_index=0 AND api_call_count=?""",
                     (session_id, turn_index, tool_group_api_count),
                 )
             else:
                 cur = self.conn.execute(
-                    """SELECT l1_text, l0_text
+                    """SELECT Fct, Hdl
                        FROM turn_cache
                        WHERE session_id=? AND turn_index=? AND role='assistant' AND seq_index=0""",
                     (session_id, turn_index),
@@ -854,11 +854,11 @@ class SQLiteStore:
             row = cur.fetchone()
             l1 = row[0] or "" if row else ""
             l0 = row[1] or "" if row else ""
-            return (l2_text, l1, l0)
+            return (elm_text, l1, l0)
         else:
             role = 'tool'
         cur = self.conn.execute(
-            """SELECT content, l1_text, l0_text
+            """SELECT content, Fct, Hdl
                FROM turn_cache
                WHERE session_id=? AND turn_index=? AND role=? AND seq_index=?""",
             (session_id, turn_index, role, tool_sub_index),
@@ -872,11 +872,11 @@ class SQLiteStore:
                                   api_call_count: int) -> List[Dict]:
         """读取一个工具组内各工具行的 l1/l0 摘要。
 
-        返回列表，每项含 seq_index、l1_text、l0_text、tool_name、status。
+        返回列表，每项含 seq_index、Fct、Hdl、tool_name、status。
         按 seq_index 升序。
         """
         cur = self.conn.execute(
-            """SELECT seq_index, l1_text, l0_text, tool_name, status, content
+            """SELECT seq_index, Fct, Hdl, tool_name, status, content
                FROM turn_cache
                WHERE session_id=? AND turn_index=? AND api_call_count=? AND role='tool'
                ORDER BY seq_index""",
@@ -886,8 +886,8 @@ class SQLiteStore:
         for r in cur.fetchall():
             rows.append({
                 "seq_index": r[0],
-                "l1_text": r[1] or "",
-                "l0_text": r[2] or "",
+                "Fct": r[1] or "",
+                "Hdl": r[2] or "",
                 "tool_name": r[3] or "",
                 "status": r[4] or "",
                 "content": r[5] or "",
@@ -935,7 +935,7 @@ class SQLiteStore:
                 """INSERT INTO turn_plan
                    (session_id, turn_index, api_call_count, seq_index, turn_type,
                     target_level, decision_reason,
-                    l2_tokens, summary_tokens, tokens_saved,
+                    elm_tokens, summary_tokens, tokens_saved,
                     rrf_score, upgrade_rank, budget_remaining, topic_group,
                     biz_category)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -945,7 +945,7 @@ class SQLiteStore:
                   e.get("seq_index", e.get("tool_sub_index", 0)),
                   e.get("turn_type", "dialogue"),
                   e["target_level"], e["decision_reason"],
-                  e.get("l2_tokens", 0), e.get("summary_tokens", 0), e.get("tokens_saved", 0),
+                  e.get("elm_tokens", 0), e.get("summary_tokens", 0), e.get("tokens_saved", 0),
                   e.get("rrf_score"), e.get("upgrade_rank"), e.get("budget_remaining"),
                   e.get("topic_group"), e.get("biz_category")) for e in entries]
             )
@@ -960,7 +960,7 @@ class SQLiteStore:
             cur = self.conn.execute(
                 """SELECT session_id, turn_index, turn_type, tool_sub_index,
                           target_level, decision_reason,
-                          l2_tokens, summary_tokens, tokens_saved,
+                          elm_tokens, summary_tokens, tokens_saved,
                           rrf_score, upgrade_rank, budget_remaining, topic_group
                    FROM turn_plan WHERE session_id=?
                    ORDER BY turn_index, turn_type, tool_sub_index""",
@@ -969,7 +969,7 @@ class SQLiteStore:
             return [
                 {"turn_index": r[1], "turn_type": r[2], "tool_sub_index": r[3],
                  "target_level": r[4], "decision_reason": r[5],
-                 "l2_tokens": r[6], "summary_tokens": r[7], "tokens_saved": r[8],
+                 "elm_tokens": r[6], "summary_tokens": r[7], "tokens_saved": r[8],
                  "rrf_score": r[9], "upgrade_rank": r[10], "budget_remaining": r[11],
                  "topic_group": r[12]}
                 for r in cur
@@ -978,7 +978,7 @@ class SQLiteStore:
         cur = self.conn.execute(
             """SELECT session_id, turn_index, api_call_count, seq_index, turn_type,
                       target_level, decision_reason,
-                      l2_tokens, summary_tokens, tokens_saved,
+                      elm_tokens, summary_tokens, tokens_saved,
                       rrf_score, upgrade_rank, budget_remaining, topic_group
                FROM turn_plan WHERE session_id=?
                ORDER BY turn_index, api_call_count, seq_index""",
@@ -988,7 +988,7 @@ class SQLiteStore:
             {"turn_index": r[1], "api_call_count": r[2], "seq_index": r[3],
              "tool_sub_index": r[3], "turn_type": r[4],
              "target_level": r[5], "decision_reason": r[6],
-             "l2_tokens": r[7], "summary_tokens": r[8], "tokens_saved": r[9],
+             "elm_tokens": r[7], "summary_tokens": r[8], "tokens_saved": r[9],
              "rrf_score": r[10], "upgrade_rank": r[11], "budget_remaining": r[12],
              "topic_group": r[13]}
             for r in cur
@@ -1043,10 +1043,10 @@ class SQLiteStore:
 
     # ── 话题辅助方法（v4.6.0）──
 
-    def read_turn_l1_fields(self, session_id: str, turn_index: int) -> Optional[Dict[str, Any]]:
+    def read_turn_fct_fields(self, session_id: str, turn_index: int) -> Optional[Dict[str, Any]]:
         """读取该对话轮的 L1 JSON 字段，用于话题分割判断。"""
         cur = self.conn.execute(
-            "SELECT l1_text FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue'",
+            "SELECT Fct FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue'",
             (session_id, turn_index),
         )
         row = cur.fetchone()
@@ -1067,12 +1067,12 @@ class SQLiteStore:
         )
         return [row[0] for row in cur]
 
-    def read_topic_l1_texts(self, session_id: str, topic_group: int) -> List[str]:
+    def read_topic_fct_texts(self, session_id: str, topic_group: int) -> List[str]:
         """读取 topic 内所有对话轮的 L1 文本（5字段拼接），用于 BM25 检索。"""
         indices = self.read_topic_turn_indices(session_id, topic_group)
         texts = []
         for idx in indices:
-            fields = self.read_turn_l1_fields(session_id, idx)
+            fields = self.read_turn_fct_fields(session_id, idx)
             if fields:
                 parts = []
                 for key in ("core_change", "new_materials", "objective_facts", "consensus", "todo"):
@@ -1084,13 +1084,13 @@ class SQLiteStore:
                 texts.append(" | ".join(parts))
         return texts
 
-    def read_topic_l1_embeddings(self, session_id: str, topic_group: int) -> List[List[float]]:
+    def read_topic_fct_embeddings(self, session_id: str, topic_group: int) -> List[List[float]]:
         """读取 topic 内所有对话轮的 L1 embedding。"""
         indices = self.read_topic_turn_indices(session_id, topic_group)
         embeddings = []
         for idx in indices:
             cur = self.conn.execute(
-                "SELECT l1_embedding FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue'",
+                "SELECT fct_embedding FROM turn_cache WHERE session_id=? AND turn_index=? AND turn_type='dialogue'",
                 (session_id, idx),
             )
             row = cur.fetchone()
@@ -1153,12 +1153,12 @@ class SQLiteStore:
                            (session_id, turn_index, api_call_count, seq_index,
                             role, content, tool_call_id, tool_name, tool_calls_json, finish_reason,
                             api_request_id, duration_ms, status, error_type, error_message, usage_json,
-                            l0_text, l1_text, l0_embedding, l1_embedding, bm25_tokens, token_offset,
+                            Hdl, Fct, hdl_embedding, fct_embedding, bm25_tokens, token_offset,
                             query_embedding, biz_category, _assemble_status, backfill_attempts)
                            VALUES (:session_id, :turn_index, :api_call_count, :seq_index,
                                    :role, :content, :tool_call_id, :tool_name, :tool_calls_json, :finish_reason,
                                    :api_request_id, :duration_ms, :status, :error_type, :error_message, :usage_json,
-                                   :l0_text, :l1_text, :l0_embedding, :l1_embedding, :bm25_tokens, :token_offset,
+                                   :Hdl, :Fct, :hdl_embedding, :fct_embedding, :bm25_tokens, :token_offset,
                                    :query_embedding, :biz_category, :_assemble_status, :backfill_attempts)""",
                         {
                             "session_id": session_id,
@@ -1177,10 +1177,10 @@ class SQLiteStore:
                             "error_type": row.get("error_type"),
                             "error_message": row.get("error_message"),
                             "usage_json": row.get("usage_json"),
-                            "l0_text": row.get("l0_text", ""),
-                            "l1_text": row.get("l1_text", ""),
-                            "l0_embedding": _pack_f32(row.get("l0_embedding")) if row.get("l0_embedding") else None,
-                            "l1_embedding": _pack_f32(row.get("l1_embedding")) if row.get("l1_embedding") else None,
+                            "Hdl": row.get("Hdl", ""),
+                            "Fct": row.get("Fct", ""),
+                            "hdl_embedding": _pack_f32(row.get("hdl_embedding")) if row.get("hdl_embedding") else None,
+                            "fct_embedding": _pack_f32(row.get("fct_embedding")) if row.get("fct_embedding") else None,
                             "bm25_tokens": json.dumps(row.get("bm25_tokens"), ensure_ascii=False) if row.get("bm25_tokens") else None,
                             "token_offset": row.get("token_offset", 0),
                             "query_embedding": None,
@@ -1223,7 +1223,7 @@ def _infer_legacy_state(core_text: str) -> Tuple[str, ItemState]:
 
 
 def format_previous_summary_for_prompt(l1_text_from_db: str) -> str:
-    """将 DB 中历史 l1_text 统一转换为新提示词期望的 Markdown 格式。
+    """将 DB 中历史 Fct 统一转换为新提示词期望的 Markdown 格式。
 
     - None/空/"无" → "无"
     - JSON (旧 5 类) → 调用 _json_to_v1_markdown() 转换
@@ -1282,8 +1282,8 @@ CREATE TABLE IF NOT EXISTS turn_stream (
     written_at    REAL,
 
     -- 摘要（C-stage 填）
-    l1_text       TEXT,
-    l0_text       TEXT,
+    Fct       TEXT,
+    Hdl       TEXT,
 
     PRIMARY KEY (session_id, turn, seq)
 );
@@ -1303,8 +1303,8 @@ def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
                   usage_completion_tokens: Optional[int] = None,
                   biz_category: Optional[str] = None,
                   written_at: Optional[float] = None,
-                  l1_text: Optional[str] = None,
-                  l0_text: Optional[str] = None) -> bool:
+                  fct_text: Optional[str] = None,
+                  hdl_text: Optional[str] = None) -> bool:
     """v5.0 INSERT OR REPLACE — 简化参数，无 v4 兼容映射。"""
     if store._readonly:
         logger.warning("write_turn_v5 called on readonly store, skipping")
@@ -1320,14 +1320,14 @@ def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
                     tool_calls_json, finish_reason,
                     usage_prompt_tokens, usage_completion_tokens,
                     biz_category, written_at,
-                    l1_text, l0_text)
+                    Fct, Hdl)
                    VALUES (?,?,?,?,?, ?,?,?,?,?, ?,?,?,?, ?,?,?,?)""",
                 (session_id, turn, seq, role, content,
                  tool_name, tool_call_id, args_json, status, duration_ms,
                  tool_calls_json, finish_reason,
                  usage_prompt_tokens, usage_completion_tokens,
                  biz_category, written_at,
-                 l1_text, l0_text),
+                 fct_text, hdl_text),
             )
             store.conn.commit()
             store._invalidate_session_cache()
@@ -1345,10 +1345,10 @@ def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
 
 
 def read_fct_v5(store, session_id: str, turn: int, seq: int) -> str:
-    """点查：返回 (turn, seq) 的 fct_text（l1_text），无则空字符串。"""
+    """点查：返回 (turn, seq) 的 fct_text（Fct），无则空字符串。"""
     try:
         cur = store.conn.execute(
-            "SELECT l1_text FROM turn_stream WHERE session_id=? AND turn=? AND seq=?",
+            "SELECT Fct FROM turn_stream WHERE session_id=? AND turn=? AND seq=?",
             (session_id, turn, seq),
         )
         row = cur.fetchone()
@@ -1382,14 +1382,14 @@ def read_prev_fct(store, session_id: str, turn: int) -> str:
 
 def update_seq0_fct_v5(store, session_id: str, turn: int,
                        fct_text: str, hdl_text: str) -> bool:
-    """仅 UPDATE turn_stream 的 l1/l0 列（seq=0 行），不碰 content。"""
+    """仅 UPDATE turn_stream 的 Fct/Hdl 列（seq=0 行），不碰 content。"""
     try:
         store.conn.execute(
-            "UPDATE turn_stream SET l1_text=?, l0_text=? WHERE session_id=? AND turn=? AND seq=0",
+            "UPDATE turn_stream SET Fct=?, Hdl=? WHERE session_id=? AND turn=? AND seq=0",
             (fct_text, hdl_text, session_id, turn),
         )
         store.conn.commit()
         return True
     except sqlite3.Error as exc:
-        logger.warning("update_seq0_l1_v5 failed: %s", exc)
+        logger.warning("update_seq0_fct_v5 failed: %s", exc)
         return False

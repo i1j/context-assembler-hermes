@@ -26,7 +26,7 @@ regex `^[-*•]\s+(.+)$` 从 `- 无` 捕获 group(1)=`"无"` → `"无"` 在排�
 
 ### 3. 调真实 LLM 构造输出
 
-用 `L1_GENERATION_PROMPT` + 真实 `l2_text` + `think: false` 调 `qwen3.5:hermes-32k`，输出标准格式：
+用 `L1_GENERATION_PROMPT` + 真实 `Elm` + `think: false` 调 `qwen3.5:hermes-32k`，输出标准格式：
 ```
 ### 现象与问题
 - 无

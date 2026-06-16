@@ -163,7 +163,7 @@ class _TopicSwitchData:
     topic_id: int
     turn_indices: List[int]
     agg_text: str
-    l1_texts: Dict[int, str]
+    fct_texts: Dict[int, str]
     tool_group_l1: Dict[str, str]
 
 
@@ -462,7 +462,7 @@ class ContextAssembler:
             finish_reason=finish_reason,
             usage_prompt_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
             usage_completion_tokens=getattr(usage, "completion_tokens", None) if usage else None,
-            l1_text=thought_l1,
+            fct_text=thought_l1,
             written_at=time.time(),
         )
         logger.info("[CA_v5] _on_api_response: wrote thought turn=%d seq=%d tools=%d",
@@ -523,8 +523,8 @@ class ContextAssembler:
             tc_def = {"id": tool_call_id, "type": "function",
                       "function": {"name": tool_name, "arguments": args or {}}}
             result_entry = [{"content": content, "status": status}]
-            l1_dict, hdl_text = self.tool_summarizer.summarize(tc_def, result_entry)
-            fct_str = json.dumps(l1_dict, ensure_ascii=False) if l1_dict else ""
+            fct_dict, hdl_text = self.tool_summarizer.summarize(tc_def, result_entry)
+            fct_str = json.dumps(fct_dict, ensure_ascii=False) if fct_dict else ""
         except Exception as e:
             logger.warning("[CA_v5] tool summarize failed: %s", e)
 
@@ -535,7 +535,7 @@ class ContextAssembler:
             tool_name=tool_name, tool_call_id=tool_call_id,
             args_json=json.dumps(args) if args else None,
             status=status, duration_ms=duration_ms,
-            l1_text=fct_str, l0_text=hdl_text,
+            fct_text=fct_str, hdl_text=hdl_text,
             written_at=time.time(),
         )
         logger.debug("[CA_v5] _on_post_tool_call: wrote %s turn=%d seq=%d status=%s",
@@ -549,18 +549,18 @@ class ContextAssembler:
 
 
     # ---------- A‑stage ----------
-    def _extend_l2_messages(messages: List[Dict], l2_text: str, turn_index: int) -> None:
-        """将 l2_text (JSON 消息数组) 展开到 messages，标记 _turn_index。"""
+    def _extend_elm_messages(messages: List[Dict], elm_text: str, turn_index: int) -> None:
+        """将 Elm (JSON 消息数组) 展开到 messages，标记 _turn_index。"""
         try:
-            msgs = json.loads(l2_text)
+            msgs = json.loads(elm_text)
             if isinstance(msgs, list):
                 for m in msgs:
                     m["_turn_index"] = turn_index
                 messages.extend(msgs)
             else:
-                messages.append({"role": "user", "content": l2_text, "_turn_index": turn_index})
+                messages.append({"role": "user", "content": elm_text, "_turn_index": turn_index})
         except (json.JSONDecodeError, ValueError):
-            messages.append({"role": "user", "content": l2_text, "_turn_index": turn_index})
+            messages.append({"role": "user", "content": elm_text, "_turn_index": turn_index})
 
     def set_system_overhead(self, overhead: int):
         """(已弃用) 动态测量不可行——Hermes 不暴露 tool schemas 等非消息开销。
@@ -617,20 +617,20 @@ class ContextAssembler:
             return 0.0
         return len(bag_a & bag_b) / union_len
 
-    def _is_bg_turn(self, l1_fields: Optional[Dict]) -> bool:
+    def _is_bg_turn(self, fct_fields: Optional[Dict]) -> bool:
         """R1 检测：4 个材料字段全空 → BG 轮。"""
-        if l1_fields is None:
+        if fct_fields is None:
             return True
         for key in ("new_materials", "objective_facts", "consensus", "todo"):
-            val = l1_fields.get(key)
+            val = fct_fields.get(key)
             if isinstance(val, list) and len(val) > 0:
                 return False
             if isinstance(val, str) and val.strip():
                 return False
         return True
 
-    def _compute_topic_groups(self, l1_texts: Dict[int, str],
-                               l1_embeddings: Dict[int, List[float]],
+    def _compute_topic_groups(self, fct_texts: Dict[int, str],
+                               fct_embeddings: Dict[int, List[float]],
                                jaccard_merge_threshold: float = 0.07,
                                forced_split_turns: Optional[Set[int]] = None) -> Tuple[Dict[int, int], Dict]:
         """话题分割：R1（BG 检测）+ R2（Jaccard + todo 链）。
@@ -646,7 +646,7 @@ class ContextAssembler:
                 "nearest_centroid_dist": float,  # 最近邻异 topic 形心距离
             }]
         """
-        sorted_turns = sorted(l1_texts.keys())
+        sorted_turns = sorted(fct_texts.keys())
         if not sorted_turns:
             return {}, {}
 
@@ -654,7 +654,7 @@ class ContextAssembler:
         turn_fields: Dict[int, Optional[Dict]] = {}
         for t in sorted_turns:
             try:
-                turn_fields[t] = json.loads(l1_texts[t])
+                turn_fields[t] = json.loads(fct_texts[t])
             except (json.JSONDecodeError, TypeError):
                 turn_fields[t] = None
 
@@ -780,8 +780,8 @@ class ContextAssembler:
             if not td["is_bg"]:
                 emb_list = []
                 for t_idx in td["turn_indices"]:
-                    if t_idx in l1_embeddings:
-                        emb = l1_embeddings[t_idx]
+                    if t_idx in fct_embeddings:
+                        emb = fct_embeddings[t_idx]
                         if emb:
                             emb_list.append(emb)
                 if emb_list:
@@ -819,7 +819,7 @@ class ContextAssembler:
 
     def _grade_topics_by_radius(self, turn_to_topic: Dict[int, int],
                                  topic_data: Dict,
-                                 l1_embeddings: Dict[int, List[float]],
+                                 fct_embeddings: Dict[int, List[float]],
                                  q_emb: Optional[List[float]],
                                  retrieved_topics: set) -> Dict[int, str]:
         """按半径 r 对话题三级定级。
@@ -878,18 +878,18 @@ class ContextAssembler:
             return ""
         return _safe_truncate(text, max_chars)
 
-    def _extend_with_l2(result: List[Dict], l2_text: str, turn_index: int) -> None:
-        """将 l2_text (JSON 消息数组) 展开到 result，标记 _turn_index。"""
+    def _extend_with_l2(result: List[Dict], elm_text: str, turn_index: int) -> None:
+        """将 Elm (JSON 消息数组) 展开到 result，标记 _turn_index。"""
         try:
-            msgs = json.loads(l2_text)
+            msgs = json.loads(elm_text)
             if isinstance(msgs, list):
                 for m in msgs:
                     m["_turn_index"] = turn_index
                 result.extend(msgs)
             else:
-                result.append({"role": "user", "content": l2_text, "_turn_index": turn_index})
+                result.append({"role": "user", "content": elm_text, "_turn_index": turn_index})
         except (json.JSONDecodeError, TypeError):
-            result.append({"role": "user", "content": l2_text, "_turn_index": turn_index})
+            result.append({"role": "user", "content": elm_text, "_turn_index": turn_index})
 
     # ---------- 辅助方法 ----------
     def _token_estimate(self, text: str) -> int:
@@ -903,11 +903,11 @@ class ContextAssembler:
             return int(len(text) * 1.5)
         return max(1, len(text) // 2)
 
-    def _is_valid_fct(self, l1_text: str) -> bool:
-        if not l1_text or not l1_text.strip():
+    def _is_valid_fct(self, fct_text: str) -> bool:
+        if not fct_text or not fct_text.strip():
             return False
         try:
-            data = json.loads(l1_text)
+            data = json.loads(fct_text)
             core = data.get("core_change", "")
             return bool(core and core != "本轮无新内容")
         except (json.JSONDecodeError, TypeError, AttributeError):
@@ -920,29 +920,29 @@ class ContextAssembler:
         "完全无工具", "无工具组",
     )
 
-    def _format_fct_for_display(self, l1_text: str) -> str:
+    def _format_fct_for_display(self, fct_text: str) -> str:
         """将对话轮 L1 JSON 摘要格式化为可读文本，替代原始 JSON 注入。
 
         当 LLM 生成非 JSON 调试描述时（如"当前会话 CA 注入 ctx 中完全无工具组..."），
         识别并返回空字符串，不泄漏原始文本。
         """
-        if not l1_text or not l1_text.strip():
-            return l1_text
+        if not fct_text or not fct_text.strip():
+            return fct_text
         try:
-            data = json.loads(l1_text)
+            data = json.loads(fct_text)
         except (json.JSONDecodeError, TypeError):
             # 非 JSON → 检测是否为调试描述（LLM 错误输出）
             for pat in self._FCT_DEBUG_PATTERNS:
-                if pat in l1_text:
+                if pat in fct_text:
                     return ""
-            return l1_text
+            return fct_text
         core = data.get("core_change", "")
         if not core:
             # JSON 格式但无有效核心内容 → 检测调试模式
             for pat in self._FCT_DEBUG_PATTERNS:
-                if pat in l1_text:
+                if pat in fct_text:
                     return ""
-            return l1_text
+            return fct_text
         lines = [core]
         for key in ("new_materials", "objective_facts"):
             items = data.get(key, [])
@@ -1005,8 +1005,8 @@ class ContextAssembler:
 
         return (response_text, finish_reason)
 
-    def _extract_l0(self, l1_dict):
-        core = l1_dict.get("core_change", "")
+    def _extract_l0(self, fct_dict):
+        core = fct_dict.get("core_change", "")
         if not core or core in ("无", "本轮无新内容"):
             logger.warning("[CA-METRIC] ca.l0.skipped_empty: turn=%d", self._turn_counter)
             return "无"
@@ -1158,12 +1158,12 @@ class ContextAssembler:
             float: 理想阈值；S→S 对不足 3 对时返回 None。
         """
         # 获取有效对话轮 L1（与 assemble 中一致：排除 bg_review）
-        l1_texts, _ = self.cache.get_snapshot_data()
+        fct_texts, _ = self.cache.get_snapshot_data()
         _biz_cats = self.store.read_turn_biz_categories(self._session_id)
         if _biz_cats:
-            l1_texts = {t: v for t, v in l1_texts.items() if t not in _biz_cats}
+            fct_texts = {t: v for t, v in fct_texts.items() if t not in _biz_cats}
 
-        sorted_turns = sorted(l1_texts.keys())
+        sorted_turns = sorted(fct_texts.keys())
         if len(sorted_turns) < 4:
             return None  # 数据不足
 
@@ -1171,7 +1171,7 @@ class ContextAssembler:
         turn_fields: Dict[int, Optional[Dict]] = {}
         for t in sorted_turns:
             try:
-                turn_fields[t] = json.loads(l1_texts[t]) if l1_texts.get(t) else None
+                turn_fields[t] = json.loads(fct_texts[t]) if fct_texts.get(t) else None
             except (json.JSONDecodeError, TypeError):
                 turn_fields[t] = None
 
@@ -1246,7 +1246,7 @@ class ContextAssembler:
         lines.append(f"\n## Overview\n{ts.agg_text}")
 
         for ti in sorted(ts.turn_indices):
-            l1 = ts.l1_texts.get(ti, "")
+            l1 = ts.fct_texts.get(ti, "")
             core = l1
             if l1:
                 try:

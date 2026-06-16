@@ -115,8 +115,8 @@ def seed_dialogue(engine, turn_index, messages):
         turn_index=turn_index,
         turn_type="dialogue",
         tool_sub_index=0,
-        l0_text="",
-        l1_text="{}",
-        l2_text=json.dumps(messages, ensure_ascii=False),
+        hdl_text="",
+        fct_text="{}",
+        elm_text=json.dumps(messages, ensure_ascii=False),
         _assemble_status=0
     )

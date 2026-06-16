@@ -52,13 +52,13 @@ class TestParseV1MarkdownXml:
             "### 后续行动\n- 采购单\n"
             "<core_change>CPU 过高决定扩容</core_change>"
         )
-        l1_dict, l0_text, core_state = parse_v1_markdown_xml(llm_output)
-        assert isinstance(l1_dict, dict), f"Expected dict, got {type(l1_dict)}"
-        assert "core_change" in l1_dict, f"Missing core_change in {l1_dict}"
-        assert l1_dict["core_change"] == "【计划】 CPU 过高决定扩容"
-        assert "new_materials" in l1_dict
-        assert l1_dict["new_materials"] == ["CPU 使用率 90%"]
-        assert l0_text == "【计划】 CPU 过高决定扩容"
+        fct_dict, hdl_text, core_state = parse_v1_markdown_xml(llm_output)
+        assert isinstance(fct_dict, dict), f"Expected dict, got {type(fct_dict)}"
+        assert "core_change" in fct_dict, f"Missing core_change in {fct_dict}"
+        assert fct_dict["core_change"] == "【计划】 CPU 过高决定扩容"
+        assert "new_materials" in fct_dict
+        assert fct_dict["new_materials"] == ["CPU 使用率 90%"]
+        assert hdl_text == "【计划】 CPU 过高决定扩容"
         assert core_state is not None
 
     @pytest.mark.high
@@ -73,10 +73,10 @@ class TestParseV1MarkdownXml:
             "### 决策与方案\n- 无\n"
             "### 后续行动\n- 无\n"
         )
-        l1_dict, l0_text, _ = parse_v1_markdown_xml(llm_output)
-        assert isinstance(l1_dict, dict)
-        # l0_text 应为 None（无 core_change 时语义短路）
-        assert l0_text is None or l1_dict.get("core_change") == "本轮无新内容"
+        fct_dict, hdl_text, _ = parse_v1_markdown_xml(llm_output)
+        assert isinstance(fct_dict, dict)
+        # hdl_text 应为 None（无 core_change 时语义短路）
+        assert hdl_text is None or fct_dict.get("core_change") == "本轮无新内容"
 
     @pytest.mark.high
     @pytest.mark.l1
@@ -85,10 +85,10 @@ class TestParseV1MarkdownXml:
         if not IMPORT_OK:
             pytest.skip("parse_v1_markdown_xml not yet implemented")
         llm_output = "### 现象与问题\n- 测试\n<core_change>部分内容"
-        l1_dict, l0_text, _ = parse_v1_markdown_xml(llm_output)
-        assert isinstance(l1_dict, dict)
+        fct_dict, hdl_text, _ = parse_v1_markdown_xml(llm_output)
+        assert isinstance(fct_dict, dict)
         # 不应抛出异常，应返回部分结果
-        assert l0_text is None or isinstance(l0_text, str)
+        assert hdl_text is None or isinstance(hdl_text, str)
 
     @pytest.mark.high
     @pytest.mark.l1
@@ -96,9 +96,9 @@ class TestParseV1MarkdownXml:
         """P4: 空字符串输入"""
         if not IMPORT_OK:
             pytest.skip("parse_v1_markdown_xml not yet implemented")
-        l1_dict, l0_text, _ = parse_v1_markdown_xml("")
-        assert isinstance(l1_dict, dict)
-        assert l0_text is None
+        fct_dict, hdl_text, _ = parse_v1_markdown_xml("")
+        assert isinstance(fct_dict, dict)
+        assert hdl_text is None
 
     @pytest.mark.high
     @pytest.mark.l1
@@ -106,8 +106,8 @@ class TestParseV1MarkdownXml:
         """P4-None: None 输入"""
         if not IMPORT_OK:
             pytest.skip("parse_v1_markdown_xml not yet implemented")
-        l1_dict, l0_text, _ = parse_v1_markdown_xml(None)
-        assert isinstance(l1_dict, dict)
+        fct_dict, hdl_text, _ = parse_v1_markdown_xml(None)
+        assert isinstance(fct_dict, dict)
 
     @pytest.mark.high
     @pytest.mark.l1
@@ -119,9 +119,9 @@ class TestParseV1MarkdownXml:
             "### 现象与问题\n- A\n"
             "### 决策与方案\n- B\n"
         )
-        l1_dict, l0_text, _ = parse_v1_markdown_xml(llm_output)
-        assert isinstance(l1_dict, dict)
-        assert l0_text is None
+        fct_dict, hdl_text, _ = parse_v1_markdown_xml(llm_output)
+        assert isinstance(fct_dict, dict)
+        assert hdl_text is None
 
     @pytest.mark.high
     @pytest.mark.l1
@@ -133,9 +133,9 @@ class TestParseV1MarkdownXml:
             "### 现象与问题\n- 测试\n"
             "<core_change>无</core_change>"
         )
-        l1_dict, l0_text, _ = parse_v1_markdown_xml(llm_output)
-        assert isinstance(l1_dict, dict)
-        assert l0_text is None
+        fct_dict, hdl_text, _ = parse_v1_markdown_xml(llm_output)
+        assert isinstance(fct_dict, dict)
+        assert hdl_text is None
 
     @pytest.mark.high
     @pytest.mark.l1
@@ -147,9 +147,9 @@ class TestParseV1MarkdownXml:
             "### 现象与问题\n- 测试\n"
             "<core_change>本轮无新内容</core_change>"
         )
-        l1_dict, l0_text, _ = parse_v1_markdown_xml(llm_output)
-        assert isinstance(l1_dict, dict)
-        assert l0_text is None
+        fct_dict, hdl_text, _ = parse_v1_markdown_xml(llm_output)
+        assert isinstance(fct_dict, dict)
+        assert hdl_text is None
 
     @pytest.mark.medium
     @pytest.mark.l1
@@ -181,8 +181,8 @@ class TestParseV1MarkdownXml:
         meaningless = ["无", "无变化", "无明显变化", "none", "无核心变化", "无核心变更"]
         for val in meaningless:
             llm_output = f"### 现象与问题\n- 测试\n<core_change>{val}</core_change>"
-            l1_dict, l0_text, _ = parse_v1_markdown_xml(llm_output)
-            assert l0_text is None, f"Failed for core='{val}': l0_text={l0_text}"
+            fct_dict, hdl_text, _ = parse_v1_markdown_xml(llm_output)
+            assert hdl_text is None, f"Failed for core='{val}': hdl_text={hdl_text}"
 
     @pytest.mark.medium
     @pytest.mark.l1
@@ -195,8 +195,8 @@ class TestParseV1MarkdownXml:
             f"### 现象与问题\n{items}\n"
             "<core_change>测试</core_change>"
         )
-        l1_dict, l0_text, _ = parse_v1_markdown_xml(llm_output)
-        materials = l1_dict.get("new_materials", [])
+        fct_dict, hdl_text, _ = parse_v1_markdown_xml(llm_output)
+        materials = fct_dict.get("new_materials", [])
         assert len(materials) <= 3, f"Expected ≤3 items, got {len(materials)}"
 
     @pytest.mark.medium
@@ -210,10 +210,10 @@ class TestParseV1MarkdownXml:
             "### 后续行动\n- 采购\n"
             "<core_change>测试</core_change>"
         )
-        l1_dict, l0_text, _ = parse_v1_markdown_xml(llm_output)
-        assert isinstance(l1_dict, dict)
+        fct_dict, hdl_text, _ = parse_v1_markdown_xml(llm_output)
+        assert isinstance(fct_dict, dict)
         # consensus 字段应为空列表或不存在
-        consensus = l1_dict.get("consensus", [])
+        consensus = fct_dict.get("consensus", [])
         assert isinstance(consensus, list)
 
     @pytest.mark.medium
@@ -228,10 +228,10 @@ class TestParseV1MarkdownXml:
             "一些无关的尾随文字\n"
             "更多噪音"
         )
-        l1_dict, l0_text, _ = parse_v1_markdown_xml(llm_output)
-        assert isinstance(l1_dict, dict)
+        fct_dict, hdl_text, _ = parse_v1_markdown_xml(llm_output)
+        assert isinstance(fct_dict, dict)
         # 应当正确解析出 core_change
-        assert l0_text is not None
+        assert hdl_text is not None
 
     @pytest.mark.medium
     @pytest.mark.l1
@@ -245,9 +245,9 @@ class TestParseV1MarkdownXml:
             "### 后续行动\n- 采购\n"
             "<core_change>核心变更</core_change>"
         )
-        l1_dict, l0_text, _ = parse_v1_markdown_xml(llm_output)
-        assert isinstance(l1_dict, dict)
-        assert l0_text is not None
+        fct_dict, hdl_text, _ = parse_v1_markdown_xml(llm_output)
+        assert isinstance(fct_dict, dict)
+        assert hdl_text is not None
 
     @pytest.mark.medium
     @pytest.mark.l1
@@ -262,10 +262,10 @@ class TestParseV1MarkdownXml:
             "### 后续行动\n- 行动D\n"
             "<core_change>综合变更</core_change>"
         )
-        l1_dict, l0_text, _ = parse_v1_markdown_xml(llm_output)
-        assert isinstance(l1_dict, dict)
+        fct_dict, hdl_text, _ = parse_v1_markdown_xml(llm_output)
+        assert isinstance(fct_dict, dict)
         for key in ("new_materials", "objective_facts", "consensus", "todo"):
-            assert key in l1_dict, f"Missing key '{key}' in {l1_dict}"
+            assert key in fct_dict, f"Missing key '{key}' in {fct_dict}"
 
 
 # ══════════════════════════════════════════════════════════
@@ -381,8 +381,8 @@ class TestJsonToV1Markdown:
         }
         result = _json_to_v1_markdown(data)
         # 转换后可被 parse_v1_markdown_xml 回读
-        l1_dict, l0_text, _ = parse_v1_markdown_xml(result)
-        assert isinstance(l1_dict, dict)
+        fct_dict, hdl_text, _ = parse_v1_markdown_xml(result)
+        assert isinstance(fct_dict, dict)
 
 
 # ══════════════════════════════════════════════════════════

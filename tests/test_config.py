@@ -84,7 +84,7 @@ def test_tc_cf_006(engine):
 
 @pytest.mark.high
 @pytest.mark.l1
-def test_cfg_1_l1_temperature_default(monkeypatch):
+def test_cfg_1_fct_temperature_default(monkeypatch):
     """CFG-1: CA_L1_TEMPERATURE 默认值 == 0.3"""
     monkeypatch.delenv("CA_L1_TEMPERATURE", raising=False)
     from ca.config import Config
@@ -98,7 +98,7 @@ def test_cfg_1_l1_temperature_default(monkeypatch):
 
 @pytest.mark.high
 @pytest.mark.l1
-def test_cfg_2_l1_max_tokens_default(monkeypatch):
+def test_cfg_2_fct_max_tokens_default(monkeypatch):
     """CFG-2: CA_L1_MAX_TOKENS 默认值 == 800"""
     monkeypatch.delenv("CA_L1_MAX_TOKENS", raising=False)
     from ca.config import Config
@@ -112,7 +112,7 @@ def test_cfg_2_l1_max_tokens_default(monkeypatch):
 
 @pytest.mark.medium
 @pytest.mark.l1
-def test_cfg_3_l1_temperature_hot_reload(monkeypatch):
+def test_cfg_3_fct_temperature_hot_reload(monkeypatch):
     """CFG-3: CA_L1_TEMPERATURE 热重载"""
     monkeypatch.setenv("CA_L1_TEMPERATURE", "0.5")
     from ca.config import Config
@@ -126,7 +126,7 @@ def test_cfg_3_l1_temperature_hot_reload(monkeypatch):
 
 @pytest.mark.medium
 @pytest.mark.l1
-def test_cfg_4_l1_max_tokens_hot_reload(monkeypatch):
+def test_cfg_4_fct_max_tokens_hot_reload(monkeypatch):
     """CFG-4: CA_L1_MAX_TOKENS 热重载"""
     monkeypatch.setenv("CA_L1_MAX_TOKENS", "1200")
     from ca.config import Config

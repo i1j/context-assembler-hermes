@@ -464,7 +464,7 @@ Nodes (21): Store 层测试（TC-S-*）v4.4.0 适配版, max_turn_index     Step
 
 ### Community 164 - "Community 164"
 Cohesion: 0.11
-Nodes (24): _build_empty_result(), parse_v1_markdown_xml(), 解析 LLM 输出的 4 类 Markdown + XML 格式，返回 (l1_dict, l0_text, core_state)。      l1_dict, ca_prompts, L1 摘要系统重构 — parse_v1_markdown_xml 全场景单元测试  覆盖测试方案 §2.1 (P1-P15) + 交叉评审 §2.3 (X1-, test_p10_section_with_wu(), test_p11_max_3_items_per_section(), test_p12_trailing_noise() (+16 more)
+Nodes (24): _build_empty_result(), parse_v1_markdown_xml(), 解析 LLM 输出的 4 类 Markdown + XML 格式，返回 (l1_dict, Hdl, core_state)。      l1_dict, ca_prompts, L1 摘要系统重构 — parse_v1_markdown_xml 全场景单元测试  覆盖测试方案 §2.1 (P1-P15) + 交叉评审 §2.3 (X1-, test_p10_section_with_wu(), test_p11_max_3_items_per_section(), test_p12_trailing_noise() (+16 more)
 
 ### Community 168 - "Community 168"
 Cohesion: 0.67
@@ -472,11 +472,11 @@ Nodes (3): 纯文本拼接工具组摘要，不调 LLM。          Args:        
 
 ### Community 169 - "Community 169"
 Cohesion: 0.07
-Nodes (26): C-stage 末尾写入本轮新消息行的编码表。          只写行序≥1 的行（行序=0 的用户原文不记）。         conv_idx > _en, 返回 (response_text, finish_reason)。          所有重试均失败时返回 ("", "error")。, 返回 (response_text, finish_reason)。          所有重试均失败时返回 ("", "error")。, BackfillThread, 从 l2_text 中提取工具调用，回填为 tool_group 格式（v5）。, 从 l2_text 中提取工具调用，回填为 tool_group 格式（v5）。, 回填旧 per-tool 记录（legacy 兼容），转为 tool_group 格式。, 回填旧 per-tool 记录（legacy 兼容），转为 tool_group 格式。 (+18 more)
+Nodes (26): C-stage 末尾写入本轮新消息行的编码表。          只写行序≥1 的行（行序=0 的用户原文不记）。         conv_idx > _en, 返回 (response_text, finish_reason)。          所有重试均失败时返回 ("", "error")。, 返回 (response_text, finish_reason)。          所有重试均失败时返回 ("", "error")。, BackfillThread, 从 Elm 中提取工具调用，回填为 tool_group 格式（v5）。, 从 Elm 中提取工具调用，回填为 tool_group 格式（v5）。, 回填旧 per-tool 记录（legacy 兼容），转为 tool_group 格式。, 回填旧 per-tool 记录（legacy 兼容），转为 tool_group 格式。 (+18 more)
 
 ### Community 170 - "Community 170"
 Cohesion: 0.67
-Nodes (3): ca_init_contextassembler_extend_with_l2, 将 l2_text (JSON 消息数组) 展开到 result，标记 _turn_index。, 将 l2_text (JSON 消息数组) 展开到 result，标记 _turn_index。
+Nodes (3): ca_init_contextassembler_extend_with_l2, 将 Elm (JSON 消息数组) 展开到 result，标记 _turn_index。, 将 Elm (JSON 消息数组) 展开到 result，标记 _turn_index。
 
 ### Community 171 - "Community 171"
 Cohesion: 0.67
@@ -508,7 +508,7 @@ Nodes (3): ca_config_config_context_length_for_model, 返回压缩预算上限 =
 
 ### Community 198 - "Community 198"
 Cohesion: 0.67
-Nodes (3): ca_init_contextassembler_extend_l2_messages, 将 l2_text (JSON 消息数组) 展开到 messages，标记 _turn_index。, 将 l2_text (JSON 消息数组) 展开到 messages，标记 _turn_index。
+Nodes (3): ca_init_contextassembler_extend_l2_messages, 将 Elm (JSON 消息数组) 展开到 messages，标记 _turn_index。, 将 Elm (JSON 消息数组) 展开到 messages，标记 _turn_index。
 
 ### Community 199 - "Community 199"
 Cohesion: 0.67
@@ -560,7 +560,7 @@ Nodes (3): _engines: Dict[str, CAContextAssemblerPlugin], _engines_lock: threadi
 
 ### Community 218 - "Community 218"
 Cohesion: 0.29
-Nodes (7): ContextAssembler._build_aligned_outcomes, _format_tool_group_assembly, bypass turns -> None, cache.l0_texts[turn_index], cache.l1_texts[turn_index], cache.tool_group_l1_texts[, role==tool -> ''
+Nodes (7): ContextAssembler._build_aligned_outcomes, _format_tool_group_assembly, bypass turns -> None, cache.Hdls[turn_index], cache.Fcts[turn_index], cache.tool_group_Fcts[, role==tool -> ''
 
 ### Community 219 - "Community 219"
 Cohesion: 0.50
@@ -608,7 +608,7 @@ Nodes (3): , _deduplicate_messages, _msg_fingerprint
 
 ### Community 241 - "Community 241"
 Cohesion: 0.67
-Nodes (3): _format_tool_group_assembly, cache.tool_l1_texts / tool_l0_texts, ×N notation
+Nodes (3): _format_tool_group_assembly, cache.tool_Fcts / tool_Hdls, ×N notation
 
 ### Community 245 - "Community 245"
 Cohesion: 0.67
@@ -676,7 +676,7 @@ Nodes (31): ca, conftest, Integration tests for v5.2.1 features: forced topic sp
 
 ### Community 306 - "Community 306"
 Cohesion: 0.06
-Nodes (33): 1.1 双层结构, 1.2 三个存储分组, 1.3 数据流（graphify 动态边验证）, 1.4 运行时状态（session 20260613_105128_554cc1）, 1. Cache 架构总览, 2.1 发现, 2.2 处理, 2. l0_embedding 孤儿数据清理 (+25 more)
+Nodes (33): 1.1 双层结构, 1.2 三个存储分组, 1.3 数据流（graphify 动态边验证）, 1.4 运行时状态（session 20260613_105128_554cc1）, 1. Cache 架构总览, 2.1 发现, 2.2 处理, 2. hdl_embedding 孤儿数据清理 (+25 more)
 
 ### Community 307 - "Community 307"
 Cohesion: 0.06
@@ -792,7 +792,7 @@ Nodes (12): platform, psutil, ca_engine(), engine(), fd_checker(), _get_cpu_bran
 
 ### Community 335 - "Community 335"
 Cohesion: 0.17
-Nodes (9): A-stage Tail 保护：工具轮在 Tail 窗口内保留原文, 工具轮升级数不超过 CA_TOOL_MAX_UPGRADE_K, 预算计算精确化：系统消息、Head 工具组、Tail 正确扣除, 多 tool_calls 工具组整体 Token 正确计入 Head, 硬截断时工具组整体保留或整体移除，并插入正确提示, 将消息列表写入 store（l2_text），使 A‑stage assemble 可读取。, test_TC_A_022_downgrade_order(), TestToolTurnAStage (+1 more)
+Nodes (9): A-stage Tail 保护：工具轮在 Tail 窗口内保留原文, 工具轮升级数不超过 CA_TOOL_MAX_UPGRADE_K, 预算计算精确化：系统消息、Head 工具组、Tail 正确扣除, 多 tool_calls 工具组整体 Token 正确计入 Head, 硬截断时工具组整体保留或整体移除，并插入正确提示, 将消息列表写入 store（Elm），使 A‑stage assemble 可读取。, test_TC_A_022_downgrade_order(), TestToolTurnAStage (+1 more)
 
 ### Community 336 - "Community 336"
 Cohesion: 0.13
@@ -872,7 +872,7 @@ Nodes (10): design, ca-to-reasonix-analysis.md, retrospective-three-round-review
 
 ### Community 357 - "Community 357"
 Cohesion: 0.20
-Nodes (4): l1_text 含 tool_name, result_summary, status=error → 显示错误, 无 l1/l0，用 content 前 60 字, l1_text 是不可解析字符串 → 降级, TestFormatSingleTool
+Nodes (4): Fct 含 tool_name, result_summary, status=error → 显示错误, 无 l1/l0，用 content 前 60 字, Fct 是不可解析字符串 → 降级, TestFormatSingleTool
 
 ### Community 358 - "Community 358"
 Cohesion: 0.20
@@ -880,7 +880,7 @@ Nodes (4): 空 dict → True（4个材料字段全空）, 有材料字段（new_
 
 ### Community 359 - "Community 359"
 Cohesion: 0.22
-Nodes (9): AssemblyCache, _rebuild_executor: ThreadPoolExecutor, _snapshot: Optional[BM25Snapshot], l0_texts: Dict[int, str], l1_texts: Dict[int, str], tool_group_l0_texts: Dict[Tuple[int,int], str], tool_group_l1_texts: Dict[Tuple[int,int], str], tool_l0_texts: Dict[Tuple[int,int], str] (+1 more)
+Nodes (9): AssemblyCache, _rebuild_executor: ThreadPoolExecutor, _snapshot: Optional[BM25Snapshot], Hdls: Dict[int, str], Fcts: Dict[int, str], tool_group_Hdls: Dict[Tuple[int,int], str], tool_group_Fcts: Dict[Tuple[int,int], str], tool_Hdls: Dict[Tuple[int,int], str] (+1 more)
 
 ### Community 360 - "Community 360"
 Cohesion: 0.22
@@ -972,7 +972,7 @@ Nodes (4): post_llm_call 钩子 — PR2 新增 flush_tool_buffer 前置。, 先 
 
 ### Community 383 - "Community 383"
 Cohesion: 0.29
-Nodes (4): v5 schema：user + final assistant 行正确重建, v5 schema：assistant{tc} 行正确重建 tool_calls, 向后兼容：用旧参数 write_turn 写的 l2_text 也能正确重建, TestRebuildVersionRouting
+Nodes (4): v5 schema：user + final assistant 行正确重建, v5 schema：assistant{tc} 行正确重建 tool_calls, 向后兼容：用旧参数 write_turn 写的 Elm 也能正确重建, TestRebuildVersionRouting
 
 ### Community 384 - "Community 384"
 Cohesion: 0.29

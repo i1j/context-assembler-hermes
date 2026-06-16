@@ -69,16 +69,16 @@ class TestBM25Okapi:
 class TestAssemblyCache:
     def test_init(self):
         cache = AssemblyCache()
-        assert cache.l1_texts == {}
-        assert cache.l0_texts == {}
+        assert cache.fct_texts == {}
+        assert cache.hdl_texts == {}
 
     def test_add_turn(self):
         cache = AssemblyCache()
-        cache.add_turn(1, "l0_text", '{"core_change": "test"}')
+        cache.add_turn(1, "Hdl", '{"core_change": "test"}')
         l1, l0 = cache.get_snapshot_data()
         assert 1 in l1
         assert l1[1] == '{"core_change": "test"}'
-        assert l0[1] == "l0_text"
+        assert l0[1] == "Hdl"
 
     def test_add_tool_group(self):
         cache = AssemblyCache()
@@ -92,7 +92,7 @@ class TestAssemblyCache:
         cache.add_turn(1, "l0", "l1")
         l1, l0 = cache.get_snapshot_data()
         l1[2] = "hacked"
-        assert 2 not in cache.l1_texts
+        assert 2 not in cache.fct_texts
 
     def test_destroy(self):
         cache = AssemblyCache()
