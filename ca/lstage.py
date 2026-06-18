@@ -113,6 +113,8 @@ class BackfillThread(threading.Thread):
 
         fct_dict, hdl_text, core_state = parse_v1_markdown_xml(response_text)
         cleaned = clean_increment(fct_dict)
+        if not cleaned.get("changes"):
+            cleaned.setdefault("changes", [])
         if "core_change" not in cleaned:
             cleaned["core_change"] = "本轮无新内容"
         fct_json = json.dumps(cleaned, ensure_ascii=False)

@@ -35,7 +35,7 @@
 || **v5.0-pr4‑inject‑fix** | 2026-06-09 | 注入层微修复批 | read_turn_texts l1/l0 缺 api_call_count 过滤（同 turn 多工具组 l1 相同）；_format_group_summary thought+intent 重复；L0 工具组缺 "工具组：" 前缀；_format_l1_for_display 占位符噪声。 | **已修复** |
 | **v4.4.0‑ooda‑fix**    | 2026-06-03 | 修复：OODA 解析器前导冒号 | 在 `_extract_sections` content 提取后追加 `.lstrip(\":：　 \")`，去除全角/半角冒号。 | **已修复** |
 | **v5.2**               | 2026-06-13 | 缓存分析 + 注入重构 | ① hdl_embedding 孤儿数据清除（从未被消费，注释全部计算链路+删死代码 `retrieve_l0_upgrade`）② `tool_plan` 独立 tool 行决策（v5.2）：`_AssemblePlanResult.tool_plan`, `_compute_tool_plan_v2`, `_build_aligned_outcomes`/`_build_messages_from_plan` 签名扩展, `_format_tool_group_assembly` 精简为仅 header, tool 行输出 `[~/N/M]` 独立标签 ③ `_mutation_mode` 中 bg_review 轮由 `\" \"` 改为从 DB 读取 L1/L0 填充。详见 [v5.1 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md)。 | **发布** |
-| **v5.2.1**               | 2026-06-14 | 话题分割修复 + 自适应阈值 | ① `_add_bigrams` 集合无心化修复 (`sorted(s)`) ② `_compute_topic_groups` 新增 Jaccard 独立合并路径，默认 0.18，不依赖 todo_overlap ③ 自适应阈值模块：`_load_start_threshold`, `_compute_ideal_threshold`, `persist_ideal_threshold`，持久化至 `{ca_cache}/topic_threshold_meta.json` ④ 会话内阈值固定，跨会话加权漂移 (`0.6×last + 0.4×avg`) ⑤ `session_reset` 时持久化 ideal，`session_start` 时加载起始阈值 | **已实施** |
+|| **v5.2.1**               | 2026-06-14 | 话题分割修复 + 自适应阈值 | ① `_add_bigrams` 集合无心化修复 (`sorted(s)`) ② `_compute_topic_groups` 新增 Jaccard 独立合并路径，默认 0.18，不依赖 todo_overlap ③ 自适应阈值模块：`_load_start_threshold`, `_compute_ideal_threshold`, `persist_ideal_threshold`，持久化至 `{ca_cache}/topic_threshold_meta.json` ④ 会话内阈值固定，跨会话加权漂移 (`0.6×last + 0.4×avg`) ⑤ `session_reset` 时持久化 ideal，`session_start` 时加载起始阈值 | **已实施** |\n|| **v5.3.0**               | 2026-06-17 | Fct 提示词多对标签重构    | **FCT_GENERATION_PROMPT** 输出格式从「单个 `<stage_tag>` 合并多状态（`【已实施/计划】`）」改为「每对 `<stage_tag>`/`<core_change>` 仅含单一状态，多个事项=多对标签」。对应 `PAIR_PATTERN` 多对解析，`changes` 列表存储，`clean_increment`/`_extract_l0`/`_json_to_v1_markdown` 全链路适配。242 测试通过。 | **已实施** |
 
 ---
 
@@ -547,4 +547,4 @@ v4.2                  v4.3 → v4.3-s1 → v4.3-s2    v4.3.1 → v4.3.1 修订
 ||| 2026-06-12 | bg_review 内容清空 + 尾区保护 | mutation 循环内按位置边界保护尾区 bg_review | v5.1 |
 || 2026-06-09 | 工具组 L2：thought 原文 → 完整消息序列展开 | `_extend_with_l2` 替代只提 thought；covered 集加 `(turn_idx, "tool")` 防重复；L1 fallback 用 `_format_group_summary` 替代 raw JSON `l1_display` | v5.0-pr3 |
 
-| **v5.5.0**            | 2026-06-16 | 命名统一        | 全部 `l1_text`/`l0_text`/`l2_text` 重命名为 `Fct`/`Hdl`/`Elm`（DB 列名 + Python 标识符 + 文档术语）。`l1_embedding`/`l0_embedding`/`l2_tokens` 同步重命名。279 个 DB 文件 ALTER TABLE 迁移。| 
+|| **v5.5.0**            | 2026-06-16 | 命名统一        | ① `Fct`/`Hdl`/`Elm` 重命名 + 279 DB ALTER TABLE 迁移 ② Bug 修复 4 项：`@staticmethod` 错标、fallback 占位符、`fct_text` 残留、`generate_group_summary` 截断（详见 `docs/debug/`）③ 与 source project 分化差异全量归档 | 发布 |

@@ -1,0 +1,71 @@
+---
+title: CA-OV 话题提交
+slug: ca-ov-topic-submit
+category: architecture
+version_introduced: v5.5
+status: 已实装
+decisions: ["ca-ov-topic-submit", "topic-grade-manager"]
+depends_on: ["topic-segmentation", "topic-grade-switch"]
+updated: 2026-06-18
+---
+
+## 问题
+
+话题分割后的结构在 session 结束后丢失。如果要跨 session 持久化话题边界和级别信息，需要一个外部存储。OpenViking 作为 Hermes 的长期记忆平台，适合存储话题数据。
+
+## 决策
+
+### 备选方案
+
+1. **同步提交** — 阻塞用户路径，不可接受
+2. **不持久化 OV** — session 重启丢失话题信息
+3. **每次话题更新都提交** — 频率过高，OV 写压力大
+4. **fire-and-forget 异步提交 + 话题切换时触发（选定）**
+
+### 选定方案
+
+```python
+def _topic_submit_worker(self, topic_data: dict):
+    \"\"\"fire-and-forget 线程提交话题到 OV\"\"\"
+    try:
+        openviking.add_resource(
+            path=f"viking://resources/hermes/ca/topics/{session_id}/{topic_id}",
+            description=topic_data["title"],
+        )
+    except Exception as e:
+        logger.warning(f"[CA] topic submit failed: {e}")
+```
+
+**提交时机**：话题切换时（`TopicGradeManager` 检测到新话题时触发）
+
+**提交内容**：
+- 话题标题（从 user 输入提取）
+- 形心向量（topic centroid）
+- turn 范围（起始 turn ~ 结束 turn）
+- 话题级摘要（可选）
+
+**线程管理**：
+- 独立的 daemon 线程
+- fire-and-forget 不等待结果
+- 失败日志记录，不重试
+
+## 数据验证
+
+```bash
+# 在 OV 中搜索已提交的话题
+viking_search("topic hermes ca topic")
+# 或查看特定 session 的话题
+viking_list("viking://resources/hermes/ca/topics/<session_id>/")
+```
+
+## 优点
+
+- 非阻塞：用户路径不受影响
+- 持久化：session 重启后话题信息可恢复
+- 失败安全：提交失败不影响主流程
+
+## 约束 / 已知问题
+
+- OV 不可用时话题信息丢失（不降级，主流程继续）
+- 提交频率控制依赖话题切换频率，不会过于频繁
+- 当前无重试机制，临时网络抖动可能导致丢失

@@ -1,29 +1,23 @@
 """
 ContextAssembler v4.6.0 话题拣选重构测试套件
-覆盖：话题分割、三级定级、TopicRetriever、助手函数、Plan v2、query_embedding、TOPIC_* 配置
+覆盖：三级定级、TopicRetriever、Plan v2、query_embedding、TOPIC_* 配置
 
 特征:
-- _compute_topic_groups() — R1 BG检测 + R2 Jaccard链合并 + 形心计算
 - _grade_topics_by_radius() — 内球L2/外球L1/远距离L0
 - TopicRetriever() — per-topic BM25 + vector + RRF
-- _is_bg_turn() / _jaccard_tokens() — 助手函数
 - _compute_turn_plan_v2() — 话题级Plan决策规则 + topic_boost
 - query_embedding 列 — Schema v3→v4
-- TOPIC_JACCARD_ENTRY / TOPIC_JACCARD_CHAIN / TOPIC_RADIUS_WEIGHT / TOPIC_MAX_UPGRADE / TOPIC_BG_LEVEL
+- TOPIC_RADIUS_WEIGHT / TOPIC_BG_LEVEL
 """
 import json
-import os
-import math
-from typing import Dict, List, Set
-from unittest.mock import patch, MagicMock
+from typing import Dict, List
+from unittest.mock import MagicMock
 
 import pytest
 
 from ca import ContextAssembler
 from ca.config import Config
-from ca.retrieval import (
-    TopicRetriever, cosine_similarity, cosine_similarity_batch, _rrf_fuse
-)
+from ca.retrieval import TopicRetriever
 
 pytestmark = pytest.mark.v460
 
@@ -34,170 +28,11 @@ TEST_SESSION = "test_v460"
 # 0. Mock 帮助函数
 # =============================================================================
 
-def _make_l1(core_change: str = "", new_materials: List[str] = None,
-             objective_facts: str = "", consensus: str = "",
-             todo: list = None) -> str:
-    return json.dumps({
-        "core_change": core_change,
-        "new_materials": new_materials or [],
-        "objective_facts": objective_facts,
-        "consensus": consensus,
-        "todo": todo or [],
-    }, ensure_ascii=False)
 
 
 def _fake_embed(dim: int = 768) -> List[float]:
     """生成固定向量，方便确定形心位置"""
     return [0.1 + (i / dim) * 0.0001 for i in range(dim)]
-
-
-# =============================================================================
-# 1. _compute_topic_groups — 话题分割
-# =============================================================================
-
-class TestComputeTopicGroups:
-    """话题分割：R1 BG检测 + R2 Jaccard链合并 + 形心计算"""
-
-    def test_tg_001_empty(self):
-        """空输入 → 空返回"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        turn_to_topic, topic_data = engine._compute_topic_groups({}, {})
-        assert turn_to_topic == {}
-        assert topic_data == {}
-        engine.destroy()
-
-    def test_tg_002_single_turn(self):
-        """单轮 → 1 topic, 非BG"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        l1 = {1: _make_l1("讨论A", ["数据1"])}
-        emb = {1: _fake_embed()}
-        turn_to_topic, topic_data = engine._compute_topic_groups(l1, emb)
-        assert turn_to_topic == {1: 1}
-        assert topic_data[1]["is_bg"] is False
-        assert "讨论A" in topic_data[1]["agg_text"]
-        engine.destroy()
-
-    def test_tg_003_bg_merge(self):
-        """连续BG → 合并到同一 topic"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        l1 = {
-            1: json.dumps({"bg": True}),
-            2: json.dumps({"bg": True}),
-        }
-        turn_to_topic, topic_data = engine._compute_topic_groups(l1, {})
-        # 第0轮不含 bg 字段 → is_bg=False, 第1轮 bg=True
-        turn_to_topic_expected = {1}
-        assert len(set(turn_to_topic.values())) <= 2  # 最多2个topic
-        engine.destroy()
-
-    def test_tg_004_bg_to_real_split(self):
-        """BG → 实义 → 分裂新topic"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        l1 = {
-            1: json.dumps({"bg": True}),
-            2: _make_l1(new_materials=["新讨论"]),
-        }
-        emb = {1: _fake_embed(), 2: _fake_embed()}
-        turn_to_topic, topic_data = engine._compute_topic_groups(l1, emb)
-        tids = set(turn_to_topic.values())
-        assert len(tids) == 2, f"Expected 2 topics, got {len(tids)}: {turn_to_topic}"
-        # turn 1 (BG类) 和 turn 2 应在不同 topic
-        assert turn_to_topic[1] != turn_to_topic[2]
-        engine.destroy()
-
-    def test_tg_005_real_to_bg_split(self):
-        """实义 → BG → 分裂新topic"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        l1 = {
-            1: _make_l1(new_materials=["正事"]),
-            2: json.dumps({"bg": True}),
-        }
-        emb = {1: _fake_embed()}
-        turn_to_topic, topic_data = engine._compute_topic_groups(l1, emb)
-        assert turn_to_topic[1] != turn_to_topic[2]
-        engine.destroy()
-
-    def test_tg_006_jaccard_chain_merge(self, monkeypatch):
-        """双实义 + Jaccard ≥ TOPIC_JACCARD_CHAIN + todo重叠 → 链内合并"""
-        monkeypatch.setattr(Config, "TOPIC_JACCARD_CHAIN", 0.1)
-        monkeypatch.setattr(Config, "TOPIC_JACCARD_ENTRY", 0.05)
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        # 两轮 todo 与 core_change/new_materials 精确匹配 → todo_overlap ≥1
-        # 用纯 ASCII token 避免 CJK re.findall 问题
-        l1 = {
-            1: _make_l1(new_materials=["fix_bug"], todo=["fix_bug"]),
-            2: _make_l1(new_materials=["fix_bug", "more"], todo=["fix_bug"]),
-        }
-        emb = {1: _fake_embed(), 2: _fake_embed()}
-        turn_to_topic, topic_data = engine._compute_topic_groups(l1, emb)
-        tids = set(turn_to_topic.values())
-        assert len(tids) == 1, f"Expected 1 topic (chain merge), got {len(tids)}: {turn_to_topic}"
-        engine.destroy()
-
-    def test_tg_007_jaccard_no_merge(self, monkeypatch):
-        """双实义 + Jaccard < entry + 无todo重叠 → 分裂"""
-        monkeypatch.setattr(Config, "TOPIC_JACCARD_ENTRY", 0.5)
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        l1 = {
-            1: _make_l1(new_materials=["天气真好"]),
-            2: _make_l1(new_materials=["数据库优化"]),
-        }
-        emb = {1: _fake_embed(), 2: _fake_embed()}
-        turn_to_topic, topic_data = engine._compute_topic_groups(l1, emb)
-        tids = set(turn_to_topic.values())
-        assert len(tids) == 2, f"Expected 2 topics, got {len(tids)}: {turn_to_topic}"
-        engine.destroy()
-
-    def test_tg_008_todo_overlap_merge(self, monkeypatch):
-        """todo重叠 ≥1 且 Jaccard ≥ entry → 合并"""
-        monkeypatch.setattr(Config, "TOPIC_JACCARD_ENTRY", 0.01)
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        l1 = {
-            1: _make_l1(new_materials=["some_data"], todo=["fix_data"]),
-            2: _make_l1(new_materials=["fix_data", "other"], todo=["fix_data"]),
-        }
-        emb = {1: _fake_embed(), 2: _fake_embed()}
-        turn_to_topic, topic_data = engine._compute_topic_groups(l1, emb)
-        tids = set(turn_to_topic.values())
-        assert len(tids) == 1, f"Expected 1 topic (todo overlap), got {len(tids)}"
-        engine.destroy()
-
-    def test_tg_009_centroid_computed(self):
-        """非BG topic 有形心，BG 无形心"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        l1 = {1: _make_l1(new_materials=["正事"])}
-        emb = {1: _fake_embed()}
-        _, topic_data = engine._compute_topic_groups(l1, emb)
-        assert topic_data[1]["centroid"] is not None
-        assert topic_data[1]["is_bg"] is False
-        engine.destroy()
-
-    def test_tg_010_centroid_single_turn_zero_dist(self):
-        """单轮 topic → max_intra=0.0"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        l1 = {1: _make_l1(new_materials=["唯一讨论"])}
-        emb = {1: _fake_embed()}
-        _, topic_data = engine._compute_topic_groups(l1, emb)
-        assert topic_data[1]["max_intra"] == 0.0
-        assert topic_data[1]["centroid"] is not None
-        engine.destroy()
-
-    def test_tg_011_nearest_centroid_dist(self):
-        """多topic时有 nearest_centroid_dist > 0"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        l1 = {
-            1: _make_l1(new_materials=["天气"]),
-            2: _make_l1(new_materials=["数据库"]),
-        }
-        # 用不同方向向量确保形心不同
-        emb1 = [0.1] * 768
-        emb2 = [0.9] * 768
-        turn_to_topic, topic_data = engine._compute_topic_groups(l1, {1: emb1, 2: emb2})
-        assert turn_to_topic[1] != turn_to_topic[2]
-        # 两个 topic 都有非零 nearest_centroid_dist
-        for tid in topic_data:
-            assert isinstance(topic_data[tid]["nearest_centroid_dist"], (int, float))
-        engine.destroy()
 
 
 # =============================================================================
@@ -372,95 +207,6 @@ class TestTopicRetriever:
         tr = TopicRetriever(MagicMock(), {}, td)
         result = tr.retrieve("test", _fake_embed(), max_k=5)
         assert result == set()
-
-
-# =============================================================================
-# 4. _is_bg_turn — BG 检测助手函数
-# =============================================================================
-
-class TestIsBgTurn:
-    """BG 字段检测"""
-
-    def test_bg_001_none(self):
-        """None → True (保守)"""
-        from ca import ContextAssembler
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        assert engine._is_bg_turn(None) is True
-        engine.destroy()
-
-    def test_bg_002_empty(self):
-        """空 dict → True（4个材料字段全空）"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        assert engine._is_bg_turn({}) is True
-        engine.destroy()
-
-    def test_bg_003_has_bg_field(self):
-        """含 bg=True → True"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        assert engine._is_bg_turn({"bg": True}) is True
-        engine.destroy()
-
-    def test_bg_004_has_material(self):
-        """有材料字段（new_materials 非空）→ False"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        assert engine._is_bg_turn({"new_materials": ["物料"]}) is False
-        engine.destroy()
-
-    def test_bg_005_core_change_alone(self):
-        """仅有 core_change → True（4材料字段全空）"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        assert engine._is_bg_turn({"core_change": "讨论"}) is True
-        engine.destroy()
-
-    def test_bg_006_has_todo(self):
-        """有 todo → False"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        assert engine._is_bg_turn({"todo": ["修复bug"]}) is False
-        engine.destroy()
-
-
-# =============================================================================
-# 5. _jaccard_tokens — Jaccard 相似度计算
-# =============================================================================
-
-class TestJaccardTokens:
-    """Jaccard token集合相似度"""
-
-    def test_jac_001_identical(self):
-        """相同字段 → 1.0"""
-        from ca import ContextAssembler
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        fields = {"core_change": "a b c", "new_materials": ["d", "e"]}
-        j = engine._jaccard_tokens(fields, fields)
-        assert j == 1.0 or abs(j - 1.0) < 0.01, f"Expected ~1.0, got {j}"
-        engine.destroy()
-
-    def test_jac_002_no_overlap(self):
-        """完全不同的字段 → 0.0"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        a = {"core_change": "天气"}
-        b = {"core_change": "数据库"}
-        j = engine._jaccard_tokens(a, b)
-        assert j == 0.0, f"Expected 0.0, got {j}"
-        engine.destroy()
-
-    def test_jac_003_partial_overlap(self):
-        """部分重叠 → 0 < j < 1"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        a = {"core_change": "修复bug 改数据"}
-        b = {"core_change": "修复bug 调优"}
-        j = engine._jaccard_tokens(a, b)
-        assert 0 < j < 1, f"Expected 0 < j < 1, got {j}"
-        engine.destroy()
-
-    def test_jac_004_include_materials(self):
-        """new_materials 也参与分词"""
-        engine = ContextAssembler(db_path=":memory:", session_id="t")
-        a = {"core_change": "不同", "new_materials": ["相同物料"]}
-        b = {"core_change": "无关", "new_materials": ["相同物料"]}
-        j = engine._jaccard_tokens(a, b)
-        assert j > 0, f"Expected >0 (materials overlap), got {j}"
-        engine.destroy()
 
 
 # =============================================================================
@@ -711,7 +457,7 @@ class TestTopicConfig:
 
     def test_cfg_001_defaults(self):
         """5个TOPIC_* 配置默认值正确"""
-        assert Config.TOPIC_JACCARD_ENTRY == 0.03, f"Got {Config.TOPIC_JACCARD_ENTRY}"
+        assert Config.TOPIC_JACCARD_ENTRY == 0.02, f"Got {Config.TOPIC_JACCARD_ENTRY}"
         assert Config.TOPIC_JACCARD_CHAIN == 0.04, f"Got {Config.TOPIC_JACCARD_CHAIN}"
         assert Config.TOPIC_RADIUS_WEIGHT == 2.0, f"Got {Config.TOPIC_RADIUS_WEIGHT}"
         assert Config.TOPIC_MAX_UPGRADE == 10, f"Got {Config.TOPIC_MAX_UPGRADE}"
@@ -750,4 +496,7 @@ class TestTopicConfig:
         assert Config.TOPIC_JACCARD_ENTRY == 0.08
         monkeypatch.undo()
         Config.validate()
+
+
+
 

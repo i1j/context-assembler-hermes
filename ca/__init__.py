@@ -31,7 +31,7 @@ from .cache import AssemblyCache, CacheBuilder, BM25Snapshot, tokenise
 from .retrieval import Retriever, cosine_similarity
 from .embedding import EmbeddingClient
 from .ooda_parser import OODAParser
-from .post_process import robust_json_parse, clean_increment, parse_v1_markdown_xml, _safe_truncate, ItemState
+from .post_process import robust_json_parse, clean_increment, parse_v1_markdown_xml, _safe_truncate
 from .prompts import FCT_GENERATION_PROMPT
 from .store import format_previous_summary_for_prompt
 from .stats import AssembleStats
@@ -167,6 +167,8 @@ class _TopicSwitchData:
     tool_group_l1: Dict[str, str]
 
 
+
+
 @dataclass
 class ContextAssembler:
     """Hermes 上下文组装引擎，支持工具轮摘要与异步补全。"""
@@ -188,10 +190,6 @@ class ContextAssembler:
         # (removed _tool_buffer, _api_sequence — E-stage write-on-receive in v5.0)
         self.stats = AssembleStats()
         self._original_messages: Optional[List[Dict]] = None
-        self._ideal_threshold_this_session: Optional[float] = None
-
-        # 话题分割阈值（会话内固定，跨会话自适应）
-        self._topic_jaccard_threshold: float = self._load_start_threshold()
 
         from .lstage import BackfillThread
         self._dialogue_backfill = BackfillThread(self, 'dialogue', Config.BACKFILL_DIALOGUE_RATE)
@@ -256,6 +254,15 @@ class ContextAssembler:
     # ---------- F‑stage ----------
     def process_turn_f_stage(self, turn_index: int) -> int:
         """F-stage 入口：异步启动 _run_f_stage。turn_index 由调用者确定。"""
+        # 如果 turn 的 Fct 已在 E-stage 写入（如 bg_review），跳过 F-stage
+        from .store import get_turn_ca_rows
+        existing = get_turn_ca_rows(self.store, self._session_id, turn_index)
+        if existing:
+            for seq, role, fr, tc, fct in existing:
+                if role == "user" and fct:
+                    logger.info("[CA] process_turn_f_stage: turn %d already has Fct, skipping F-stage", turn_index)
+                    return turn_index
+
         with self._task_lock:
             if turn_index in self._pending_tasks and self._pending_tasks[turn_index].is_alive():
                 logger.info("[CA] process_turn_f_stage: turn %d already pending, returning", turn_index)
@@ -321,6 +328,7 @@ class ContextAssembler:
                 if not _brief:
                     _brief = "后台审查"
                 cleaned = {
+                    "changes": [{"stage_tag": "已实施", "core_change": _brief}],
                     "core_change": _brief,
                     "_assemble_status": 0
                 }
@@ -336,12 +344,14 @@ class ContextAssembler:
                     finish_reason = "length"
 
                 # 截断检测（在 _call_llm_for_fct 返回后进行，即使被 mock 也能覆盖）
-                if finish_reason == "length" or not response_text.strip().endswith("</core_change>"):
+                _has_stage_tag = "<stage_tag>" in response_text
+                if finish_reason == "length" or (_has_stage_tag and not response_text.strip().endswith("</core_change>")):
                     logger.warning("[CA-METRIC] ca.fct.truncated_fallback: turn=%d, finish_reason=%s, len=%d",
                                    turn_index, finish_reason, len(response_text))
                     self.stats.fct_truncated_fallback += 1
                     # 截断降级：写入待补全记录
                     truncated_cleaned = {
+                        "changes": [],
                         "core_change": "本轮无新内容",
                         "new_materials": [],
                         "objective_facts": [],
@@ -388,6 +398,7 @@ class ContextAssembler:
         except Exception as e:
             logger.error("F‑stage crash turn %d: %s", turn_index, e, exc_info=True)
             fallback = json.dumps({
+                "changes": [],
                 "core_change": user_elm or "本轮无新内容",
                 "_assemble_status": 0,
                 "new_materials": [], "objective_facts": [],
@@ -423,7 +434,9 @@ class ContextAssembler:
                              finish_reason: str = "tool_calls",
                              usage: Optional[Dict] = None) -> None:
         """v5: 写 thought 行 L2 + tool 占位行 + thought L1。不经过 buffer。"""
-        thought = getattr(assistant_message, "content", "") or ""
+        # DeepSeek v4: thought 思考链在 provider_data["reasoning_content"]，不在 content
+        pd = getattr(assistant_message, "provider_data", None) or {}
+        thought = pd.get("reasoning_content", "") or getattr(assistant_message, "content", "") or ""
         tool_calls = getattr(assistant_message, "tool_calls", None) or []
         tool_defs = []
         for tc in tool_calls:
@@ -568,255 +581,6 @@ class ContextAssembler:
         if overhead > 0:
             self._system_overhead = overhead
 
-    def _jaccard_tokens(self, fields_a: Dict, fields_b: Dict) -> float:
-        """计算两个对话轮 L1 5 字段的 Jaccard 相似度。
-        中文用字符二元组，英文用原词，union 全部 5 字段。
-        """
-        def _tokenize_field(val) -> set:
-            tokens = set()
-            if isinstance(val, str):
-                for ch in val:
-                    if '\u4e00' <= ch <= '\u9fff':
-                        tokens.add(ch)
-                    else:
-                        for word in ch.split():
-                            if word.strip():
-                                tokens.add(word.lower())
-            elif isinstance(val, list):
-                for item in val:
-                    if isinstance(item, str):
-                        for ch in item:
-                            if '\u4e00' <= ch <= '\u9fff':
-                                tokens.add(ch)
-                            else:
-                                for word in ch.split():
-                                    if word.strip():
-                                        tokens.add(word.lower())
-            return tokens
-
-        bag_a: set = set()
-        bag_b: set = set()
-        for key in ("core_change", "new_materials", "objective_facts", "consensus", "todo"):
-            bag_a.update(_tokenize_field(fields_a.get(key)))
-            bag_b.update(_tokenize_field(fields_b.get(key)))
-
-        # 中文二元组提升（对 CJK 序列做字符二元组）
-        def _add_bigrams(s: set) -> set:
-            # 排序保证 `''.join(s)` 确定性——集合无心化导致跨运行 Jaccard 不同
-            cjk_chars = [c for c in ''.join(sorted(s)) if '\u4e00' <= c <= '\u9fff']
-            bigrams = set()
-            for i in range(len(cjk_chars) - 1):
-                bigrams.add(cjk_chars[i] + cjk_chars[i + 1])
-            return s | bigrams
-
-        bag_a = _add_bigrams(bag_a)
-        bag_b = _add_bigrams(bag_b)
-
-        union_len = len(bag_a | bag_b)
-        if union_len == 0:
-            return 0.0
-        return len(bag_a & bag_b) / union_len
-
-    def _is_bg_turn(self, fct_fields: Optional[Dict]) -> bool:
-        """R1 检测：4 个材料字段全空 → BG 轮。"""
-        if fct_fields is None:
-            return True
-        for key in ("new_materials", "objective_facts", "consensus", "todo"):
-            val = fct_fields.get(key)
-            if isinstance(val, list) and len(val) > 0:
-                return False
-            if isinstance(val, str) and val.strip():
-                return False
-        return True
-
-    def _compute_topic_groups(self, fct_texts: Dict[int, str],
-                               fct_embeddings: Dict[int, List[float]],
-                               jaccard_merge_threshold: float = 0.07,
-                               forced_split_turns: Optional[Set[int]] = None) -> Tuple[Dict[int, int], Dict]:
-        """话题分割：R1（BG 检测）+ R2（Jaccard + todo 链）。
-        
-        Returns:
-            turn_to_topic: Dict[turn_index → topic_id]
-            topic_data: Dict[topic_id → {
-                "turn_indices": [...],
-                "agg_text": str,        # topic 内 5 字段拼接文本
-                "centroid": [...],      # topic 形心
-                "max_intra": float,     # topic 内最大形心距离
-                "is_bg": bool,
-                "nearest_centroid_dist": float,  # 最近邻异 topic 形心距离
-            }]
-        """
-        sorted_turns = sorted(fct_texts.keys())
-        if not sorted_turns:
-            return {}, {}
-
-        # 解析每个对话轮的 L1 JSON
-        turn_fields: Dict[int, Optional[Dict]] = {}
-        for t in sorted_turns:
-            try:
-                turn_fields[t] = json.loads(fct_texts[t])
-            except (json.JSONDecodeError, TypeError):
-                turn_fields[t] = None
-
-        # 首次扫描：R1 BG 分类（字段存在性）
-        turn_bg: Dict[int, bool] = {}
-        for t in sorted_turns:
-            turn_bg[t] = self._is_bg_turn(turn_fields[t])
-
-        # R1+R2 合并：逐轮扫描
-        turn_to_topic: Dict[int, int] = {}
-        topic_counter = 1
-        chain_turns: List[int] = []  # 当前链中的对话轮索引
-
-        def _start_new_topic(turn_idx: int) -> None:
-            nonlocal topic_counter, chain_turns
-            topic_counter += 1
-            chain_turns = [turn_idx]
-            turn_to_topic[turn_idx] = topic_counter
-
-        def _extends_chain(turn_idx: int) -> None:
-            chain_turns.append(turn_idx)
-            turn_to_topic[turn_idx] = topic_counter
-
-        # 第 0 轮
-        if sorted_turns:
-            chain_turns = [sorted_turns[0]]
-            turn_to_topic[sorted_turns[0]] = topic_counter
-
-        for i in range(1, len(sorted_turns)):
-            turn = sorted_turns[i]
-            prev = sorted_turns[i - 1]
-            prev_bg = turn_bg[prev]
-            curr_bg = turn_bg[turn]
-
-            if prev_bg and curr_bg:
-                # 连续 BG → 合并
-                _extends_chain(turn)
-            elif prev_bg and not curr_bg:
-                # BG → 实义 → 分裂
-                _start_new_topic(turn)
-            elif not prev_bg and curr_bg:
-                # 实义 → BG → 分裂
-                _start_new_topic(turn)
-            else:
-                # 双实义：R2 Jaccard + todo 链 + 强制切换
-                # 强制切换优先：用户消息含话题切换短语时无条件分裂
-                if forced_split_turns and turn in forced_split_turns:
-                    _start_new_topic(turn)
-                    logger.debug("[CA] forced topic split at turn %d", turn)
-                    continue
-
-                prev_fields = turn_fields[prev]
-                curr_fields = turn_fields[turn]
-                
-                j = self._jaccard_tokens(prev_fields or {}, curr_fields or {})
-                
-                # todo 重叠检测
-                prev_todo = set()
-                if prev_fields:
-                    todo_val = prev_fields.get("todo", [])
-                    if isinstance(todo_val, list):
-                        prev_todo = set(str(v) for v in todo_val)
-                    elif isinstance(todo_val, str):
-                        prev_todo = {todo_val}
-                
-                curr_core = set()
-                if curr_fields:
-                    core = curr_fields.get("core_change", "")
-                    if isinstance(core, str):
-                        curr_core.add(core)
-                    new_mat = curr_fields.get("new_materials", [])
-                    if isinstance(new_mat, list):
-                        curr_core.update(str(v) for v in new_mat)
-                
-                todo_overlap = prev_todo & curr_core
-                has_todo_overlap = len(todo_overlap) >= 1
-
-                # 在链中判断
-                is_in_chain = len(chain_turns) > 1
-                
-                if has_todo_overlap and j >= Config.TOPIC_JACCARD_CHAIN and is_in_chain:
-                    _extends_chain(turn)
-                elif has_todo_overlap and j >= Config.TOPIC_JACCARD_ENTRY:
-                    _extends_chain(turn)
-                elif j >= jaccard_merge_threshold:
-                    # Jaccard 独立合并路径：不依赖 todo_overlap，用于长对话同话题扩展
-                    _extends_chain(turn)
-                else:
-                    _start_new_topic(turn)
-
-        # 构建 topic_data
-        topic_data: Dict[int, Dict] = {}
-        for t_idx, topic_id in turn_to_topic.items():
-            if topic_id not in topic_data:
-                topic_data[topic_id] = {
-                    "turn_indices": [],
-                    "agg_text": "",
-                    "centroid": None,
-                    "max_intra": 0.0,
-                    "is_bg": True,
-                    "nearest_centroid_dist": 0.0,
-                }
-            td = topic_data[topic_id]
-            td["turn_indices"].append(t_idx)
-            if not turn_bg[t_idx]:
-                td["is_bg"] = False
-            # 累加 agg_text
-            fields = turn_fields.get(t_idx)
-            if fields:
-                parts = []
-                for key in ("core_change", "new_materials", "objective_facts", "consensus", "todo"):
-                    val = fields.get(key)
-                    if isinstance(val, list):
-                        parts.append(" ".join(str(v) for v in val))
-                    elif val:
-                        parts.append(str(val))
-                if td["agg_text"]:
-                    td["agg_text"] += " | "
-                td["agg_text"] += " ".join(parts)
-
-        # 计算 topic 形心
-        for topic_id, td in topic_data.items():
-            if not td["is_bg"]:
-                emb_list = []
-                for t_idx in td["turn_indices"]:
-                    if t_idx in fct_embeddings:
-                        emb = fct_embeddings[t_idx]
-                        if emb:
-                            emb_list.append(emb)
-                if emb_list:
-                    n = len(emb_list)
-                    centroid = [sum(emb[i] for emb in emb_list) / n for i in range(len(emb_list[0]))]
-                    td["centroid"] = centroid
-                    if n == 1:
-                        # 单轮话题：自身到形心的距离精确为 0
-                        td["max_intra"] = 0.0
-                    else:
-                        max_dist = 0.0
-                        for emb in emb_list:
-                            d = 1.0 - cosine_similarity(emb, centroid)
-                            max_dist = max(max_dist, d)
-                        td["max_intra"] = max_dist
-
-        # 计算最近邻形心距离
-        centroids = {tid: td["centroid"] for tid, td in topic_data.items()
-                     if td["centroid"] is not None}
-        for topic_id, td in topic_data.items():
-            if td["centroid"] is None:
-                continue
-            min_dist = float("inf")
-            for other_id, other_centroid in centroids.items():
-                if other_id == topic_id:
-                    continue
-                d = 1.0 - cosine_similarity(td["centroid"], other_centroid)
-                min_dist = min(min_dist, d)
-            td["nearest_centroid_dist"] = min_dist if min_dist != float("inf") else 0.0
-
-        logger.info("[CA] topic segmentation: %d topics from %d dialogue turns (BG=%d)",
-                     len(topic_data), len(sorted_turns),
-                     sum(1 for td in topic_data.values() if td["is_bg"]))
-        return turn_to_topic, topic_data
-
     def _grade_topics_by_radius(self, turn_to_topic: Dict[int, int],
                                  topic_data: Dict,
                                  fct_embeddings: Dict[int, List[float]],
@@ -908,6 +672,9 @@ class ContextAssembler:
             return False
         try:
             data = json.loads(fct_text)
+            changes = data.get("changes", [])
+            if changes:
+                return True
             core = data.get("core_change", "")
             return bool(core and core != "本轮无新内容")
         except (json.JSONDecodeError, TypeError, AttributeError):
@@ -943,7 +710,11 @@ class ContextAssembler:
                 if pat in fct_text:
                     return ""
             return fct_text
-        lines = [core]
+        changes = data.get("changes", [])
+        if changes:
+            lines = [f"【{c['stage_tag']}】{c['core_change']}" for c in changes]
+        else:
+            lines = [core]
         for key in ("new_materials", "objective_facts"):
             items = data.get(key, [])
             if items:
@@ -1006,21 +777,24 @@ class ContextAssembler:
         return (response_text, finish_reason)
 
     def _extract_l0(self, fct_dict):
-        core = fct_dict.get("core_change", "")
+        changes = fct_dict.get("changes", [])
+        if changes:
+            core = "；".join(c["core_change"] for c in changes)
+        else:
+            core = fct_dict.get("core_change", "")
+            if core:
+                # 旧格式兼容：去掉【计划】/【探讨】开头的续写段落
+                _first_low = len(core)
+                for _tag in ("【计划】", "【探讨】"):
+                    _idx = core.find(_tag)
+                    if 0 < _idx < _first_low:
+                        _first_low = _idx
+                if _first_low < len(core):
+                    core = core[:_first_low].rstrip()
         if not core or core in ("无", "本轮无新内容"):
             logger.warning("[CA-METRIC] ca.l0.skipped_empty: turn=%d", self._turn_counter)
             return "无"
         result = _safe_truncate(core, 100)
-        # 去掉【计划】/【探讨】开头的续写段落，L0 仅保留首要状态摘要。
-        # 例如 core_change="【已实施】xxx\n【计划】yyy" → L0 只取 "【已实施】xxx"。
-        # 若整段都是【计划】/【探讨】（idx==0），则保留不变。
-        _first_low = len(result)
-        for _tag in ("【计划】", "【探讨】"):
-            _idx = result.find(_tag)
-            if 0 < _idx < _first_low:
-                _first_low = _idx
-        if _first_low < len(result):
-            result = result[:_first_low].rstrip()
         return result or "无"
 
     def _estimate_token_offset(self, history):
@@ -1082,145 +856,6 @@ class ContextAssembler:
             "remaining": max(0, budget_max - max_offset),
             "usage_pct": round(max_offset / Config.CONTEXT_LENGTH * 100, 1),
         }
-
-    # ── 自适应话题分割阈值（v5.2+）──
-
-    _THRESHOLD_META_FILENAME = "topic_threshold_meta.json"
-    """持久化文件：{ca_cache_dir}/{filename}"""
-
-    @staticmethod
-    def _topic_threshold_meta_path() -> str:
-        """返回阈值元数据 JSON 文件路径。"""
-        try:
-            from hermes_constants import get_hermes_home
-            base = get_hermes_home()
-        except ImportError:
-            base = Path.home() / ".hermes"
-        cache_dir = base / "ca_cache"
-        return str(cache_dir / ContextAssembler._THRESHOLD_META_FILENAME)
-
-    @staticmethod
-    def _load_topic_meta() -> Optional[Dict[str, float]]:
-        """从持久化文件加载阈值历史。"""
-        path = ContextAssembler._topic_threshold_meta_path()
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return None
-
-    @staticmethod
-    def _save_topic_meta(meta: Dict[str, float]) -> None:
-        """持久化阈值历史。"""
-        path = ContextAssembler._topic_threshold_meta_path()
-        try:
-            # 确保父目录存在
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            with open(path, 'w') as f:
-                json.dump(meta, f)
-        except OSError as e:
-            logger.warning("[CA] Failed to save topic threshold meta: %s", e)
-
-    def _load_start_threshold(self) -> float:
-        """加载会话起始阈值。
-        
-        优先级：
-        1. 环境变量 CA_TOPIC_JACCARD_MERGE 显式设置 → 直接使用（固定值，不启用自适应）
-        2. 有持久化历史 → 自适应计算（0.6 × last_ideal + 0.4 × global_avg）
-        3. 无历史 → 返回 Config.TOPIC_JACCARD_MERGE 的编译值
-        """
-        # 检查环境变量是否被显式设置
-        _env_val = os.environ.get("CA_TOPIC_JACCARD_MERGE")
-        if _env_val is not None and _env_val.strip():
-            try:
-                return max(0.01, min(0.50, float(_env_val.strip())))
-            except ValueError:
-                pass  # 非法值，fallthrough 到自适应
-
-        # 自适应路径
-        meta = self._load_topic_meta()
-        if meta is None:
-            return Config.TOPIC_JACCARD_MERGE  # 无历史用编译默认值
-        global_count = meta.get("global_count", 0)
-        if global_count == 0:
-            return Config.TOPIC_JACCARD_MERGE
-
-        global_avg = meta["global_sum"] / global_count
-        last_ideal = meta.get("last_ideal", Config.TOPIC_JACCARD_MERGE)
-
-        t = 0.6 * last_ideal + 0.4 * global_avg
-        return max(0.08, min(0.35, t))
-
-    def _compute_ideal_threshold(self) -> Optional[float]:
-        """根据当前所有已知 S→S 对 Jaccard 值，计算理想阈值（25th percentile）。
-
-        Returns:
-            float: 理想阈值；S→S 对不足 3 对时返回 None。
-        """
-        # 获取有效对话轮 L1（与 assemble 中一致：排除 bg_review）
-        fct_texts, _ = self.cache.get_snapshot_data()
-        _biz_cats = self.store.read_turn_biz_categories(self._session_id)
-        if _biz_cats:
-            fct_texts = {t: v for t, v in fct_texts.items() if t not in _biz_cats}
-
-        sorted_turns = sorted(fct_texts.keys())
-        if len(sorted_turns) < 4:
-            return None  # 数据不足
-
-        # 解析字段 + BG 分类
-        turn_fields: Dict[int, Optional[Dict]] = {}
-        for t in sorted_turns:
-            try:
-                turn_fields[t] = json.loads(fct_texts[t]) if fct_texts.get(t) else None
-            except (json.JSONDecodeError, TypeError):
-                turn_fields[t] = None
-
-        turn_bg: Dict[int, bool] = {}
-        for t in sorted_turns:
-            turn_bg[t] = self._is_bg_turn(turn_fields[t])
-
-        # 收集所有 S→S Jaccard 值
-        jaccard_vals: List[float] = []
-        for i in range(1, len(sorted_turns)):
-            prev = sorted_turns[i - 1]
-            curr = sorted_turns[i]
-            if turn_bg[prev] or turn_bg[curr]:
-                continue
-            j = self._jaccard_tokens(
-                turn_fields[prev] or {}, turn_fields[curr] or {},
-            )
-            jaccard_vals.append(j)
-
-        if len(jaccard_vals) < 3:
-            return None  # 数据不足
-
-        # 25th percentile
-        jaccard_vals.sort()
-        idx = int(len(jaccard_vals) * 0.25)
-        return jaccard_vals[idx]
-
-    def persist_ideal_threshold(self) -> None:
-        """将会话理想阈值持久化。在 session_end 时调用。"""
-        ideal = getattr(self, '_ideal_threshold_this_session', None)
-        if ideal is None:
-            return
-
-        meta = self._load_topic_meta() or {}
-        global_sum = meta.get("global_sum", 0.0)
-        global_count = meta.get("global_count", 0)
-
-        # 更新时忽略历史平均值和 last_ideal 的取值限制
-        global_sum += ideal
-        global_count += 1
-
-        new_meta = {
-            "global_sum": global_sum,
-            "global_count": global_count,
-            "last_ideal": ideal,
-        }
-        self._save_topic_meta(new_meta)
-        logger.info("[CA] persist_ideal_threshold: ideal=%.4f global_sum=%.4f count=%d",
-                    ideal, global_sum, global_count)
 
     def _fire_ov_submit(self, ts: _TopicSwitchData) -> bool:
         """将已完成话题的 L1 摘要提交到 OpenViking。

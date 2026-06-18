@@ -27,11 +27,11 @@ except ImportError:
     _json_to_v1_markdown = None
 
 try:
-    from ca.prompts import L1_GENERATION_PROMPT
+    from ca.prompts import FCT_GENERATION_PROMPT
     PROMPT_OK = True
 except ImportError:
     PROMPT_OK = False
-    L1_GENERATION_PROMPT = ""
+    FCT_GENERATION_PROMPT = ""
 
 
 # ══════════════════════════════════════════════════════════
@@ -42,7 +42,7 @@ class TestParseV1MarkdownXml:
     @pytest.mark.critical
     @pytest.mark.l1
     def test_p1_normal_full_output(self):
-        """P1: 正常完整 4 类 Markdown + <core_change>"""
+        """P1: 正常完整 4 类 Markdown + <stage_tag>/<core_change> 对"""
         if not IMPORT_OK:
             pytest.skip("parse_v1_markdown_xml not yet implemented")
         llm_output = (
@@ -50,16 +50,20 @@ class TestParseV1MarkdownXml:
             "### 背景与约束\n- 内存 8G\n"
             "### 决策与方案\n- 扩容\n"
             "### 后续行动\n- 采购单\n"
+            "<stage_tag>\n【已实施】\n</stage_tag>\n"
             "<core_change>CPU 过高决定扩容</core_change>"
         )
         fct_dict, hdl_text, core_state = parse_v1_markdown_xml(llm_output)
         assert isinstance(fct_dict, dict), f"Expected dict, got {type(fct_dict)}"
+        assert "changes" in fct_dict, f"Missing changes in {fct_dict}"
+        assert fct_dict["changes"] == [{"stage_tag": "已实施", "core_change": "CPU 过高决定扩容"}]
         assert "core_change" in fct_dict, f"Missing core_change in {fct_dict}"
-        assert fct_dict["core_change"] == "【计划】 CPU 过高决定扩容"
+        assert fct_dict["core_change"] == "CPU 过高决定扩容"
         assert "new_materials" in fct_dict
         assert fct_dict["new_materials"] == ["CPU 使用率 90%"]
-        assert hdl_text == "【计划】 CPU 过高决定扩容"
-        assert core_state is not None
+        assert hdl_text == "CPU 过高决定扩容"
+        # core_state 已弃用（core_change 不再加状态前缀）
+        assert core_state is None
 
     @pytest.mark.high
     @pytest.mark.l1
@@ -224,6 +228,7 @@ class TestParseV1MarkdownXml:
             pytest.skip("parse_v1_markdown_xml not yet implemented")
         llm_output = (
             "### 现象与问题\n- 测试\n"
+            "<stage_tag>\n【探讨】\n</stage_tag>\n"
             "<core_change>核心变更</core_change>\n"
             "一些无关的尾随文字\n"
             "更多噪音"
@@ -239,10 +244,11 @@ class TestParseV1MarkdownXml:
         """P8: 混合 OODA 旧别名兼容性"""
         if not IMPORT_OK:
             pytest.skip("parse_v1_markdown_xml not yet implemented")
-        # 使用旧别名"核心摘要" + 新别名"后续行动"
+        # 使用新格式 <stage_tag>/<core_change> 对 + 新别名"后续行动"
         llm_output = (
             "### 现象与问题\n- 测试\n"
             "### 后续行动\n- 采购\n"
+            "<stage_tag>\n【计划】\n</stage_tag>\n"
             "<core_change>核心变更</core_change>"
         )
         fct_dict, hdl_text, _ = parse_v1_markdown_xml(llm_output)
@@ -260,6 +266,7 @@ class TestParseV1MarkdownXml:
             "### 背景与约束\n- 背景B\n"
             "### 决策与方案\n- 决策C\n"
             "### 后续行动\n- 行动D\n"
+            "<stage_tag>\n【已实施】\n</stage_tag>\n"
             "<core_change>综合变更</core_change>"
         )
         fct_dict, hdl_text, _ = parse_v1_markdown_xml(llm_output)
@@ -278,35 +285,44 @@ class TestL1GenerationPrompt:
     def test_x1_prompt_contains_required_elements(self):
         """X1: REQ-1 prompt 内容验证"""
         if not PROMPT_OK:
-            pytest.skip("L1_GENERATION_PROMPT not available")
+            pytest.skip("FCT_GENERATION_PROMPT not available")
         # 必须包含新 prompt 的特征
-        assert "研发对话意图分析器" in L1_GENERATION_PROMPT, \
+        assert "研发对话意图分析器" in FCT_GENERATION_PROMPT, \
             "Prompt should contain '研发对话意图分析器'"
-        assert "{previous_summary}" in L1_GENERATION_PROMPT, \
+        assert "{previous_summary}" in FCT_GENERATION_PROMPT, \
             "Prompt should contain {previous_summary} placeholder"
-        assert "{current_dialog}" in L1_GENERATION_PROMPT, \
+        assert "{current_dialog}" in FCT_GENERATION_PROMPT, \
             "Prompt should contain {current_dialog} placeholder"
-        assert "<core_change>" in L1_GENERATION_PROMPT, \
+        assert "<stage_tag>" in FCT_GENERATION_PROMPT, \
+            "Prompt should contain <stage_tag> tag"
+        assert "<core_change>" in FCT_GENERATION_PROMPT, \
             "Prompt should contain <core_change> tag"
-        # v4.7.1: 状态感知特征
-        assert "时态保真" in L1_GENERATION_PROMPT, \
-            "Prompt should contain '时态保真' (state-aware feature)"
-        assert "【已实施】" in L1_GENERATION_PROMPT, \
+        # 新格式特征：配对输出、零对或多对、单状态
+        assert "零对或多对" in FCT_GENERATION_PROMPT, \
+            "Prompt should contain '零对或多对' (zero-or-more pairs)"
+        assert "多个事项则输出多对" in FCT_GENERATION_PROMPT, \
+            "Prompt should support multiple pairs for multiple items"
+        assert "【已实施】" in FCT_GENERATION_PROMPT, \
             "Prompt should contain 【已实施】 state label"
-        assert "必须使用上述 4 个 Markdown 标题" in L1_GENERATION_PROMPT, \
-            "Prompt should require ### Markdown headers"
+        assert "每出现一个独立的新事项，必须输出一对" in FCT_GENERATION_PROMPT, \
+            "Prompt should require one pair per item"
 
     @pytest.mark.high
     @pytest.mark.l1
     def test_x2_prompt_no_old_features(self):
         """X2: REQ-1 prompt 不含旧特征"""
         if not PROMPT_OK:
-            pytest.skip("L1_GENERATION_PROMPT not available")
+            pytest.skip("FCT_GENERATION_PROMPT not available")
         # 不应包含旧 prompt 的特征
-        assert "会议纪要摘要助手" not in L1_GENERATION_PROMPT, \
+        assert "会议纪要摘要助手" not in FCT_GENERATION_PROMPT, \
             "Prompt should NOT contain old persona '会议纪要摘要助手'"
-        assert "严谨的研发团队会议摘要专家" not in L1_GENERATION_PROMPT, \
+        assert "严谨的研发团队会议摘要专家" not in FCT_GENERATION_PROMPT, \
             "Prompt should NOT contain old persona '严谨的研发团队会议摘要专家'"
+        # 新格式不使用多状态合并（旧格式的【已实施/计划】已废弃）
+        assert "【已实施/计划】" not in FCT_GENERATION_PROMPT, \
+            "New prompt should NOT use multi-state merge format"
+        assert "【无变化】" not in FCT_GENERATION_PROMPT, \
+            "New prompt should NOT contain 【无变化】 state"
 
 
 # ══════════════════════════════════════════════════════════

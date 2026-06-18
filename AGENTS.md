@@ -4,8 +4,8 @@
 
 | 项          | 值                                                                                |
 | ----------- | --------------------------------------------------------------------------------- |
-| 版本        | v5.5.0 (命名统一)                                                                |
-| 注入方式    | 简化替换（`_simple_mutation_mode_v5`） — turn_stream 查 Fct 替换 tool 行，尾部保护 |
+| 版本        | v5.10+ (命名统一 + TopicGradeManager + 增量缓存 + changes 列表格式)              |
+| 注入方式    | topic-aware 三级替换（`_simple_mutation_mode_v5` + `_incremental_mutation`） — turn_stream 查 Fct，按 grade(L2/L1/L0)替换 + 增量缓存 |
 | plugin.yaml | v5.5.0                                                                    |
 | 部署方式    | 自包含独立副本                                                                    |
 | 插件路径    | `~/.hermes/profiles/tester/plugins/ca_assembler/`                               |
@@ -43,16 +43,12 @@ def _on_session_start(**kwargs: Any) -> None:
 行为：
 
 1. 创建 `CAContextAssemblerPlugin` 实例
-2. 引擎初始化时加载话题分割阈值：
-   - 默认策略（`CA_TOPIC_JACCARD_MERGE=0.07`）→ 全部实义轮合并，由 20K 尾区切割
-   - 如启用自适应（见后文）→ `0.6 × last_ideal + 0.4 × global_avg`，限幅 `[0.08, 0.35]`
-   - 阈值在本会话内固定不变
-3. 检查断路器 `is_available()` → 3 次失败则 1 小时冷却
-4. 从 `get_hermes_home()` 获取 profile 基路径
-5. DB 路径：`{hermes_home}/ca_cache/{session_id}.db`
-6. 通过 `session_manager.get(session_id, db_path)` 创建引擎
-7. 注册到模块级 `_engines` 字典（`session_id → plugin`）
-8. 成功后日志：`"CA plugin started for session {session_id}"` 含阈值信息
+2. 检查断路器 `is_available()` → 3 次失败则 1 小时冷却
+3. 从 `get_hermes_home()` 获取 profile 基路径
+4. DB 路径：`{hermes_home}/ca_cache/{session_id}.db`
+5. 通过 `session_manager.get(session_id, db_path)` 创建引擎
+6. 注册到模块级 `_engines` 字典（`session_id → plugin`）
+7. 成功后日志：`"CA plugin started for session {session_id}"` 含阈值信息
 
 ### `_on_session_end` — 资源清理
 
@@ -73,11 +69,10 @@ def _on_session_reset(**kwargs: Any) -> None:
 **kwargs**: `session_id`（可选，无 session_id 时重置全部）
 
 行为：
+行为：
+1. 从 `_engines` 移除 → `engine.reset()` + 清除断路器状态
 
-1. 持久化会话理想阈值 → `{ca_cache}/topic_threshold_meta.json`
-2. 从 `_engines` 移除 → `engine.reset()` + 清除断路器状态
-
-### `_on_pre_llm_call_v5` — E-stage 写 user Elm + A-stage 替换
+### `_on_pre_llm_call_v5` — E-stage 写 user Elm + 话题检测 + A-stage 替换
 
 ```python
 def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
@@ -88,24 +83,33 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
 **E-stage 行为**（数据积累）：
 
 1. 计算当前 turn = `conversation_history` 中 role=user 的消息数
-2. 写入 `turn_stream (turn, seq=0)`：`role='user', content=user_message`
-3. 检测 bg_review：如是则直接返回 None（跳过 A-stage）
+2. 检测 bg_review：如是则**同步写入 Fct/Hdl 列**（代码生成摘要，无需 LLM），返回 None（跳过 A-stage 和 F-stage）
+3. 写入 `turn_stream (turn, seq=0)`：`role='user', content=user_message`
 
-**A-stage 行为**（上下文替换）：
+**话题检测 + A-stage 调度**（`plugin.pre_llm_call_v5()`）：
 
-- `_simple_mutation_mode_v5(conversation_history)`：
-  1. 保存完整消息快照到 `_saved_history_snapshot`
-  2. 尾部保护区：倒数第 3 个 user 消息之后 → 原文保留
-  3. 保护区外：assistant{tc}/tool 行用 turn_stream 的 Fct（Fct）替换
-  4. user 行始终原文保留
-  5. 返回 None（history 已原地替换）
+```
+┌─ 话题检测（TopicGradeManager.detect）
+│    检测话题切换与否
+│    切换 → _A_stable_cache = None
+├─ 缓存调度
+│    cache is None → _full_mutation
+│    _A_cache_is_stale → _full_mutation
+│    有效 → _incremental_mutation
+└─ 执行
+     全量路径：逐 turn 查 turn_stream → 角色队列匹配 → grade 驱动替换 + 写缓存
+     增量路径：复用 cache → delta 替换 → Fct pending 防护 → 更新缓存
+```
 
-**行类型替换规则**：
+**A-stage 替换规则**（grade 三级驱动）：
 
-| 条件 | user | assistant_fin | assistant{tc} | tool |
-|------|------|--------------|--------------|------|
-| 尾部保护区 | 原文保留 | 原文保留 | 原文保留 | 原文保留 |
-| 保护区外 | 原文保留 | 原文保留 | 替换为 tool group Fct | 替换为 per-tool Fct |
+| grade | user | assistant_fin | thought | tool | reasoning_content |
+|-------|------|--------------|---------|------|------------------|
+| L2 (Elm) | 原文保留 | 原文保留 | 原文保留 → 仅清理 `reasoning_content`/`tool_calls` | 原文保留 → 仅清理 `reasoning_content`/`tool_calls` | **pop** |
+| L1 (Fct) | 原文保留 | 原文保留 | 替换为 thought Fct | 替换为 per-tool Fct | **pop** |
+| L0 (Hdl) | 原文保留 | 原文保留 | 替换为 thought Fct[:150] | 替换为 per-tool Fct[:150] | **pop** |
+
+**尾部保护区**：倒数第 2 个 user 消息之后 → 原文保留（不受 grade 影响，所有 field 保持原样）。
 
 ### `_on_post_llm_call_v5` — E-stage 写 final assistant + F-stage 触发
 
@@ -284,97 +288,138 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 | `CA_HISTORY_MUTATE`         | (已弃用)                   | 2值开关，`1`→替换 `0`→追加。未设 `CA_HISTORY_INJECTION` 时兼容此旧变量 |
 | `CA_LLM_THINK`              | 未设置                     | Fct LLM think 参数（1/0/true/false）                                            |
 
-### 话题拣配配置（v4.6.0）
+### 话题等级配置（TopicGradeManager）
 
 | 变量                           | 默认值 | 说明                           |
 | ------------------------------ | ------ | ------------------------------ |
-| `CA_TOPIC_BOUNDARY_DISTANCE` | 0.50   | 话题边界检测余弦距离阈值       |
-| `CA_TOPIC_JACCARD_ENTRY`     | 0.03   | 话题分割首次合并 Jaccard 阈值（需 todo 重叠） |
-| `CA_TOPIC_JACCARD_CHAIN`     | 0.04   | 话题分割链内扩展 Jaccard 阈值（需 todo 重叠） |
-| `CA_TOPIC_JACCARD_MERGE`   | 0.07   | 话题分割 Jaccard 独立合并阈值（无需 todo 重叠）。设为 0.07 确保全部 S→S 实义轮合并，由 20K 尾区保护完成唯一实质性切割 |
+| `CA_TOPIC_JACCARD_ENTRY`     | 0.02   | 弱匹配 Jaccard 阈值（新话题接入） |
+| `CA_TOPIC_JACCARD_CHAIN`     | 0.04   | 强匹配 Jaccard 阈值（链内延续） |
 | `CA_TOPIC_RADIUS_WEIGHT`     | 2.0    | 半径公式中最近邻距离的权重系数 |
 | `CA_TOPIC_MAX_UPGRADE`       | 10     | 检索升级最大 topic 数          |
-| `CA_TOPIC_BG_LEVEL`          | `Hdl` | BG 话题固定级别                |
+| `CA_TOPIC_BG_LEVEL`          | Hdl    | BG 话题固定等级                |
 
-## 话题分割算法（v5.2.1）
+## 话题分割与等级管理（TopicGradeManager）
 
-### R1: BG 分类
+`topic_manager.py` 的 `TopicGradeManager` 负责：
+1. **增量话题分割** — 每次 pre_llm_call 检测新 turn 是否延续或切换话题
+2. **等级缓存** — topic→grade 映射，切换间冻结（保障 prompt caching 稳定）
+3. **切换定级** — 话题切换时 embed 用户消息、计算形心、按半径定级
 
-检查 `new_materials`, `objective_facts`, `consensus`, `todo` 四个内容字段：
+### 实例化
 
-- 全空 → **BG 轮**（后台/过渡轮）
-- 任一非空 → **实义轮**
-- 连续 BG → 合并到同一话题
-- BG↔实义 → 强制分裂
+```python
+mgr = TopicGradeManager(store, embed_client)
+```
 
-### R2: 实义轮合并（三条路径，任意满足即合并）
+由 `CAContextAssemblerPlugin.__init__()` 创建，挂载到 `self._topic_mgr`。
 
-| 路径 | 条件 | 说明 |
+### Detect：增量话题分割
+
+每次 `pre_llm_call_v5` 调用 `mgr.detect(turn, ca_rows, user_msg)`：
+
+```
+1. 强制短语匹配 → 新话题（_scan_forced_split_phrases）
+2. 首轮 → topic 1
+3. 当前轮 Fct 与累积 Fct 文本做 _jaccard_text()
+   - ≥ CHAIN(0.04) → 强匹配 → 同话题，追加 Fct
+   - ≥ ENTRY(0.02) → 弱匹配 → 同话题，追加 Fct
+   - 其余 → 新话题
+4. 返回 bool：话题是否切换
+```
+
+**Jaccard 特征提取**（`_jaccard_text()`）：
+- 中文 CJK 单字符（实义字）
+- CJK 二元组（每两个相邻实义字）
+- 英文/数字词（含下划线分隔的 token）
+
+### Grade on Switch：切换定级
+
+当 `detect()==True`，调用 `mgr.grade_on_switch(q_emb, user_msg)`：
+
+```python
+if switched:
+    q_emb = engine.embed_client.embed(user_msg)
+    mgr.grade_on_switch(q_emb, user_msg)
+```
+
+流程：
+1. 为每个旧话题计算形心（基于成员 turn 的 Fct embedding 均值）
+2. 以 q_emb 为查询点，形心为参考，按**半径公式**定级：
+   - `topic 半径 r = min(max_intra, nearest/WEIGHT)`
+   - 内球(q→形心 ≤ r) → L2（保留 Elm）
+   - 外球(q→形心 ≤ 2r) → L1（使用 Fct）
+   - 远距离(q→形心 > 2r) → L0（使用 Hdl 截断）
+3. 新话题强制 L2
+4. topic→grade 缓存冻结，至下次切换前不变
+
+### Get Turn Grade：等级查询
+
+```python
+grade = mgr.get_turn_grade(turn_num)  # 返回 "L2" | "L1" | "L0"
+```
+
+- 先在 topic_grades 缓存中查 topic→grade
+- 再查 turn→topic 映射
+- 都没有 → 返回 "L2"（保守——保留 Elm）
+- ⚠️ grade 返回值当前为字符串字面量（Pitfall 15/20 未修复）
+
+### Reset
+
+```python
+mgr.reset()  # 清空所有状态：/new 或 /reset 时调用
+```
+
+## 增量缓存（A-stage Cache）
+
+### 实例变量
+
+| 变量 | 类型 | 语义 |
 |------|------|------|
-| todo 链内扩展 | `has_todo_overlap` AND `J ≥ 0.04` AND 已在链中 | 上轮 TODO 与下轮 core_change/new_materials 精确匹配 |
-| todo 首次合并 | `has_todo_overlap` AND `J ≥ 0.03` | 同上，入口级 |
-| **Jaccard 独立合并**（v5.2.1 新增） | **`J ≥ threshold`** | **不依赖 todo 重叠**，用于长对话同话题扩展 |
+| `_A_stable_cache` | `list[dict] \| None` | 稳定区已替换 Fct 的 conv_hist 片段。None=冷启动或话题切换后 |
+| `_A_cache_turns` | int | cache 中的 user 消息数（用于增量 Step 3 的 turn 计数起点） |
+| `_A_cache_is_stale` | bool | Fct pending 标记。True→下轮不进增量，走全量修复 |
 
-`threshold` 默认 **0.07**（见下方"由 20K 切割"说明）。
-
-### 由 20K 切割（v5.2.1 默认策略）
-
-话题分割的 Jaccard 独立合并阈值设为 **0.07**，这意味着所有 S→S（实义→实义）连续对都满足合并条件（28 对中最低 J=0.0729），实义轮在话题上全部合并为一个连续块。
-
-话题分割在此策略下的唯一作用是：
-
-- **BG 轮隔离**：将"Review the conversation"等无内容轮从实义流中独立出去
-- **实义轮合并**：将所有实义轮归入一个大话题
-- **强制话题切换**：用户消息含"换一个话题"等短语时，无条件分裂
-
-### 强制话题切换
-
-当用户消息包含以下任一词组时，该轮在话题分割中**强制分裂**，不受任何合并条件影响：
+### 调度逻辑
 
 ```
-"换一个话题", "换个话题", "切换话题", "新话题",
-"另一件事", "另一个问题", "换个方向",
-"换一个问题", "topic switch", "change topic", "next topic"
+pre_llm_call_v5()
+  ├─ 话题检测 detect()
+  │    ├─ 切换 → _A_stable_cache = None → 全量
+  │    └─ 无切换 → 继续
+  ├─ cache 状态判断
+  │    ├─ cache is None → 全量
+  │    ├─ _A_cache_is_stale → cache=None → 全量
+  │    └─ cache 有效 → 增量
+  └─ 全量路径: _full_mutation() (alias of _simple_mutation_mode_v5)
+       ├─ 逐 turn 查 turn_stream + 角色队列匹配 + grade 驱动替换
+       ├─ 尾部保留 Elm (倒数 2 个 user)
+       └─ 写缓存: _A_stable_cache = conv_hist[0:tail_boundary]
+  └─ 增量路径: _incremental_mutation()
+       ├─ Step 1: 尾部边界（与全量一致）
+       ├─ Step 2: 并行扫描 cache → 覆盖稳定区 conv_hist 的 content
+       ├─ Step 3: Delta 区收集 — cache 后到 tail_boundary 之间的 thought/tool/fin
+       ├─ Step 4: Delta 替换 — 从 turn_stream 读 Fct，1:1 角色队列匹配
+       │          ⚠️ Fct pending 防护：fct=None → 不入队列 → _A_cache_is_stale=True
+       └─ Step 5: 写缓存 → 更新 _A_stable_cache/_A_cache_turns
 ```
 
-检测发生在 `assemble()` 中，由 `_detect_forced_split_turns(messages)` 扫描 `conversation_history` 中的 `role="user"` 消息实现。
+### Fct pending 防护（P0）
 
-真正的上下文质量由 **20K 尾区保护区** 保证——尾区内的轮强制 Elm 原文透传。即使整个实义话题远超 20K，保护区外的轮按话题分级降级，不会破坏尾区内的对话质量。
+增量 delta 替换中，若 `get_turn_ca_rows` 返回的 Fct 为 None（F-stage daemon 线程尚未写完），则：
+- 不将该 Fct 加入角色队列（避免 `""` 固化到缓存）
+- 标记 `_A_cache_is_stale = True`
+- 下次走全量路径修复
 
-如需改变此行为（例如希望话题分割承担更多上下文精细化管理），增大 `CA_TOPIC_JACCARD_MERGE` 即可。
+### 回退条件
 
-#### 自适应阈值（可选，v5.2.1）
-
-如不使用"由 20K 切割"策略，可恢复自适应阈值。将 `CA_TOPIC_JACCARD_MERGE` 设为 `0.18`（或留空由自适应计算），此时机制为：
-
-```
-会话 N 启动:
-  T_start = 0.6 × last_ideal + 0.4 × global_avg (种子 0.18)
-  限幅 [0.08, 0.35]
-
-每轮 assemble() 后:
-  收集所有已知 S→S 对的 Jaccard 值
-  计算 25th percentile 作为本会话的理想值
-  （首次 3 对以上数据后写入 _ideal_threshold_this_session）
-
-会话 N 结束 (reset):
-  persist_ideal_threshold()
-  → 更新 {ca_cache}/topic_threshold_meta.json
-  → 影响下一会话的 T_start
-```
-
-```json
-{
-  "global_sum": 0.93,
-  "global_count": 5,
-  "last_ideal": 0.21
-}
-
-```
-
-### 非确定性修复
-
-`_add_bigrams` 中使用 `sorted(s)` 保证 `''.join(s)` 跨运行一致。
+| 场景 | 处理 |
+|------|------|
+| 冷启动 (cache is None) | `_full_mutation` |
+| 话题切换 (detect==True) | cache=None → 全量 |
+| Fct pending (delta Fct=None) | `_A_cache_is_stale=True` → 保留 Elm → 下轮全量 |
+| 缓存角色对齐失败 | 回退 `_full_mutation` |
+| 不足 2 轮 | tail_boundary=len(conv_hist)，全部跳过 |
+| session reset | 插件重建 → cache=None → 冷启动 |
 
 ## Fct 摘要生成架构
 
@@ -406,9 +451,15 @@ from pathlib import Path
 db = Path.home() / '.hermes/profiles/tester/ca_cache/{session_id}.db'
 conn = sqlite3.connect(str(db))
 cur = conn.cursor()
-cur.execute('SELECT COUNT(*), COUNT(l0_embedding) FROM turn_cache')
-n, emb = cur.fetchone()
-print(f'{n} rows, {emb} with embeddings')
+# 查询 turn_stream 行数和 Fct 覆盖率
+cur.execute('SELECT COUNT(*), SUM(CASE WHEN Fct IS NOT NULL AND Fct != \'\' THEN 1 ELSE 0 END) FROM turn_stream')
+total, has_fct = cur.fetchone()
+print(f'{total} rows, {has_fct} with Fct')
+
+# 按角色分布
+cur.execute('SELECT role, COUNT(*), SUM(CASE WHEN Fct IS NOT NULL AND Fct != \'\' THEN 1 ELSE 0 END) FROM turn_stream GROUP BY role')
+for role, count, fct_count in cur.fetchall():
+    print(f'  {role}: {count} rows, {fct_count} with Fct')
 ```
 
 ### Token 水位查询
@@ -434,14 +485,14 @@ print(water)
 
 ## 测试接口清单
 
-**全部 269 测试通过**
+**全部 261 测试通过（17 ⏭️）**
 
 ```bash
 cd /home/i1j/.hermes/profiles/tester/plugins/ca_assembler
 python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts="
 ```
 
-**测试覆盖**：269 ✅ / 19 ⏭️ / 0 ❌
+**测试覆盖**：261 ✅ / 17 ⏭️ / 0 ❌
 
 | 测试文件 | 说明 | 状态 |
 |---------|------|------|
@@ -451,7 +502,9 @@ python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts="
 | `test_astage.py` | A-stage 替换逻辑 | ✅ 5 tests |
 | `test_estage.py` | E-stage 写即落盘 hook | ✅ 2 tests |
 | `test_v460.py` | 话题分割（遗留兼容） | ✅ 22 tests |
-| ... 其它 | config/parse/embedding/health/quality/system/circuit/summarizer | ✅ 剩余 tests |
+| `test_parse_v1.py` | Fct 解析（PAIR_PATTERN、clean_increment、_json_to_v1_markdown） | ✅ tests |
+| ... 其它 | config/embedding/health/quality/system/circuit/summarizer/lifecycle/degradation | ✅ 剩余 tests |
+| ⚠️ `topic_manager` | 当前无专用测试文件 | ❌ missing |
 
 **已删除的死测试**：
 - `test_a.py`、`test_c.py`、`test_aligned_outcomes.py`（全文件）
@@ -465,15 +518,16 @@ python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts="
 
 所有行 `_assemble_status=0`，budget 从未耗尽。详见 [v5.2 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md)。
 
-## 已知问题 / 调试记录
+## 已知问题 / 待办
 
-| 问题 | 状态 | 修复 |
-|------|------|------|
-| `_call_llm_for_fct` `@staticmethod` 错标 | ✅ `c60d8f8` | 移除 `@staticmethod`，重启生效 |
-| F-stage fallback 写死占位符 | ✅ `dbe9e8e` | 改为复制 user_elm |
-| `_is_valid_fct` / `_format_fct_for_display` 残余 `fct_text` | ✅ `403255f` | 改为 `Fct` |
-| `generate_group_summary` 无句尾标点不截断 | ✅ `9fb05cc` | 最终返回加 `_safe_truncate` |
-| 三源验证结果 | ✅ 已记录 | `docs/debug/debug-2026-06-15-triple-source-verify.md` |
+| 问题 | 状态 |
+|------|------|
+| `topic_manager` 无专用测试文件 | ❌ missing |
+| `get_turn_grade()` 返回字符串字面量 `"L2"/"L1"/"L0"`，违反术语规则（应重构为 Grade 枚举） | ⏳ 未修复 |
+| `_simple_mutation_mode_v5` 中 `grade` 比较仍使用字符串字面量 | ⏳ 未修复 |
+| `reasoning_content`（模型思考链）被 A-stage 完全忽略 — 只替换 `content`，但 assistant 行还携带 `reasoning_content`（5-8KB/条）和 `tool_calls`，叠加占保护区外总 token 的 69% | ⏳ 待优化 |
+
+详见 [docs/debug/](docs/debug/) 和 [docs/changelog.md](docs/changelog.md)。
 
 ## ⚠️ 关键概念：CA 不是 context engine
 
@@ -488,19 +542,7 @@ Hermes 有两条完全独立的机制：
 
 ## 与 source project 的差异
 
-| 差异点                      | source 项目                       | 当前部署                              |
-| --------------------------- | --------------------------------- | ------------------------------------- |
-| 代码位置                    | `~/projects/context-assembler/` | `plugins/ca_assembler/` 自包含副本  |
-| `register()`              | 不存在                            | 已添加，注册 8 个 hooks               |
-| `_state_file_path()`      | `Path.home() / ".hermes"`       | `get_hermes_home()`（profile 感知） |
-| `sys.path`                | 无特殊处理                        | 本地 `ca/` 子目录优先               |
-| 激活方式                    | `context.engine: ca_assembler`  | `plugins.enabled: [ca_assembler]`   |
-| `_simple_mutation_mode_v5` | 不存在                            | 新增，mutation 模式入口（v5.0 F-stage） |
-| 注入方式                    | 标签注入 `[~/N/0]`              | DB 直查 Fct 替换 tool 行（turn_stream read_fct_v5） |
-| `bg_review A-stage`       | 不支持                            | gate 跳过，F-stage 写 biz_category    |
-| F-stage 数据源              | 函数参数拼接                    | turn_stream DB 读取（read_turn_elm_rows） |
-| stage_tag                  | 无                               | 独立字段，不嵌入 core_change |
-| 旧编码表/工具buffer       | 存在                              | v5.0 已废弃，被 turn_stream + E-stage 写即落盘取代 |
+详见 [docs/changelog.md](docs/changelog.md)（v5.5.0 行）。
 
 ## 脚本工具
 
@@ -511,13 +553,23 @@ Hermes 有两条完全独立的机制：
 
 ## 相关文档
 
-所有文档按类别归档在 `docs/` 下：
+所有文档按类别归档在 `docs/` 下。技术方案统一为 `docs/wiki/`（双维度：architecture + decisions），取代所有旧设计文档。
 
-| 类别       | 目录                            | 内容                                                                      |
-| ---------- | ------------------------------- | ------------------------------------------------------------------------- |
-| 变更历史   | `docs/changelog.md`           | 全版本变更记录（唯一权威源）                                              |
-| 分析       | `docs/analysis/`              | 缓存分析、注入重构报告（v5.1）                                            |
-| 调试       | `docs/debug/`                 | 调试记录（_simple_mutation_mode_v5、（已移除）验证、占位符根因等）               |
+| 类别         | 目录                        | 内容                                                                        |
+| ------------ | --------------------------- | --------------------------------------------------------------------------- |
+| **技术方案**（双维度） | `docs/wiki/`          | **权威技术方案**：`architecture/`（14 页，空间维度）+ `decisions/`（30 页，时间维度） |
+| 变更历史     | `docs/changelog.md`         | 全版本变更记录（唯一权威源）                                                |
+| 设计（历史） | `docs/design/`              | 旧设计文档（已被 wiki 取代，保留参考）                                      |
+| 分析         | `docs/analysis/`            | 缓存分析、注入重构报告（v5.1）、Fct-OODA 链式结构设计分析                  |
+| 调试         | `docs/debug/`               | 调试记录（A-stage、F-stage、前端验证、话题分割等）                         |
+| 知识图谱     | `graphify-out/`             | 代码静态图：2210 节点、2930 边、303 社区。God Nodes、数据流图              |
+
+### 快速入口
+
+- 📐 [技术方案总览](docs/wiki/README.md)
+- 🗺️ [决策关系图 + 全量索引](docs/wiki/INDEX.md)
+- 🧩 [当前系统组件（architecture/）](docs/wiki/architecture/)
+- ⏳ [决策树时间线（decisions/）](docs/wiki/decisions/)
 
 ## 知识图谱（graphify）
 

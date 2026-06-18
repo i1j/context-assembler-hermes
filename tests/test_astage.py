@@ -1,9 +1,9 @@
 
 """A-stage 替换测试 — _simple_mutation_mode_v5 / pre_llm_call_v5
 
-A-stage tail 边界：倒数第 3 个 user 之后为保护区。
+A-stage tail 边界：倒数第 2 个 user 之后为保护区。
 要产生保护区外的轮次，至少需要 5 个 user。
-（4 个 user 时 3rd-from-last=index2，一切自此为尾区。）
+（4 个 user 时 2nd-from-last=index2，一切自此为尾区。）
 """
 
 import json
@@ -29,6 +29,7 @@ class TestSimpleMutationModeV5:
     def test_replaces_tool_lines_with_fct(self, ca_engine):
         """保护区外的 asst{tc} → content 被替换为 Fct。"""
         from ca.store import write_turn_v5
+        # DB turn=2 = 第 2 个 user 的 CA 数据
         write_turn_v5(ca_engine.store, "test", 2, 1,
                       role="assistant", content="orig2",
                       fct_text='工具组：文件读取')
@@ -37,9 +38,9 @@ class TestSimpleMutationModeV5:
                       fct_text='read_file → 成功')
 
         plugin = self._make_plugin(ca_engine)
-        # 5 users → 3rd-from-last user = index 6 (user #3)
-        # 尾区: i >= 6 → user#3-5 plus their tools
-        # 保护区外: i < 6 → user#1-2 plus their tools
+        # 5 users → 2nd-from-last user = index 7 (user #4)
+        # 尾区: i >= 7 → user#4-5 plus their tools
+        # 保护区外: i < 7 → user#1-3 plus their tools
         conv = [
             {"role": "user", "content": "第一问"},        # i=0 turn1
             {"role": "assistant", "content": "a1"},
@@ -65,10 +66,10 @@ class TestSimpleMutationModeV5:
     def test_tail_boundary_preserved(self, ca_engine):
         """尾部保护区（倒数第 3 个 user 之后）原文保留。"""
         from ca.store import write_turn_v5
-        # 保护区外 (turn 2): 有 Fct
+        # 保护区外 (第 2 个 user, DB turn=2): 有 Fct
         write_turn_v5(ca_engine.store, "test", 2, 2,
                       role="tool", content="old2", fct_text="新Fct2")
-        # 尾区内 (turn 4): 有 Fct 但不该被替换
+        # 尾区内 (第 4 个 user, DB turn=4, i>=8): 不该被替换
         write_turn_v5(ca_engine.store, "test", 4, 2,
                       role="tool", content="old4", fct_text="新Fct4")
 

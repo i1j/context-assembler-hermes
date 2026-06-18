@@ -1,5 +1,19 @@
 # CA v5.0 — 架构设计
 
+> **重要提示**：本文档为 v5.0 初始架构设计（2026-06-14）。自实装以来，架构已演进，新增以下子系统未在本文档反映。阅读时请对照以下变更对照表，以实际代码为最终权威。
+
+## 实装后变更对照
+
+| 变更 | 说明 | 代码位置 | 新增文档 |
+|------|------|---------|---------|
+| **topic-aware 三级替换** | A-stage 不再统一替换。`TopicGradeManager` 按话题定级(L2/L1/L0)，grade 驱动 thought/tool 行的替换策略（L2=保留Elm，L1=全文Fct，L0=150ch截断） | `topic_manager.py` (495行), `__init__.py:392-432` | AGENTS.md §话题分割与等级管理 |
+| **增量缓存** | `_A_stable_cache` / `_A_cache_turns` / `_A_cache_is_stale` 保障话题未切换时仅处理 delta 轮 | `__init__.py:223-225,465-618` | `docs/design/A-stage-增量缓存方案设计.md` |
+| **bg_review 同步写 Fct** | 后台轮在 E-stage 直接同步写入 Fct/Hdl 列（代码生成摘要，不经过 F-stage daemon） | `__init__.py:741-757` | AGENTS.md §_on_pre_llm_call_v5 |
+| **角色队列匹配** | 取代旧逐行 seq 对齐，thought→ca_thoughts 队列、tool→ca_tools 队列，一一对应 | `__init__.py:377-432` | ca-development/references 角色队列匹配 |
+| **changes 列表格式** | Fct 输出从单对 `<stage_tag>/<core_change>` 改为多对单状态标签，`PAIR_PATTERN` 解析 | `ca/post_process.py:97-99` | ca-development SKILL.md §Fct JSON格式 |
+| **`reasoning_content` 清理** | A-stage 替换时 pop `reasoning_content`/`tool_calls` 字段，减少保护区外 token | `__init__.py:401-412,420-429` | — |
+| **命名统一** | L2/L1/L0 → Elm/Fct/Hdl，C-stage → F-stage | 全仓库 | AGENTS.md §术语 |
+
 ## 1. 动机
 
 v4/v5 hybrid schema（turn_type / tool_sub_index / Elm / api_call_count 等混合主键）、内存 buffer `_tool_buffer`、C-stage PK 碰撞 L2 覆盖、conv_encoding 分离表等历史债积累过多。全线重写，不向后兼容。

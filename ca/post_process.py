@@ -46,15 +46,30 @@ def robust_json_parse(raw: str, max_repair_attempts: int = 3) -> Tuple[Dict[str,
 
 def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
     if data.get("_truncated"):
-        return {"core_change": "本轮无新内容"}
+        return {"changes": [], "core_change": "本轮无新内容"}
     cleaned: Dict[str, Any] = {}
-    core = data.get("core_change", "").strip()
-    if core and core not in ("无", "本轮无新内容"):
-        cleaned["core_change"] = core
+    # changes 列表：每条含 stage_tag（单状态）+ core_change（纯文本）
+    changes = data.get("changes", [])
+    valid_changes = []
+    for c in changes:
+        stag = c.get("stage_tag", "").strip()
+        core = c.get("core_change", "").strip()
+        if stag in VALID_STATES and core and core not in MEANINGLESS_CORE:
+            valid_changes.append({"stage_tag": stag, "core_change": core})
+    if valid_changes:
+        cleaned["changes"] = valid_changes
+        cleaned["core_change"] = "；".join(c["core_change"] for c in valid_changes)
+    # 旧格式回退：单个 core_change + stage_tag 转成 changes
+    elif data.get("core_change", "").strip():
+        core = data["core_change"].strip()
+        if core not in MEANINGLESS_CORE and core != "本轮无新内容":
+            stag = data.get("stage_tag", "").strip()
+            if stag in VALID_STATES:
+                cleaned["changes"] = [{"stage_tag": stag, "core_change": core}]
+            else:
+                cleaned["changes"] = [{"stage_tag": "已实施", "core_change": core}]
+            cleaned["core_change"] = core
     _PLACEHOLDERS = {"", "无", "無", "none", "-", "- 无", "—", "— 无", "暂无", "无有效内容"}
-    stag = data.get("stage_tag", "")
-    if stag in ("已实施", "计划", "探讨", "已取消"):
-        cleaned["stage_tag"] = stag
     for field in ["new_materials", "objective_facts", "consensus", "todo"]:
         items = data.get(field, [])
         if not isinstance(items, list):
@@ -64,6 +79,11 @@ def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
         if items:
             cleaned[field] = items
     if not cleaned:
+        cleaned["changes"] = []
+        cleaned["core_change"] = "本轮无新内容"
+    if "changes" not in cleaned:
+        cleaned["changes"] = []
+    if "core_change" not in cleaned:
         cleaned["core_change"] = "本轮无新内容"
     return cleaned
 
@@ -72,8 +92,13 @@ def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
 MEANINGLESS_CORE: Set[str] = {"无", "暂无", "无有效增量", "无新增", "none", "null", "",
                             "无变化", "无明显变化", "无核心变化", "无核心变更"}
 WHITESPACE_PATTERN = re.compile(r'\s+')
-CORE_CHANGE_PATTERN = re.compile(r'<core_change>(.*?)(?:</core_change>|\Z)', re.DOTALL | re.IGNORECASE)
-STAGE_TAG_PATTERN = re.compile(r'<stage_tag>(.*?)(?:</stage_tag>|\Z)', re.DOTALL | re.IGNORECASE)
+# 匹配零对或多对 <stage_tag>【状态】</stage_tag><core_change>内容</core_change>
+# 每对独立捕获，不依赖间距/换行
+PAIR_PATTERN = re.compile(
+    r'<stage_tag>\s*【([^】]+)】\s*</stage_tag>\s*<core_change>\s*(.*?)\s*</core_change>',
+    re.DOTALL | re.IGNORECASE
+)
+VALID_STATES: Set[str] = {"已实施", "计划", "探讨", "已取消"}
 
 # 【状态前缀正则】：提取 【已实施】/【计划】/【探讨】
 # 匹配以 【内容】 开头的文本，捕获括号内 1-10 个字符
@@ -165,7 +190,7 @@ _LIST_ITEM_RE = re.compile(r'^[-*•]\s+(.+)$', re.MULTILINE)
 
 def _build_empty_result() -> Tuple[Dict, None, None]:
     """返回退化空结果。"""
-    return {"core_change": "本轮无新内容"}, None, None
+    return {"changes": [], "core_change": "本轮无新内容"}, None, None
 
 
 def _safe_truncate(text: str, max_len: int = 100) -> str:
@@ -203,7 +228,7 @@ def _safe_truncate(text: str, max_len: int = 100) -> str:
 
 
 def _json_to_v1_markdown(data: dict) -> str:
-    """将旧格式 5 类英 key JSON 转换为新 4 类 Markdown 格式字符串。"""
+    """将 JSON 格式 Fct（含 changes 列表）转换为 Markdown + XML 格式字符串。"""
     if not data or not isinstance(data, dict):
         return str(data) if data else ""
 
@@ -223,28 +248,42 @@ def _json_to_v1_markdown(data: dict) -> str:
                 parts.append(f"- {str(item)[:50]}")
             parts.append("")
 
-    core_change = data.get("core_change", "").strip()
-    if core_change:
-        # 过滤无意义 core_change
-        if core_change not in MEANINGLESS_CORE and core_change != "本轮无新内容":
+    # 多对 <stage_tag>/<core_change>
+    changes = data.get("changes", [])
+    if changes:
+        for c in changes:
+            stag = c.get("stage_tag", "").strip()
+            core = c.get("core_change", "").strip()
+            if stag in VALID_STATES and core and core not in MEANINGLESS_CORE:
+                parts.append(f"<stage_tag>\n【{stag}】\n</stage_tag>")
+                parts.append(f"<core_change>\n{core}\n</core_change>")
+                parts.append("")
+    else:
+        # 旧格式回退：单个 core_change
+        core_change = data.get("core_change", "").strip()
+        if core_change and core_change not in MEANINGLESS_CORE and core_change != "本轮无新内容":
             parts.append(f"<core_change>\n{core_change}\n</core_change>")
             parts.append("")
 
     result = "\n".join(parts).strip()
     if not result:
-        # 只有 core_change 无意义时也返回
-        if core_change:
+        core_change = data.get("core_change", "").strip()
+        if core_change and core_change not in MEANINGLESS_CORE and core_change != "本轮无新内容":
             return f"<core_change>\n{core_change}\n</core_change>"
         return ""
     return result
 
 
-def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[str], Optional[ItemState]]:
-    """解析 LLM 输出的 4 类 Markdown + XML 格式，返回 (l1_dict, Hdl, core_state)。
+def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[str], None]:
+    """解析 LLM 输出的 4 类 Markdown + XML 格式，返回 (fct_dict, Hdl, None)。
 
-    fct_dict 包含 5 类英 key（core_change, new_materials, objective_facts, consensus, todo）。
-    Hdl 是 core_change 的首句，最多 100 字。
-    core_state 是 core_change 的状态枚举（ItemState）。
+    fct_dict 包含:
+      - changes: list[dict] — 每项含 "stage_tag"(str) 和 "core_change"(str)
+      - new_materials, objective_facts, consensus, todo: list[str]
+      - core_change: str — 全部 core_change 的 "；" 拼接（向后兼容）
+
+    Hdl 是首条 core_change 的首句，最多 100 字。
+    core_state 始终为 None（已弃用，由 prompts 负责时态）。
     """
     if not llm_output or not llm_output.strip():
         logger.warning("[CA-METRIC] ca.l1.parse_fallback_count: llm_output is empty")
@@ -253,25 +292,17 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
     # 1. 物理截断尾随噪音
     text = _safe_truncate(llm_output, max_len=2000)
 
-    # 2. 提取 <core_change>...</core_change>
-    core_text: Optional[str] = None
-    match = CORE_CHANGE_PATTERN.search(text)
-    if match:
-        core_text = match.group(1).strip()
-        if core_text and (core_text in MEANINGLESS_CORE or core_text == "本轮无新内容"):
-            core_text = None
-    else:
-        logger.warning("[CA-METRIC] ca.l1.parse_fallback_count: no <core_change> tag found")
-        # 语义短路：无法提取核心变更，返回空结果
-        return _build_empty_result()
+    # 2. 提取零对或多对 <stage_tag>【状态】</stage_tag><core_change>...</core_change>
+    raw_pairs = PAIR_PATTERN.findall(text)
+    changes: List[Dict[str, str]] = []
+    for raw_state, raw_core in raw_pairs:
+        state = raw_state.strip()
+        core = raw_core.strip()
+        if state in VALID_STATES and core and core not in MEANINGLESS_CORE:
+            changes.append({"stage_tag": state, "core_change": core})
 
-    # 2.5 提取 <stage_tag>...</stage_tag>
-    stage_tag = ""
-    stag_match = STAGE_TAG_PATTERN.search(text)
-    if stag_match:
-        raw = stag_match.group(1).strip()
-        if raw in ("已实施", "计划", "探讨", "已取消"):
-            stage_tag = raw
+    if not changes:
+        logger.warning("[CA-METRIC] ca.l1.parse_fallback_count: no valid <stage_tag>/<core_change> pairs found")
 
     # 3. 提取 Markdown 4 类标题下的列表项
     section_order = [
@@ -281,7 +312,10 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
         ("后续行动", "todo"),
     ]
 
-    fct_dict: Dict[str, Any] = {"core_change": core_text or "本轮无新内容"}
+    fct_dict: Dict[str, Any] = {
+        "changes": changes,
+        "core_change": "；".join(c["core_change"] for c in changes) if changes else "本轮无新内容",
+    }
     for eng_key in ["new_materials", "objective_facts", "consensus", "todo"]:
         fct_dict[eng_key] = []
 
@@ -330,27 +364,22 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
         section_items[current_section] = current_items[:3]
 
     # 填入 fct_dict
-    fct_dict["stage_tag"] = stage_tag
     for eng_key in fct_dict:
-        if eng_key == "core_change":
+        if eng_key in ("changes", "core_change"):
             continue
         if eng_key in section_items:
             fct_dict[eng_key] = section_items[eng_key][:3]
 
-    # 4. 状态提取 + hdl_text
-    core_state: Optional[ItemState] = None
+    # 4. hdl_text = 首条 core_change 的首句（最多 100 字）
     hdl_text: Optional[str] = None
-    if core_text:
-        # 状态提取
-        normalized_core, core_state = parse_core_change_state(core_text)
-        # 更新 fct_dict 中的 core_change 为带状态前缀的版本
-        fct_dict["core_change"] = normalized_core
-        # hdl_text = 首句[:100]
-        first_sentence = normalized_core
-        for sep in ["。", "！", "？", ".", "!", "?"]:
-            if sep in normalized_core:
-                parts = normalized_core.split(sep, 1)
-                first_sentence = parts[0] + sep
+    if changes:
+        first_core = changes[0]["core_change"]
+        # 首句截断
+        first_sentence = first_core
+        for sep in ["。", "！", "？", ".", "!", "?", "\n"]:
+            if sep in first_core:
+                parts = first_core.split(sep, 1)
+                first_sentence = (parts[0] + sep).rstrip('\n\r')
                 break
         hdl_text = _safe_truncate(first_sentence, max_len=100)
         if hdl_text in MEANINGLESS_CORE:
@@ -359,4 +388,4 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
     if hdl_text is None:
         logger.warning("[CA-METRIC] ca.l0.skipped_empty: hdl_text is None/empty")
 
-    return (fct_dict, hdl_text, core_state)
+    return (fct_dict, hdl_text, None)

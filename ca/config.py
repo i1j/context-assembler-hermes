@@ -152,7 +152,7 @@ class Config:
     # ── 话题拣选（v4.6.0）──
 
     # 话题分割 Jaccard 阈值：首次合并入口（双实义轮）
-    TOPIC_JACCARD_ENTRY: ClassVar[float] = float(os.getenv("CA_TOPIC_JACCARD_ENTRY", "0.03"))
+    TOPIC_JACCARD_ENTRY: ClassVar[float] = float(os.getenv("CA_TOPIC_JACCARD_ENTRY", "0.02"))
     # 话题分割 Jaccard 阈值：链内扩展
     TOPIC_JACCARD_CHAIN: ClassVar[float] = float(os.getenv("CA_TOPIC_JACCARD_CHAIN", "0.04"))
     # 话题半径公式：最近邻形心距离的权重系数（r = min(max_intra, nearest/weight)）
@@ -161,8 +161,11 @@ class Config:
     TOPIC_MAX_UPGRADE: ClassVar[int] = int(os.getenv("CA_TOPIC_MAX_UPGRADE", "10"))
     # BG 类话题固定级别
     TOPIC_BG_LEVEL: ClassVar[str] = os.getenv("CA_TOPIC_BG_LEVEL", "L0")
-    # Jaccard 独立合并阈值（双实义轮，无需 todo_overlap）
-    TOPIC_JACCARD_MERGE: ClassVar[float] = float(os.getenv("CA_TOPIC_JACCARD_MERGE", "0.07"))
+
+    # 水位压力切割：累计字符 [8K, 16K] 区间内 j 线性扣减，超过 16K 必定分裂
+    ACCUMULATED_SPLIT_START: ClassVar[int] = int(os.getenv("CA_ACCUMULATED_SPLIT_START", "8000"))
+    ACCUMULATED_SPLIT_END: ClassVar[int] = int(os.getenv("CA_ACCUMULATED_SPLIT_END", "16000"))
+    JACCARD_PENALTY_MAX: ClassVar[float] = float(os.getenv("CA_JACCARD_PENALTY_MAX", "0.30"))
 
     # 已知模型上下文窗口（Hermes hook 不传 context_length，需自行查表）
     _MODEL_CONTEXT_WINDOW: ClassVar[Dict[str, int]] = {
@@ -293,8 +296,10 @@ class Config:
         pos_int("BM25_HIT_THRESHOLD", cls.BM25_HIT_THRESHOLD, min_v=1, max_v=20)
         pos_float("TOPIC_JACCARD_ENTRY", cls.TOPIC_JACCARD_ENTRY, min_v=0.01)
         pos_float("TOPIC_JACCARD_CHAIN", cls.TOPIC_JACCARD_CHAIN, min_v=0.01)
-        pos_float("TOPIC_JACCARD_MERGE", cls.TOPIC_JACCARD_MERGE, min_v=0.01)
         pos_float("TOPIC_RADIUS_WEIGHT", cls.TOPIC_RADIUS_WEIGHT, min_v=1.0)
+        pos_int("ACCUMULATED_SPLIT_START", cls.ACCUMULATED_SPLIT_START, min_v=1000)
+        pos_int("ACCUMULATED_SPLIT_END", cls.ACCUMULATED_SPLIT_END, min_v=2000)
+        pos_float("JACCARD_PENALTY_MAX", cls.JACCARD_PENALTY_MAX, min_v=0.0)
         pos_int("TOPIC_MAX_UPGRADE", cls.TOPIC_MAX_UPGRADE, max_v=20)
         if cls.TOPIC_BG_LEVEL not in ("L0", "L1", "L2"):
             errors.append(f"TOPIC_BG_LEVEL must be L0/L1/L2 (got {cls.TOPIC_BG_LEVEL})")
@@ -355,10 +360,12 @@ class Config:
             cls.BM25_HIT_THRESHOLD = int(os.getenv("CA_BM25_HIT_THRESHOLD", str(cls.BM25_HIT_THRESHOLD)))
             cls.TOPIC_JACCARD_ENTRY = float(os.getenv("CA_TOPIC_JACCARD_ENTRY", str(cls.TOPIC_JACCARD_ENTRY)))
             cls.TOPIC_JACCARD_CHAIN = float(os.getenv("CA_TOPIC_JACCARD_CHAIN", str(cls.TOPIC_JACCARD_CHAIN)))
-            cls.TOPIC_JACCARD_MERGE = float(os.getenv("CA_TOPIC_JACCARD_MERGE", str(cls.TOPIC_JACCARD_MERGE)))
             cls.TOPIC_RADIUS_WEIGHT = float(os.getenv("CA_TOPIC_RADIUS_WEIGHT", str(cls.TOPIC_RADIUS_WEIGHT)))
             cls.TOPIC_MAX_UPGRADE = int(os.getenv("CA_TOPIC_MAX_UPGRADE", str(cls.TOPIC_MAX_UPGRADE)))
             cls.TOPIC_BG_LEVEL = os.getenv("CA_TOPIC_BG_LEVEL", cls.TOPIC_BG_LEVEL)
+            cls.ACCUMULATED_SPLIT_START = int(os.getenv("CA_ACCUMULATED_SPLIT_START", str(cls.ACCUMULATED_SPLIT_START)))
+            cls.ACCUMULATED_SPLIT_END = int(os.getenv("CA_ACCUMULATED_SPLIT_END", str(cls.ACCUMULATED_SPLIT_END)))
+            cls.JACCARD_PENALTY_MAX = float(os.getenv("CA_JACCARD_PENALTY_MAX", str(cls.JACCARD_PENALTY_MAX)))
 
             cls.validate()
             logger.info("Configuration reloaded and validated.")
