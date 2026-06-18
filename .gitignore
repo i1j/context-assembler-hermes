@@ -9,3 +9,6 @@ __pycache__/
 # Temporary files
 .tmp-*
 working_copy.db
+
+# graphify cache (regeneratable)
+graphify-out/cache/
