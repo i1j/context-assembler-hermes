@@ -1,9 +1,9 @@
 """
-ca/cache.py — 内存缓存与 BM25 索引 (v4.4.0 alpha)
+ca/cache.py — 内存缓存与 BM25 索引 (v5.10)
 
 功能：
 - 不可变 BM25 快照 + 嵌入字典原子替换。
-- 支持对话轮与工具轮各自独立的索引。
+- 仅支持对话轮索引（工具轮缓存已移除 — 使用 turn_stream 替代）。
 - Copy‑on‑Write：重建索引在锁外执行。
 - 快照锁升级为 RLock，保证读写互斥。
 - 冷却重试与并发保护，防止重建任务雪崩。
@@ -115,16 +115,10 @@ class BM25Okapi:
 
 
 class BM25Snapshot:
-    def __init__(self, bm25: BM25Okapi, turn_indices: List[TurnKey], fct_embeddings: Dict[TurnKey, List[float]],
-                 tool_bm25: Optional[BM25Okapi] = None,
-                 tool_turn_keys: Optional[List[TurnKey]] = None,
-                 tool_fct_embeddings: Optional[Dict[TurnKey, List[float]]] = None):
+    def __init__(self, bm25: BM25Okapi, turn_indices: List[TurnKey], fct_embeddings: Dict[TurnKey, List[float]]):
         self.bm25 = bm25
         self.turn_indices = turn_indices
         self.fct_embeddings = fct_embeddings
-        self.tool_bm25 = tool_bm25
-        self.tool_turn_keys = tool_turn_keys or []
-        self.tool_fct_embeddings = tool_fct_embeddings or {}
 
 
 class AssemblyCache:
@@ -134,15 +128,6 @@ class AssemblyCache:
         self.fct_texts: Dict[int, str] = {}
         self.hdl_embeddings: Dict[int, List[float]] = {}
         self.fct_embeddings: Dict[int, List[float]] = {}
-
-        self.tool_hdl_texts: Dict[Tuple[int, int], str] = {}
-        self.tool_fct_texts: Dict[Tuple[int, int], str] = {}
-        self.tool_hdl_embeddings: Dict[Tuple[int, int], List[float]] = {}
-        self.tool_fct_embeddings: Dict[Tuple[int, int], List[float]] = {}
-
-        # PR3: 工具组摘要缓存 (assistant{tc} 行)
-        self.tool_group_hdl_texts: Dict[Tuple[int, int], str] = {}
-        self.tool_group_fct_texts: Dict[Tuple[int, int], str] = {}
 
         self._snapshot: Optional[BM25Snapshot] = None
         self._snapshot_lock = threading.RLock()
@@ -168,15 +153,6 @@ class AssemblyCache:
                 self.hdl_embeddings[turn_index] = hdl_emb
             if fct_emb is not None:
                 self.fct_embeddings[turn_index] = fct_emb
-            self._dirty = True
-        self._submit_rebuild()
-
-    def add_tool_group(self, turn_index, api_call_count, hdl_text, fct_text):
-        """增量更新工具组缓存。key=(turn_index, api_call_count) 支持一轮多组。"""
-        gkey = (turn_index, api_call_count)
-        with self._lock:
-            self.tool_group_hdl_texts[gkey] = hdl_text
-            self.tool_group_fct_texts[gkey] = fct_text
             self._dirty = True
         self._submit_rebuild()
 
@@ -223,8 +199,6 @@ class AssemblyCache:
                 return
             fct_copy = dict(self.fct_texts)
             fct_emb_copy = dict(self.fct_embeddings)
-            tool_fct_copy = dict(self.tool_fct_texts)
-            tool_fct_emb_copy = dict(self.tool_fct_embeddings)
             self._dirty = False
 
         dialogue_bm25, dialogue_turn_indices, dialogue_fct_emb = None, [], {}
@@ -235,19 +209,10 @@ class AssemblyCache:
             dialogue_turn_indices = [idx for idx, _ in dialogue_corpus]
             dialogue_fct_emb = {idx: fct_emb_copy[idx] for idx in dialogue_turn_indices if idx in fct_emb_copy}
 
-        tool_bm25, tool_turn_keys, tool_fct_emb = None, [], {}
-        sorted_tool = sorted(tool_fct_copy.items(), key=lambda x: (x[0][0], x[0][1]))
-        tool_corpus = [(key, txt) for key, txt in sorted_tool if txt.strip()]
-        if tool_corpus:
-            tool_bm25 = BM25Okapi(tool_corpus)
-            tool_turn_keys = [key for key, _ in tool_corpus]
-            tool_fct_emb = {key: tool_fct_emb_copy[key] for key in tool_turn_keys if key in tool_fct_emb_copy}
-
-        snapshot = BM25Snapshot(dialogue_bm25, dialogue_turn_indices, dialogue_fct_emb,
-                                tool_bm25, tool_turn_keys, tool_fct_emb)
+        snapshot = BM25Snapshot(dialogue_bm25, dialogue_turn_indices, dialogue_fct_emb)
         with self._snapshot_lock:
             self._snapshot = snapshot
-        logger.debug("BM25 snapshot rebuilt, dialogue=%d, tool=%d", len(fct_copy), len(tool_fct_copy))
+        logger.debug("BM25 snapshot rebuilt, dialogue=%d", len(fct_copy))
 
     def get_bm25_snapshot(self) -> Optional[BM25Snapshot]:
         with self._snapshot_lock:
@@ -260,15 +225,6 @@ class AssemblyCache:
     def get_snapshot_data(self) -> Tuple[Dict[int, str], Dict[int, str]]:
         with self._lock:
             return dict(self.fct_texts), dict(self.hdl_texts)
-
-    def get_tool_snapshot_data(self) -> Tuple[Dict[Tuple[int, int], str], Dict[Tuple[int, int], str]]:
-        with self._lock:
-            return dict(self.tool_fct_texts), dict(self.tool_hdl_texts)
-
-    def get_tool_group_snapshot_data(self) -> Tuple[Dict[Tuple[int, int], str], Dict[Tuple[int, int], str]]:
-        """获取工具组摘要数据。key 为 (turn_index, api_call_count)。"""
-        with self._lock:
-            return dict(self.tool_group_fct_texts), dict(self.tool_group_hdl_texts)
 
     def cancel_retry_timer(self):
         with self._retry_lock:
@@ -291,35 +247,16 @@ class CacheBuilder:
         self._store = store
 
     def build(self, session_id: str) -> AssemblyCache:
+        """Build cache from turn_stream (v5.0 storage)."""
         cache = AssemblyCache()
         try:
-            records = self._store.read_session(session_id)
+            from .store import read_turn_stream_all
+            records = read_turn_stream_all(self._store, session_id)
             with cache._lock:
                 for rec in records:
-                    if rec.get("turn_type") == "tool":
-                        key = (rec["turn_index"], rec.get("tool_sub_index", 0))
-                        cache.tool_hdl_texts[key] = rec.get("Hdl", "")
-                        cache.tool_fct_texts[key] = rec.get("Fct", "")
-                        if rec.get("hdl_embedding"):
-                            cache.tool_hdl_embeddings[key] = rec["hdl_embedding"]
-                        if rec.get("fct_embedding"):
-                            cache.tool_fct_embeddings[key] = rec["fct_embedding"]
-                    else:
-                        idx = rec["turn_index"]
-                        # PR3: 检测 assistant{tc} 行（有 tool_calls_json）→ 工具组缓存
-                        tc_json = rec.get("tool_calls_json")
-                        if tc_json:
-                            api_count = rec.get("api_call_count", 0)
-                            gkey = (idx, api_count)
-                            cache.tool_group_fct_texts[gkey] = rec.get("Fct", "")
-                            cache.tool_group_hdl_texts[gkey] = rec.get("Hdl", "")
-                        else:
-                            cache.hdl_texts[idx] = rec.get("Hdl", "")
-                            cache.fct_texts[idx] = rec.get("Fct", "")
-                            if rec.get("hdl_embedding"):
-                                cache.hdl_embeddings[idx] = rec["hdl_embedding"]
-                            if rec.get("fct_embedding"):
-                                cache.fct_embeddings[idx] = rec["fct_embedding"]
+                    idx = rec["turn"]
+                    cache.hdl_texts[idx] = rec.get("Hdl", "")
+                    cache.fct_texts[idx] = rec.get("Fct", "")
                 cache._dirty = True
             cache.rebuild_bm25_snapshot()
         except Exception as e:
@@ -329,12 +266,6 @@ class CacheBuilder:
                 cache.fct_texts.clear()
                 cache.hdl_embeddings.clear()
                 cache.fct_embeddings.clear()
-                cache.tool_hdl_texts.clear()
-                cache.tool_fct_texts.clear()
-                cache.tool_hdl_embeddings.clear()
-                cache.tool_fct_embeddings.clear()
-                cache.tool_group_hdl_texts.clear()
-                cache.tool_group_fct_texts.clear()
                 cache._dirty = True
             cache.rebuild_bm25_snapshot()
         return cache

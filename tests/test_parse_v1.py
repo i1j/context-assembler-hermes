@@ -1,13 +1,20 @@
-"""
-L1 摘要系统重构 — parse_v1_markdown_xml 全场景单元测试
+"""L1 摘要系统重构 — parse_v1_markdown_xml 全场景单元测试
 
 覆盖测试方案 §2.1 (P1-P15) + 交叉评审 §2.3 (X1-X6, X9)
 
 测试策略：
 - 纯函数直接导入，不 mock
 - 使用 from ca.post_process import parse_v1_markdown_xml, _safe_truncate, _json_to_v1_markdown
-- 部分断言可能因实现尚未完成而失败
-"""
+
+设计决策对照:
+  → L1-004: parse_v1_markdown_xml 防御性解析 (P1-P15 全景)
+  → L1-005: 截断检测双重校验 (test_truncated_*)
+  → L1-009: _safe_truncate 降 . 优先级 (test_safe_truncate_*)
+  → L1-010: re.compile 预编译正则 (test_regex_*)
+  → L1-011: MEANINGLESS_CORE 语义短路 (test_meaningless_*)
+Wiki: design/decision-points-wiki.md §L1-004~L1-011
+
+  → tests/INDEX.md — 测试套件总览"""
 import pytest
 import re
 

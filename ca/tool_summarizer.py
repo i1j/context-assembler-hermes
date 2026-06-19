@@ -244,14 +244,20 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        # L0 v4: 结果优先，省略命令文本，无 t: 前缀
+        # L0 v4+: 命令前缀 + 关键输出，便于话题回顾
+        cmd_part = cmd_short[:40] if cmd_short else ""
         if key_lines:
-            out_part = key_lines[0][:92]
-            l0 = _safe_truncate(f"{error_prefix}{out_part}", 100)
+            out_part = key_lines[0][:50]
+            if cmd_part:
+                l0 = _safe_truncate(f"{error_prefix}{cmd_part}: {out_part}", 100)
+            else:
+                l0 = _safe_truncate(f"{error_prefix}{out_part}", 92)
         else:
-            # 无有效输出时降级到 exit=N
             if exit_code is not None:
-                l0 = f"exit={exit_code}"
+                if cmd_part:
+                    l0 = _safe_truncate(f"{cmd_part} (exit={exit_code})", 100)
+                else:
+                    l0 = f"exit={exit_code}"
             else:
                 l0 = _safe_truncate(f"({total_effective} lines)", 100)
         return l1, l0
@@ -339,54 +345,70 @@ class ToolSummarizer:
         return l1, l0
 
     def _summarize_read_file(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
-        """read_file 结构化摘要：文件名 + 行数范围"""
+        """read_file Fct=Elm 全量：取文件原文，去掉冗余（path/offset/limit 已在 tool_args）"""
         args = tool_call_msg.get("function", {}).get("arguments", {})
         path = args.get("path", "")
         offset = args.get("offset", 1)
         limit = args.get("limit", "?")
-        thought = tool_call_msg.get("content", "")
-
         path_short = self._sanitize_path(path)
 
-        # 检查结果中是否包含行数信息
+        # 从 tool 响应中提取 文件原文 + total_lines
+        result_content = ""
         total_lines = "?"
+        error = None
         for resp in tool_responses:
             c = resp.get("content", "")
-            if isinstance(c, str) and c.startswith("Line "):
-                # Hermes read_file 格式: "Line 1|...\nLine 2|..."
-                lines = c.split("\n")
-                total_lines = len(lines)
-                break
-            elif isinstance(c, str):
-                # 优先从 JSON 响应中提取 total_lines 字段（read_file 标准格式）
-                try:
-                    parsed = json.loads(c)
-                    if isinstance(parsed, dict) and "total_lines" in parsed:
+            if not isinstance(c, str):
+                continue
+            try:
+                parsed = json.loads(c)
+                if not isinstance(parsed, dict):
+                    continue
+                # 逐级判断响应类型
+                if parsed.get("error"):
+                    error = parsed["error"]
+                    continue  # error 不一定是最终状态，继续循环可能有正常结果
+                if parsed.get("status") == "unchanged" or parsed.get("dedup"):
+                    # dedup 命中：无新内容，保留 path 信息
+                    result_content = parsed.get("message", "File unchanged (dedup)")
+                    if "total_lines" in parsed:
                         total_lines = parsed["total_lines"]
-                        break
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                # fallback: 纯文本行数分割（JSON 解码失败时）
-                lines = [l for l in c.split("\n") if l.strip()]
-                if lines:
-                    total_lines = len(lines)
+                    break
+                # 正常读取：提取文件原文
+                if "content" in parsed:
+                    result_content = parsed["content"]
+                if "total_lines" in parsed:
+                    total_lines = parsed["total_lines"]
+                break
+            except (json.JSONDecodeError, TypeError):
+                continue
 
-        result_summary = f"read_file: {path_short} (lines {offset}-{limit}, loaded {total_lines})"
+        # result_summary = Elm 全量（文件原文），冗余字段不重复
+        if error:
+            result_summary = error
+            l1_error = error
+        else:
+            result_summary = result_content if result_content else "(empty response)"
+            l1_error = None
 
         l1 = {
             "tool_name": "read_file",
             "tool_args": args,
             "result_summary": result_summary,
-            "error": None,
+            "total_lines": total_lines,
+            "error": l1_error,
             "implicit_knowledge": [],
             "next_action_hint": "",
             "_assemble_status": 0,
         }
 
-        # L0: 文件名 + 行数，压缩路径前缀
-        fname = Path(path).name if path else "<unknown>"
-        parent = str(Path(path).parent)[-25:] if path else ""
-        l0 = _safe_truncate(f"read_file: …{parent}/{fname} ({total_lines} lines)", 100)
+        # Hdl：话题回顾用——路径 + 范围 + 行数
+        if error:
+            l0 = _safe_truncate(f"read_file: {path_short} — {error[:80]}", 100)
+        elif total_lines != "?":
+            l0 = _safe_truncate(f"read_file: {path_short} (lines {offset}-{limit}, {total_lines}行)", 100)
+        else:
+            l0 = _safe_truncate(f"read_file: {path_short} (lines {offset}-{limit})", 100)
         return l1, l0
 
     def _summarize_search_files(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
@@ -493,27 +515,136 @@ class ToolSummarizer:
         return l1, l0
 
     def _summarize_skill_view(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
-        """skill_view 结构化摘要：技能名 + 文件大小/结构概览"""
+        """结构化 Markdown 提取：frontmatter + 高价值章节全量 + 其余章节索引"""
         args = tool_call_msg.get("function", {}).get("arguments", {})
-        name = args.get("name", "?")
-        file_path = args.get("file_path", "")
-        thought = tool_call_msg.get("content", "")
+        skill_name = args.get("name", "?")
 
-        output = ""
+        # Parse tool response
+        body = description = ""
+        tags = []
+        linked_files = {}
+        status = "available"
         for resp in tool_responses:
             c = resp.get("content", "")
-            if c:
-                output = str(c)
-                break
+            if not c:
+                continue
+            try:
+                data = json.loads(str(c))
+                if isinstance(data, dict):
+                    body = data.get("body") or ""
+                    description = (data.get("description") or "").strip()
+                    tags = data.get("tags") or []
+                    linked_files = data.get("linked_files") or {}
+                    status = data.get("status", "available")
+                    break
+            except (json.JSONDecodeError, TypeError):
+                continue
 
-        total_lines = "?"
-        if output:
-            total_lines = len(output.split("\n"))
+        # Error / dedup
+        if not body:
+            desc_short = description[:60] if description else skill_name
+            l0 = _safe_truncate(f"skill_view: {skill_name} — {desc_short}", 100)
+            l1 = {
+                "tool_name": "skill_view",
+                "tool_args": args,
+                "result_summary": description or "[空]",
+                "error": None,
+                "implicit_knowledge": [],
+                "next_action_hint": "",
+                "_assemble_status": 0,
+            }
+            return l1, l0
 
-        name_short = str(name)[:60]
-        fp_short = f" ({file_path})" if file_path else ""
+        lines = body.split("\n")
+        total_lines = len(lines)
 
-        result_summary = f"skill_view: {name_short}{fp_short} — {total_lines} lines"
+        # ---- Parse frontmatter ----
+        body_offset = 0
+        if lines and lines[0].strip() == "---":
+            for i in range(1, len(lines)):
+                if lines[i].strip() == "---":
+                    body_offset = i + 1
+                    break
+        body_lines = lines[body_offset:]
+
+        # ---- Section parsing ----
+        PITFALL_KW = ["pitfall", "坑", "warning", "注意", "caveat", "踩坑", "⚠", "警告", "错误", "常见问题"]
+        HOWTO_KW = ["usage", "use", "step", "how to", "使用", "步骤", "操作", "用法", "方法", "流程"]
+        ALL_HIGH_KW = PITFALL_KW + HOWTO_KW
+
+        sections = []  # [(title, start_ln, line_count, code_count)]
+        cur_title = "## (文件头部)"
+        cur_start = body_offset
+        cur_lines = []
+        cur_cc = 0
+        in_code = False
+
+        for i, line in enumerate(body_lines):
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_code = not in_code
+                cur_lines.append(line)
+                continue
+            if in_code:
+                cur_lines.append(line)
+                continue
+            if stripped.startswith("## ") or stripped.startswith("### "):
+                sections.append((cur_title, cur_start, len(cur_lines), cur_cc))
+                cur_title = stripped
+                cur_start = body_offset + i
+                cur_lines = [line]
+                cur_cc = 0
+            else:
+                cur_lines.append(line)
+        sections.append((cur_title, cur_start, len(cur_lines), cur_cc))
+
+        # ---- Build output ----
+        fm_tag_str = ", ".join(tags) if tags else ""
+
+        parts = []
+        parts.append(f"[{skill_name}]")
+        if description:
+            parts.append(f" 描述: {description}")
+        if fm_tag_str:
+            parts.append(f" 标签: {fm_tag_str}")
+        parts.append(f" 状态: {status}")
+        if linked_files:
+            refs = linked_files.get("references") or []
+            tmpl = linked_files.get("templates") or []
+            scripts = linked_files.get("scripts") or []
+            parts.append(f" 引用: {len(refs)}篇, 模板: {len(tmpl)}, 脚本: {len(scripts)}")
+        parts.append(f" | 共{total_lines}行")
+        parts.append("")
+
+        high_parts = []
+        low_index = []
+        for title, start_ln, lc, cc in sections:
+            if lc == 0:
+                continue
+            tl = title.lower()
+            is_high = any(kw in tl for kw in ALL_HIGH_KW)
+            full_text = "\n".join(lines[start_ln:start_ln + lc])
+
+            if is_high:
+                high_parts.append(title)
+                high_parts.append(full_text)
+                high_parts.append("")
+            else:
+                extra = f" [代码块×{cc}]" if cc else ""
+                low_index.append(f"  {title} ({lc}行{extra})")
+
+        if high_parts:
+            parts.append("── 完整保留 ──")
+            parts.extend(high_parts)
+
+        if low_index:
+            parts.append("── 省略章节（可回查Elm）──")
+            parts.extend(low_index)
+
+        result_summary = "\n".join(parts).strip()
+
+        desc_short = _safe_truncate(description, 60) if description else skill_name
+        l0 = _safe_truncate(f"skill_view: {skill_name} — {desc_short} ({total_lines}行)", 100)
 
         l1 = {
             "tool_name": "skill_view",
@@ -524,8 +655,6 @@ class ToolSummarizer:
             "next_action_hint": "",
             "_assemble_status": 0,
         }
-
-        l0 = _safe_truncate(f"skill_view: {name_short}", 100)
         return l1, l0
 
     @staticmethod
@@ -652,9 +781,8 @@ class ToolSummarizer:
         return l1, l0
 
     def _summarize_todo(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
-        """todo 结构化摘要：提取 summary 计数，避免 raw dict 泄漏。"""
+        """todo Fct=全量列表：保留每项 content+status；Hdl=计数+首个提示"""
         args = tool_call_msg.get("function", {}).get("arguments", {})
-        thought = tool_call_msg.get("content", "")
 
         output = ""
         for resp in tool_responses:
@@ -682,31 +810,39 @@ class ToolSummarizer:
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        # 构建可读摘要
-        parts = []
-        if total:
-            if pending:
-                parts.append(f"{pending} pending")
-            if in_progress:
-                parts.append(f"{in_progress} in_progress")
-            if completed:
-                parts.append(f"{completed} completed")
-            if cancelled:
-                parts.append(f"{cancelled} cancelled")
-            summary_text = f"todo: {total} 项"
-            if parts:
-                summary_text += f"（{', '.join(parts)}）"
-        else:
-            summary_text = f"todo: {len(items)} 项"
+        # Fct: 全量任务列表（content+status），保留全部互信息
+        task_list = [{"content": t.get("content"), "status": t.get("status")}
+                     for t in items if t.get("content")]
+        result_summary = json.dumps(task_list, ensure_ascii=False) if task_list else "[]"
 
-        result_summary = summary_text
-        error = None
+        # Hdl: 计数 + 首个任务作线索
+        text_parts = []
+        if pending:
+            text_parts.append(f"{pending} pending")
+        if in_progress:
+            text_parts.append(f"{in_progress} in_progress")
+        if completed:
+            text_parts.append(f"{completed} completed")
+        if cancelled:
+            text_parts.append(f"{cancelled} cancelled")
+        summary_text = f"todo: {total} 项"
+        if text_parts:
+            summary_text += f"（{', '.join(text_parts)}）"
+        # 附加首个任务作线索
+        first_content = ""
+        for t in items:
+            c = t.get("content", "")
+            if c:
+                first_content = c[:40]
+                break
+        if first_content:
+            summary_text += f" — {first_content}"
 
         l1 = {
             "tool_name": "todo",
             "tool_args": args,
             "result_summary": result_summary,
-            "error": error,
+            "error": None,
             "implicit_knowledge": [],
             "next_action_hint": "",
             "_assemble_status": 0,
@@ -768,7 +904,7 @@ class ToolSummarizer:
 
         vip = self._extract_fields(combined_results, priority["vip"], full=True)
         p0 = self._extract_fields(combined_results, priority["p0"], full=True, truncate=True)
-        p1 = self._extract_fields(combined_results, priority["p1"], full=False, name_only=True)
+        p1 = self._extract_fields(combined_results, priority["p1"], full=True, truncate=True)
 
         result_summary = ""
         error = vip.get("error")
@@ -783,6 +919,14 @@ class ToolSummarizer:
                         raw = str(raw)
                     result_summary = self._sanitize_summary_text(raw)
                     break
+            if not result_summary:
+                for key in ["args", "parameters", "input", "metadata", "context"]:
+                    if key in p1 and p1[key]:
+                        raw = p1[key]
+                        if isinstance(raw, (dict, list)):
+                            raw = str(raw)
+                        result_summary = self._sanitize_summary_text(raw)
+                        break
             if not result_summary and vip.get("status"):
                 result_summary = self._sanitize_summary_text(vip["status"])
 

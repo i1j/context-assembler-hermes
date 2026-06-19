@@ -36,6 +36,7 @@ topic_jaccard_merge: 0.07
 topic_radius_weight: 2.0
 topic_max_upgrade: 10
 topic_bg_level: "L0"
+topic_peak_token: 20000      # 水位满压时的 Token 值（最后防线）
 
 # ── 数据库 ──
 db_max_retry: 3

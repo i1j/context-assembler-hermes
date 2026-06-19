@@ -1,7 +1,8 @@
-"""
-ca/config.py — 集中配置管理 (v4.4.0 alpha)
+"""ca/config.py — 集中配置管理 (v5.10)
 
-功能：
+设计决策: F-001 (Config 类变量集中管理)
+  viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-配置体系
+  功能：
 - 所有可调参数通过环境变量暴露，提供默认值。
 - 支持启动校验（validate）和运行时热重载（reload）。
 - 定义 _assemble_status 常量。
@@ -160,12 +161,18 @@ class Config:
     # 话题检索升级最大数
     TOPIC_MAX_UPGRADE: ClassVar[int] = int(os.getenv("CA_TOPIC_MAX_UPGRADE", "10"))
     # BG 类话题固定级别
-    TOPIC_BG_LEVEL: ClassVar[str] = os.getenv("CA_TOPIC_BG_LEVEL", "L0")
+    TOPIC_BG_LEVEL: ClassVar[str] = os.getenv("CA_TOPIC_BG_LEVEL", "Far")
 
-    # 水位压力切割：累计字符 [8K, 16K] 区间内 j 线性扣减，超过 16K 必定分裂
-    ACCUMULATED_SPLIT_START: ClassVar[int] = int(os.getenv("CA_ACCUMULATED_SPLIT_START", "8000"))
-    ACCUMULATED_SPLIT_END: ClassVar[int] = int(os.getenv("CA_ACCUMULATED_SPLIT_END", "16000"))
+    # 累积切割水位（Token 阈值）
+    ACCUMULATED_SPLIT_START: ClassVar[int] = int(os.getenv("CA_ACCUMULATED_SPLIT_START", "5000"))
+    ACCUMULATED_SPLIT_END: ClassVar[int] = int(os.getenv("CA_ACCUMULATED_SPLIT_END", "8000"))
     JACCARD_PENALTY_MAX: ClassVar[float] = float(os.getenv("CA_JACCARD_PENALTY_MAX", "0.30"))
+
+    # 话题切割水位压力：conv_hist 总 Token 达到此值时满压（线性扣减 Jaccard 0.30）
+    TOPIC_PEAK_TOKEN: ClassVar[int] = int(os.getenv(
+        "CA_TOPIC_PEAK_TOKEN",
+        str(_YAML_DEFAULTS.get("topic_peak_token", "20000")),
+    ))
 
     # 已知模型上下文窗口（Hermes hook 不传 context_length，需自行查表）
     _MODEL_CONTEXT_WINDOW: ClassVar[Dict[str, int]] = {
@@ -229,7 +236,6 @@ class Config:
     BACKFILL_TOOL_RATE: ClassVar[int] = int(os.getenv("CA_BACKFILL_TOOL_RATE", "5"))
     TOOL_PRE_UPGRADE_WAIT_TIMEOUT: ClassVar[int] = int(os.getenv("CA_TOOL_PRE_UPGRADE_WAIT_TIMEOUT", "30"))
     TOOL_FIELD_PRIORITY_PROFILE: ClassVar[str] = os.getenv("CA_TOOL_FIELD_PRIORITY_PROFILE", "")
-    CA_OV_SUBMIT_ENABLED: ClassVar[bool] = os.getenv("CA_OV_SUBMIT_ENABLED", "1").strip().lower() in ("1", "true", "yes")
 
     SHUTDOWN_TIMEOUT: ClassVar[int] = int(os.getenv("CA_SHUTDOWN_TIMEOUT", "5"))
     BM25_HIT_THRESHOLD: ClassVar[int] = int(os.getenv("CA_BM25_HIT_THRESHOLD", "5"))
@@ -301,8 +307,8 @@ class Config:
         pos_int("ACCUMULATED_SPLIT_END", cls.ACCUMULATED_SPLIT_END, min_v=2000)
         pos_float("JACCARD_PENALTY_MAX", cls.JACCARD_PENALTY_MAX, min_v=0.0)
         pos_int("TOPIC_MAX_UPGRADE", cls.TOPIC_MAX_UPGRADE, max_v=20)
-        if cls.TOPIC_BG_LEVEL not in ("L0", "L1", "L2"):
-            errors.append(f"TOPIC_BG_LEVEL must be L0/L1/L2 (got {cls.TOPIC_BG_LEVEL})")
+        if cls.TOPIC_BG_LEVEL not in ("Act", "Rel", "Far"):
+            errors.append(f"TOPIC_BG_LEVEL must be Act/Rel/Far (got {cls.TOPIC_BG_LEVEL})")
 
         if errors:
             raise ValueError("Configuration validation failed:\n" + "\n".join(errors))

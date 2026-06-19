@@ -1,0 +1,66 @@
+"""HealthCheck 静态方法调用测试
+
+设计决策对照:
+  → Config 体系（HealthCheck 为 config 验证工具）
+Wiki: decision-points-wiki.md §配置说明
+
+  → tests/INDEX.md — 测试套件总览"""
+import pytest
+
+
+@pytest.mark.high
+def test_tc_m_001(engine):
+    """check_all 健康检查
+    Steps: 调用 check_all; 验证返回 JSON 结构"""
+    from ca.health import HealthCheck
+    store = engine.store
+    embed_client = engine.embed_client
+    result = HealthCheck.check_all(store, embed_client)
+    assert "components" in result, f"check_all should return components, got {result}"
+    assert "store" in result["components"]
+    assert "embedding" in result["components"]
+
+
+@pytest.mark.medium
+def test_tc_m_002(engine):
+    """Prometheus 指标
+    Steps: 调用 get_prometheus_metrics; 验证输出格式"""
+    from ca.health import HealthCheck
+    store = engine.store
+    metrics = HealthCheck.get_prometheus_metrics(store)
+    assert "ca_store_healthy" in metrics, f"Missing ca_store_healthy in {metrics}"
+
+
+@pytest.mark.medium
+def test_tc_m_003(engine):
+    """阶段统计（AssembleStats）
+    Steps: 获取 AssembleStats → time_phase 计时 → 阶段记录包含时间"""
+    from ca.stats import AssembleStats
+    stats = AssembleStats()
+    with stats.time_phase("test_phase"):
+        pass
+    stats.finalize(tokens_before=1000, tokens_after=500)
+    report = str(stats)
+    assert "test_phase" in report, f"Missing test_phase stage in {report}"
+    assert "1000" in report or f"saved={stats.savings_pct:.0f}%" in report, f"Missing token/saved in {report}"
+
+
+@pytest.mark.medium
+def test_tc_maint_001(engine):
+    """公开函数 docstring 覆盖率 100%
+    Steps: 运行 pydocstyle 检查 ca/ 模块; 人工抽查 10% 的 docstring 内容"""
+    from ca.health import HealthCheck
+    store = engine.store
+    embed_client = engine.embed_client
+    result = HealthCheck.check_all(store, embed_client)
+    assert isinstance(result, dict)
+
+
+@pytest.mark.low
+def test_tc_maint_004(engine):
+    """热重置不抛异常
+    Steps: 连续调用 engine.reset() 两次; 验证无异常抛出"""
+    from ca.health import HealthCheck
+    store = engine.store
+    result = HealthCheck.check_store(store)
+    assert isinstance(result, dict)

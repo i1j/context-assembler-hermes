@@ -1,4 +1,10 @@
-"""Unit tests for ca/tool_summarizer.py — ToolSummarizer & generate_group_summary."""
+"""Unit tests for ca/tool_summarizer.py — ToolSummarizer & generate_group_summary.
+
+设计决策对照:
+  → C-004: 工具轮不调 LLM — 规则引擎摘要 (test_tool_summarizer_*)
+Wiki: decision-points-wiki.md §C-004
+
+  → tests/INDEX.md — 测试套件总览"""
 import json
 import pytest
 

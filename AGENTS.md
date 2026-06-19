@@ -5,7 +5,7 @@
 | 项          | 值                                                                                |
 | ----------- | --------------------------------------------------------------------------------- |
 | 版本        | v5.10+ (命名统一 + TopicGradeManager + 增量缓存 + changes 列表格式)              |
-| 注入方式    | topic-aware 三级替换（`_simple_mutation_mode_v5` + `_incremental_mutation`） — turn_stream 查 Fct，按 grade(L2/L1/L0)替换 + 增量缓存 |
+| 注入方式    | topic-aware 三级替换（`_simple_mutation_mode_v5` + `_incremental_mutation`） — turn_stream 查 Fct，按 grade(ACT/REL/FAR)替换 + 增量缓存 |
 | plugin.yaml | v5.5.0                                                                    |
 | 部署方式    | 自包含独立副本                                                                    |
 | 插件路径    | `~/.hermes/profiles/tester/plugins/ca_assembler/`                               |
@@ -43,7 +43,7 @@ def _on_session_start(**kwargs: Any) -> None:
 行为：
 
 1. 创建 `CAContextAssemblerPlugin` 实例
-2. 检查断路器 `is_available()` → 3 次失败则 1 小时冷却
+2. 检查断路器 `_engine_errored` → 3 次失败则 1 小时冷却（in-memory）
 3. 从 `get_hermes_home()` 获取 profile 基路径
 4. DB 路径：`{hermes_home}/ca_cache/{session_id}.db`
 5. 通过 `session_manager.get(session_id, db_path)` 创建引擎
@@ -101,13 +101,16 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
      增量路径：复用 cache → delta 替换 → Fct pending 防护 → 更新缓存
 ```
 
-**A-stage 替换规则**（grade 三级驱动）：
+**A-stage 替换规则**（话题等级 → 行摘要等级）：
 
-| grade | user | assistant_fin | thought | tool | reasoning_content |
-|-------|------|--------------|---------|------|------------------|
-| L2 (Elm) | 原文保留 | 原文保留 | 原文保留 → 仅清理 `reasoning_content`/`tool_calls` | 原文保留 → 仅清理 `reasoning_content`/`tool_calls` | **pop** |
-| L1 (Fct) | 原文保留 | 原文保留 | 替换为 thought Fct | 替换为 per-tool Fct | **pop** |
-| L0 (Hdl) | 原文保留 | 原文保留 | 替换为 thought Fct[:150] | 替换为 per-tool Fct[:150] | **pop** |
+| 话题等级 | user | fin | thought（降一级） | tool（降一级） |
+|---|---|---|---|---|
+| **ACT** | 原文保留（ELM） | 原文保留（ELM） | 替换为 **FCT**（完整摘要） | 替换为 per-tool **FCT** |
+| **REL** | 替换为 **FCT**（完整摘要） | 替换为 **FCT**（完整摘要） | 替换为 **Fct[:150]**（HDL 截断摘要） | 替换为 per-tool **Fct[:150]** |
+| **FAR** | 替换为 **Fct[:150]**（HDL 截断摘要） | 替换为 **Fct[:150]**（HDL 截断摘要） | 清空 | 清空 |
+
+**降一级规则**：thought/tool 输出行摘要等级 = 话题等级 - 1（ACT→FCT, REL→HDL, FAR→清空）。
+user/fin 不降级，直接取话题等级（ACT→ELM原文保留, REL→FCT完整摘要, FAR→HDL截断摘要）。
 
 **尾部保护区**：倒数第 2 个 user 消息之后 → 原文保留（不受 grade 影响，所有 field 保持原样）。
 
@@ -203,48 +206,6 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 | `Hdl`        | TEXT    | Hdl（一句话标题，C/F-stage 写入）          |
 
 每行 = 一条消息切片。E-stage 写即落盘，F-stage 回写 Fct/Hdl。
-
-### turn_cache 表（旧表，兼容保留）
-
-**主键**：`(session_id, turn_index, api_call_count, seq_index)`
-
-| 字段                  | 类型    | 说明                                                      |
-| --------------------- | ------- | --------------------------------------------------------- |
-| `session_id`        | TEXT    | 会话 ID                                                   |
-| `turn_index`        | INTEGER | 对话轮次（从 1 开始）                                     |
-| `api_call_count`    | INTEGER | API 调用序号（0=user, 1..N=API 调用, 999999=final）       |
-| `seq_index`         | INTEGER | 组内消息序号（0=assistant{tc}, 1..M=tool 行）             |
-| `role`              | TEXT    | `user` / `assistant` / `tool` / `system`          |
-| `content`           | TEXT    | 消息文本内容（thought / tool result / final text）        |
-| `tool_call_id`      | TEXT    | 工具调用 ID（仅 role="tool" 时）                          |
-| `tool_name`         | TEXT    | 工具名（仅 role="tool" 时）                               |
-| `tool_calls_json`   | TEXT    | assistant 的 tool_calls 定义 JSON                         |
-| `finish_reason`     | TEXT    | `tool_calls` / `stop` / `length`（仅 assistant 行） |
-| `api_request_id`    | TEXT    | API 调用唯一 ID                                           |
-| `duration_ms`       | INTEGER | 执行耗时（仅 tool 行）                                    |
-| `status`            | TEXT    | `ok` / `error` / `blocked` / `cancelled`          |
-| `error_type`        | TEXT    | 错误类型                                                  |
-| `error_message`     | TEXT    | 错误消息                                                  |
-| `usage_json`        | TEXT    | Token 用量 JSON                                           |
-| `Fct`           | TEXT    | CA 摘要 JSON                                              |
-| `Hdl`           | TEXT    | 单行摘要（≤100 字符）                                    |
-| `hdl_embedding`      | BLOB    | Hdl 嵌入向量（4096 字节）                                  |
-| `fct_embedding`      | BLOB    | Fct 嵌入向量（4096 字节）                                  |
-| `bm25_tokens`       | TEXT    | BM25 分词                                                 |
-| `token_offset`      | INTEGER | 累计 Token 偏移                                           |
-| `query_embedding`   | BLOB    | 用户消息嵌入向量                                          |
-| `_assemble_status`  | INTEGER | 0=成功, 1=降级, 2=永久跳过                                |
-| `backfill_attempts` | INTEGER | L-stage 尝试次数                                          |
-| `created_at`        | TEXT    | 创建时间戳                                                |
-
-**行类型速查**：
-
-| 行类型          | `api_call_count` | `seq_index` | `role`  | 关键特征                                               |
-| --------------- | ------------------ | ------------- | --------- | ------------------------------------------------------ |
-| user            | 0                  | 0             | user      | 用户输入                                               |
-| assistant{tc}   | N（≥1）           | 0             | assistant | 含 `tool_calls_json`，`finish_reason="tool_calls"` |
-| tool            | N（≥1）           | ≥1           | tool      | 含 `tool_call_id`，`status`                        |
-| final assistant | 999999             | 0             | assistant | `finish_reason="stop"`                               |
 
 ### 存储特性（turn_stream）
 
@@ -355,13 +316,12 @@ if switched:
 ### Get Turn Grade：等级查询
 
 ```python
-grade = mgr.get_turn_grade(turn_num)  # 返回 "L2" | "L1" | "L0"
+grade = mgr.get_turn_grade(turn_num)  # 返回 TopicGrade.ACT | .REL | .FAR
 ```
 
 - 先在 topic_grades 缓存中查 topic→grade
 - 再查 turn→topic 映射
-- 都没有 → 返回 "L2"（保守——保留 Elm）
-- ⚠️ grade 返回值当前为字符串字面量（Pitfall 15/20 未修复）
+- 都没有 → 返回 TopicGrade.ACT（保守——完整保留）
 
 ### Reset
 
@@ -462,42 +422,21 @@ for role, count, fct_count in cur.fetchall():
     print(f'  {role}: {count} rows, {fct_count} with Fct')
 ```
 
-### Token 水位查询
-
-```python
-from ca import session_manager
-from pathlib import Path
-db_path = Path.home() / '.hermes/profiles/tester/ca_cache/{session_id}.db'
-engine = session_manager.get(session_id, str(db_path))
-water = engine.debug_token_budget()
-print(water)
-```
-
-**返回字段**：
-
-| 字段               | 类型  | 说明                                       |
-| ------------------ | ----- | ------------------------------------------ |
-| `context_length` | int   | 总 Token 窗口上限（`CA_CONTEXT_LENGTH`） |
-| `budget_max`     | int   | 可用预算上限（`context_length × 0.95`） |
-| `used_tokens`    | int   | 当前累计 token 偏移                        |
-| `remaining`      | int   | 剩余可用预算                               |
-| `usage_pct`      | float | 使用率百分比                               |
-
 ## 测试接口清单
 
-**全部 261 测试通过（17 ⏭️）**
+**全部 387 测试通过（10 ⏭️）**
 
 ```bash
 cd /home/i1j/.hermes/profiles/tester/plugins/ca_assembler
 python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts="
 ```
 
-**测试覆盖**：261 ✅ / 17 ⏭️ / 0 ❌
+**测试覆盖**：387 ✅ / 10 ⏭️ / 0 ❌
 
 | 测试文件 | 说明 | 状态 |
 |---------|------|------|
 | `test_plugin.py` | 插件适配层（生命周期、断路器、hook 注册） | ✅ 29 tests |
-| `test_store.py` | turn_cache + turn_stream CRUD | ✅ 33 tests |
+| `test_store.py` | turn_stream CRUD | ✅ 20 tests |
 | `test_fstage.py` | Fct 处理（_extract_hdl、_format_fct_for_display、_is_valid_fct） | ✅ 19 tests |
 | `test_astage.py` | A-stage 替换逻辑 | ✅ 5 tests |
 | `test_estage.py` | E-stage 写即落盘 hook | ✅ 2 tests |
@@ -523,8 +462,8 @@ python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts="
 | 问题 | 状态 |
 |------|------|
 | `topic_manager` 无专用测试文件 | ❌ missing |
-| `get_turn_grade()` 返回字符串字面量 `"L2"/"L1"/"L0"`，违反术语规则（应重构为 Grade 枚举） | ⏳ 未修复 |
-| `_simple_mutation_mode_v5` 中 `grade` 比较仍使用字符串字面量 | ⏳ 未修复 |
+| `get_turn_grade()` 返回值类型已改为 `TopicGrade` 枚举（ACT/REL/FAR） | ✅ 已修复 |
+| `_simple_mutation_mode_v5` 中 `grade` 比较已改用 `Grade`/`TopicGrade` 枚举 | ✅ 已修复 |
 | `reasoning_content`（模型思考链）被 A-stage 完全忽略 — 只替换 `content`，但 assistant 行还携带 `reasoning_content`（5-8KB/条）和 `tool_calls`，叠加占保护区外总 token 的 69% | ⏳ 待优化 |
 
 详见 [docs/debug/](docs/debug/) 和 [docs/changelog.md](docs/changelog.md)。

@@ -1,4 +1,10 @@
-"""Unit tests for ca/cache.py — AssemblyCache, BM25Okapi, CacheBuilder."""
+"""Unit tests for ca/cache.py — AssemblyCache, BM25Okapi, CacheBuilder.
+
+设计决策对照:
+  → D-001: AssemblyCache 类级别单例
+  → D-003: 本版仅对话轮 BM25 索引（工具缓存已移除以适配 turn_stream）
+  → RE-001: BM25 自实现零依赖
+  → tests/INDEX.md — 测试套件总览"""
 import pytest
 from ca.cache import AssemblyCache, BM25Okapi, tokenise, _is_cjk_char
 
@@ -80,13 +86,6 @@ class TestAssemblyCache:
         assert l1[1] == '{"core_change": "test"}'
         assert l0[1] == "Hdl"
 
-    def test_add_tool_group(self):
-        cache = AssemblyCache()
-        cache.add_tool_group(1, 1, "group_l0", '{"intent": "test"}')
-        gl1, gl0 = cache.get_tool_group_snapshot_data()
-        assert (1, 1) in gl1
-        assert gl1[(1, 1)] == '{"intent": "test"}'
-
     def test_get_snapshot_data_returns_copy(self):
         cache = AssemblyCache()
         cache.add_turn(1, "l0", "l1")
@@ -113,7 +112,3 @@ class TestAssemblyCache:
         l1, l0 = cache.get_snapshot_data()
         assert l1 == {}
         assert l0 == {}
-
-    def test_get_tool_snapshot_data_empty(self):
-        cache = AssemblyCache()
-        assert cache.get_tool_snapshot_data() == ({}, {})

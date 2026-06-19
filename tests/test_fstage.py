@@ -5,7 +5,13 @@
 - _extract_l0 (Hdl)
 - _format_fct_for_display
 - _is_valid_fct
-"""
+
+设计决策对照:
+  → R-004: F-stage 装配管线 (test_extract_*, test_format_*)
+  → L1-001: PDD — 放弃 JSON 强迫 (test_is_valid_fct)
+Wiki: design/decision-points-wiki.md §R-004, §L1-001
+
+  → tests/INDEX.md — 测试套件总览"""
 
 import json
 import pytest

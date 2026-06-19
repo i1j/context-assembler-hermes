@@ -1,9 +1,9 @@
 name: ca_assembler
-version: 5.5.0
+version: 5.10.0
 description: >
-  ContextAssembler v5.1 — Hermes 插件，增量 L0/L1/L2 分层摘要 + plan-based 消息组装 +
-  工具轮结构化摘要（10 个结构化 handler）+ L‑stage 异步补全 + 全指纹去重（原位标记）
-  + replace 模式注入重构（bypass_turns 统一、_format_tool_group_assembly、独立工具行消除）。
+  ContextAssembler v5.10 — Hermes 插件，增量 Elm/Fct/Hdl 分层摘要 + topic-aware
+  三级替换（ACT/REL/FAR）+ 角色队列匹配 + E-stage 写即落盘 + 话题分割（Jaccard）
+  + L‑stage 异步补全。
 pip_dependencies:
   - numpy
   - urllib3

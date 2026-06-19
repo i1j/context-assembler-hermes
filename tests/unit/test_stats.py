@@ -1,4 +1,9 @@
-"""Unit tests for ca/stats.py — AssembleStats."""
+"""Unit tests for ca/stats.py — AssembleStats.
+
+设计决策对照:
+  → CR-002: stats.py 补全计数器未输出 (test_completion_counter_*)
+  → R-004: F-stage metrics 记录 (test_assemble_stats_*)
+  → tests/INDEX.md — 测试套件总览"""
 import time
 import pytest
 from ca.stats import AssembleStats

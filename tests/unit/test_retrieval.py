@@ -1,4 +1,12 @@
-"""Unit tests for ca/retrieval.py — cosine_similarity, _dynamic_allocation, _rrf_fuse."""
+"""Unit tests for ca/retrieval.py — cosine_similarity, _dynamic_allocation, _rrf_fuse.
+
+设计决策对照:
+  → RE-001: BM25 自实现零依赖 (test_cosine_*)
+  → RE-002: RRF K=60 (test_rrf_*)
+  → C-015: 动态分配 BM25/向量候选 (test_dynamic_allocation_*)
+Wiki: decision-points-wiki.md §RE-001, §RE-002, §C-015
+
+  → tests/INDEX.md — 测试套件总览"""
 import pytest
 from ca.retrieval import (
     cosine_similarity,

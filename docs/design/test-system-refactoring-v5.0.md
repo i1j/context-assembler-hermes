@@ -36,4 +36,23 @@ P0 路径零测试覆盖。
 | `_extract_hdl` | Hdl 提取 + stage_tag 截断 | `test_fstage.py` |
 | `_format_fct_for_display` | 调试模式检测 + 格式化 | `test_fstage.py` |
 | `_is_valid_fct` | 有效性验证 | `test_fstage.py` |
-| `_on_post_tool_call_v5` | tool 行回填 + per-tool Fct | `test_estage.py` |
+|| `_on_post_tool_call_v5` | tool 行回填 + per-tool Fct | `test_estage.py` |
+|| `TopicGradeManager` (全模块) | detect、grade_on_switch、get_turn_grade、_grade_topics_by_radius、_compute_centroids 等 | `test_topic_manager.py` |
+|| 话题感知 A-stage | ACT/REL/FAR 三级驱动替换、_topic_mgr=None 防护、embed 失败降级 | `test_a_stage_topic_aware.py` |
+
+### 三、补充新增测试（2026-06-19）
+
+| 文件 | 测试数 | 覆盖内容 |
+|------|--------|---------|
+| `tests/unit/test_topic_manager.py` | 99 | 模块级函数（Jaccard/cosine/centroid/grade）+ TopicGradeManager 全部方法 + embed 失败场景 + 完整话题切换管线 |
+| `tests/stage/test_a_stage_topic_aware.py` | 13 | ACT/REL/FAR 三级替换、user 行/thought/tool/fin 各路替换、_topic_mgr=None 防护、tail boundary、多轮混合等级、embed 失败 |
+
+#### 覆盖的 7 个缺口
+
+1. ✅ **topic_manager.py 零测试覆盖** → 99 个单元测试覆盖全部方法和模块级函数
+2. ✅ **v4.6 遗留测试是假覆盖** → v5 _grade_topics_by_radius 3 参数版已测
+3. ✅ **A-stage 只测替换力学不测话题路由** → 13 个集成测试验证 ACT/REL/FAR → mutation
+4. ✅ **Grade 映射孤岛化** → 集成测试验证 from_topic_grade → 实际替换结果
+5. ✅ **P0 计划缺 topic_manager** → 补入
+6. ✅ **Mock 掩埋 embed 失败** → 单元 + 集成测试覆盖 embed 异常 → centroid=None → REL 降级
+7. ✅ **_topic_mgr=None 降级路径无人测** → 集成测试验证全线 ACT + 不 crash

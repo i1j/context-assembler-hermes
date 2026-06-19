@@ -1,5 +1,10 @@
-"""
-plugins/ca_assembler/topic_manager.py — 话题管理模块。
+"""plugins/ca_assembler/topic_manager.py — 话题管理模块 (v5.10)。
+
+设计决策: TP-001 (话题分割), TP-002 (话题定级)
+  viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-话题拣选重构-v460-已实现
+  - Jaccard 增量分割 + 强制短语 + 水位压力
+  - 半径定级: ACT/REL/FAR
+  - TopicGradeManager: 切换检测 + 首次 embedding 定级 + 冻结缓存
 
 职责：
   - 增量话题分割（Jaccard + 强制短语）
@@ -17,6 +22,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ca.config import Config
+from ca.grade import Grade, TopicGrade
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +92,9 @@ def _scan_forced_split_phrases(user_msg: str) -> bool:
     return False
 
 
+_INTERNAL_PENALTY = 0.30  # 水位满压扣减值（内部控制，不暴露）
+
+
 # ═══════════════════════════════════════════════════════════════
 # 形心计算
 # ═══════════════════════════════════════════════════════════════
@@ -127,7 +136,7 @@ def _grade_topics_by_radius(
     topic_data: Dict[int, Dict],
     q_emb: Optional[List[float]],
     retrieved_topics: Set[int],
-) -> Dict[int, str]:
+) -> Dict[int, TopicGrade]:
     """按半径 r 对话题三级定级。
 
     Args:
@@ -136,21 +145,21 @@ def _grade_topics_by_radius(
         retrieved_topics: 检索升级话题集合（当前不用，保留接口兼容）
 
     Returns:
-        topic_grades: {topic_id → "L0"|"L1"|"L2"}
+        topic_grades: {topic_id → TopicGrade.ACT | TopicGrade.REL | TopicGrade.FAR}
     """
-    topic_grades: Dict[int, str] = {}
+    topic_grades: Dict[int, TopicGrade] = {}
 
     if q_emb is None:
         for tid, td in topic_data.items():
-            topic_grades[tid] = Config.TOPIC_BG_LEVEL if td.get("is_bg") else "L1"
+            topic_grades[tid] = TopicGrade(Config.TOPIC_BG_LEVEL) if td.get("is_bg") else TopicGrade.REL
         return topic_grades
 
     for topic_id, td in topic_data.items():
         if td.get("is_bg"):
-            topic_grades[topic_id] = Config.TOPIC_BG_LEVEL
+            topic_grades[topic_id] = TopicGrade(Config.TOPIC_BG_LEVEL)
             continue
         if td.get("centroid") is None:
-            topic_grades[topic_id] = "L1"
+            topic_grades[topic_id] = TopicGrade.REL
             continue
 
         sim = _cosine_similarity(q_emb, td["centroid"])
@@ -164,13 +173,13 @@ def _grade_topics_by_radius(
             r = 0.05  # 最小半径保护
 
         if d <= r / 2.0:
-            topic_grades[topic_id] = "L2"
+            topic_grades[topic_id] = TopicGrade.ACT
         elif d <= r:
-            topic_grades[topic_id] = "L1"
+            topic_grades[topic_id] = TopicGrade.REL
         elif topic_id in retrieved_topics:
-            topic_grades[topic_id] = "L1"
+            topic_grades[topic_id] = TopicGrade.REL
         else:
-            topic_grades[topic_id] = "L0"
+            topic_grades[topic_id] = TopicGrade.FAR
 
         logger.debug("[CA_topic] topic %d: d=%.4f r=%.4f → %s", topic_id, d, r, topic_grades[topic_id])
 
@@ -184,6 +193,10 @@ def _grade_topics_by_radius(
 
 class TopicGradeManager:
     """话题等级管理器。
+
+    设计决策: TP-001 (话题分割), TP-002 (话题定级)
+      viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-话题拣选重构-v460-已实现
+      switch → grade_on_switch embedding 定级 → 冻结直到下次 switch
 
     职责：
       1. 增量话题分割——每次 pre_llm_call 检查新 turn 是否延续或切换话题
@@ -218,8 +231,8 @@ class TopicGradeManager:
         # 当前话题
         self._current_topic_id: Optional[int] = None
 
-        # 缓存等级 {topic_id → "L0"|"L1"|"L2"}
-        self._topic_grades: Dict[int, str] = {}
+        # 缓存等级 {topic_id → TopicGrade}
+        self._topic_grades: Dict[int, TopicGrade] = {}
 
         # 上次切换发生的 turn
         self._switch_turn: int = 0
@@ -238,7 +251,7 @@ class TopicGradeManager:
 
     # ── 公共接口 ──
 
-    def detect(self, turn: int, ca_rows: List[Dict], user_msg: str) -> bool:
+    def detect(self, turn: int, ca_rows: List[Dict], user_msg: str, total_tokens: int = 0) -> bool:
         """增量话题分割 + 切换检测。
 
         只在 turn > _last_processed_turn 时跑增量逻辑。
@@ -248,6 +261,7 @@ class TopicGradeManager:
             turn: 当前对话轮号
             ca_rows: get_turn_ca_rows() 返回的该轮数据
             user_msg: 当前轮的 user 消息原文
+            total_tokens: conv_hist 总 Token 估算（用于水位压力切割）
         """
         if turn <= self._last_processed_turn:
             return False
@@ -255,7 +269,7 @@ class TopicGradeManager:
         self._processed_ca_rows = ca_rows
 
         old_topic = self._current_topic_id
-        new_topic = self._assign_topic(turn, ca_rows, user_msg)
+        new_topic = self._assign_topic(turn, ca_rows, user_msg, total_tokens)
         self._current_topic_id = new_topic
         self._last_processed_turn = turn
 
@@ -290,9 +304,9 @@ class TopicGradeManager:
             self._topic_data, q_emb, set()
         )
 
-        # 新话题强制 L2
+        # 新话题强制 ACT（最详细等级）
         if self._current_topic_id is not None:
-            self._topic_grades[self._current_topic_id] = "L2"
+            self._topic_grades[self._current_topic_id] = TopicGrade.ACT
 
         self._switch_turn = switch_turn
 
@@ -300,22 +314,22 @@ class TopicGradeManager:
                     switch_turn,
                     {f"T{k}": v for k, v in self._topic_grades.items()})
 
-    def get_turn_grade(self, turn_num: int) -> str:
-        """返回指定 turn 的摘要等级。
+    def get_turn_grade(self, turn_num: int) -> TopicGrade:
+        """返回指定 turn 的话题等级。
 
         先在 topic_grades 缓存中查 topic→grade，再查 turn→topic。
-        如果都没有，返回 "L2"（保守——保留 Elm）。
+        如果都没有，返回 TopicGrade.ACT（保守——完整保留）。
         """
         if turn_num <= 0:
-            return "L2"
+            return TopicGrade.ACT
 
         topic_id = self._turn_to_topic.get(turn_num)
         if topic_id is None:
-            return "L2"
+            return TopicGrade.ACT
 
-        return self._topic_grades.get(topic_id, "L2")
+        return self._topic_grades.get(topic_id, TopicGrade.ACT)
 
-    def get_topic_grades(self) -> Dict[int, str]:
+    def get_topic_grades(self) -> Dict[int, TopicGrade]:
         """返回当前缓存的 {topic_id → grade}。"""
         return dict(self._topic_grades)
 
@@ -336,16 +350,22 @@ class TopicGradeManager:
 
     # ── 内部方法 ──
 
-    def _assign_topic(self, turn: int, ca_rows: List, user_msg: str) -> Optional[int]:
-        """增量话题分配 —— Jaccard 与当前话题累积 Fct 文本匹配。
+    def _assign_topic(self, turn: int, ca_rows: List, user_msg: str, total_tokens: int = 0) -> Optional[int]:
+        """增量话题分配 —— Jaccard + 水位压力与当前话题累积 Fct 文本匹配。
 
         策略：
           1. 强制短语 → 新话题
           2. 第一个 turn → 话题 1
-          3. 当前轮 Fct 与_current_topic累积文本做 Jaccard
+          3. 当前轮 Fct 与_current_topic累积文本做 Jaccard + 水位压力扣减
              - ≥ CHAIN (0.04) → 同话题，Fct 追加到累积文本
              - ≥ ENTRY (0.02) → 弱匹配，同话题，Fct 追加
              - 否则 → 新话题
+
+        Args:
+            turn: 当前对话轮号
+            ca_rows: get_turn_ca_rows() 返回的该轮数据
+            user_msg: 当前轮的 user 消息原文
+            total_tokens: conv_hist 总 Token 估算（水位压力用）
         """
         if turn <= 0 or not user_msg:
             return None
@@ -366,13 +386,16 @@ class TopicGradeManager:
             self._topic_text_profiles[1] = self._extract_turn_fct(ca_rows) or ""
             return 1
 
-        # 3. Jaccard 与当前话题累积文本匹配
+        # 3. Jaccard + 水位压力与当前话题累积文本匹配
         curr_fct = self._extract_turn_fct(ca_rows) or user_msg
         cur_tid = self._current_topic_id
 
         if cur_tid is not None and cur_tid in self._topic_text_profiles:
             profile = self._topic_text_profiles[cur_tid]
             j = _jaccard_text(curr_fct, profile)
+
+            # 水位压力：conv_hist 总 token 驱动 Jaccard 柔性扣减
+            j = self._apply_water_pressure(j, total_tokens)
 
             if j >= Config.TOPIC_JACCARD_CHAIN:
                 # 强匹配 → 延续
@@ -398,6 +421,32 @@ class TopicGradeManager:
         logger.debug("[CA_topic] new topic: turn %d → T%d", turn, tid)
         return tid
 
+    def _apply_water_pressure(self, raw_j: float, total_tokens: int) -> float:
+        """水位压力：conv_hist 总 token → 柔性扣减 Jaccard。
+
+        窗口由 TOPIC_PEAK_TOKEN 与 _INTERNAL_PENALTY 对称定位：
+          start = peak × 0.30
+          end   = peak
+
+        Args:
+            raw_j: Jaccard 原始匹配值
+            total_tokens: conv_hist 总 Token 估算
+
+        Returns:
+            扣减后的 effective_j
+        """
+        peak = Config.TOPIC_PEAK_TOKEN
+        start = int(peak * _INTERNAL_PENALTY)
+        penalty = _INTERNAL_PENALTY
+
+        if total_tokens <= start:
+            return raw_j
+        if total_tokens >= peak:
+            return raw_j - penalty
+
+        progress = (total_tokens - start) / (peak - start)
+        return raw_j - progress * penalty
+
     def _extract_turn_fct(self, ca_rows: List) -> Optional[str]:
         """从 ca_rows 中提取该轮的代表性 Fct 文本（用于 Jaccard 匹配）。
 
@@ -408,13 +457,13 @@ class TopicGradeManager:
         fin_fct = None
         any_fct = None
         for row in ca_rows:
-            fct = row[4] if len(row) > 4 else None
+            fct = row[5] if len(row) > 5 else None  # Fct
             if not fct:
                 continue
             any_fct = fct
-            if row[0] == 0:
+            if row[0] == 0:  # user 行
                 return fct
-            if row[1] == "assistant" and row[2] == "stop":
+            if row[1] == "assistant" and row[2] == "stop":  # fin 行
                 fin_fct = fct
         return fin_fct or any_fct
 
@@ -459,8 +508,8 @@ class TopicGradeManager:
                 # 找 user 行（seq=0）的 Fct 做 embed
                 fct_text = None
                 for row in ca_rows:
-                    if row[0] == 0:
-                        fct_text = row[4]  # Fct
+                    if row[0] == 0:  # seq=0 → user 行
+                        fct_text = row[5]  # Fct
                         break
                 if not fct_text:
                     continue
