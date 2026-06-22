@@ -32,6 +32,12 @@ from ca.config import Config
 from ca.grade import Grade, TopicGrade
 from .topic_manager import TopicGradeManager
 
+# ── ContextEngine ABC 壳 ──
+try:
+    from agent.context_engine import ContextEngine
+except ImportError:
+    ContextEngine = object  # fallback: duck-typing
+
 # ── bg_review 检测（当前轮类型识别，用于跳过 A-stage 组装）──
 try:
     from tools.skill_provenance import get_current_write_origin
@@ -169,7 +175,7 @@ def is_available() -> bool:
 
 
 def register(ctx) -> None:
-    """注册 CA 插件 v5.0 hooks。"""
+    """注册 CA 插件 v5.0 hooks 和 ContextEngine ABC。"""
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("on_session_end",   _on_session_end)
     ctx.register_hook("on_session_reset", _on_session_reset)
@@ -178,6 +184,8 @@ def register(ctx) -> None:
     ctx.register_hook("post_api_request", _on_post_api_request_v5)
     ctx.register_hook("pre_tool_call",    _on_pre_tool_call_v5)
     ctx.register_hook("post_tool_call",   _on_post_tool_call_v5)
+    # CE 壳注册 — 允许 context.engine: ca_assembler 配置选用
+    ctx.register_context_engine("ca_assembler", _ce_engine)
 
 
 # ── Hook 分发函数 ──
@@ -240,6 +248,207 @@ def _on_session_reset(**kwargs: Any) -> None:
 
 
 # ── 插件类 ──
+
+class CAContextEngine(ContextEngine):
+    """ContextEngine ABC 壳 — CA 的 context engine 注册形态。
+
+    should_compress 返回 False（压缩由 pre_llm_call hook 驱动），
+    compress() 作为手动 /compress 回退路径，复用 v5.10 数据管道
+    （turn_stream + topic_grade + Fct/Hdl/Elm）构建消息列表。
+
+    作为 singleton 与 _engines 注册表协同工作：
+      CE 的 on_session_start 记录 session_id，
+      compress() 通过 session_id 查找对应的 CAContextAssemblerPlugin 实例。
+    """
+
+    def __init__(self) -> None:
+        self._session_id: str = ""
+        # ContextEngine protocol fields
+        self.last_prompt_tokens: int = 0
+        self.last_completion_tokens: int = 0
+        self.last_total_tokens: int = 0
+        self.threshold_tokens: int = 0
+        self.context_length: int = 0
+        self.compression_count: int = 0
+        self.protect_first_n: int = 3
+        self.protect_last_n: int = 6
+        self.threshold_percent: float = 0.75
+
+    # -- ContextEngine: identity ------------------------------------------
+
+    @property
+    def name(self) -> str:
+        return "ca_assembler"
+
+    # -- ContextEngine: core ----------------------------------------------
+
+    def update_from_response(self, usage: dict) -> None:
+        """记录 token 用量（仅监控，不触发压缩）。"""
+        self.last_prompt_tokens = usage.get("prompt_tokens", 0) or 0
+        self.last_completion_tokens = usage.get("completion_tokens", 0) or 0
+        self.last_total_tokens = usage.get("total_tokens", 0) or 0
+
+    def should_compress(self, prompt_tokens: int = None) -> bool:
+        """返回 False — 组装由 pre_llm_call hook 每轮驱动。
+
+        CA 不通过 Hermes compress_context() 路径触发压缩。
+        但支持手动 /compress 走 compress() 路径。
+        """
+        return False
+
+    def compress(
+        self,
+        messages: list,
+        current_tokens: int = None,
+        focus_topic: str = None,
+        force: bool = False,
+    ) -> list:
+        """手动 /compress 回退路径。
+
+        复用 v5.10 的 _simple_mutation_mode_v5 逻辑（turn_stream + topic_grade），
+        但将 FAR 话题行整行删除而非替换为"略"。
+
+        返回新消息列表（比原始短，FAR 话题的行被删除）。
+        """
+        plugin = self._get_plugin()
+        if not plugin or plugin._engine_errored or not plugin._engine:
+            return messages
+
+        # 安全检查：如果已组装过且未 force，直接返回
+        last_len = getattr(self, '_last_compress_msg_len', 0)
+        if not force and len(messages) <= last_len:
+            return messages
+
+        # 复用 v5.10 尾区保护逻辑
+        tail_boundary = 0
+        _user_count = 0
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                _user_count += 1
+                if _user_count >= 2:
+                    tail_boundary = i
+                    break
+
+        # 通过 plugin 的 _simple_mutation_mode_v5 做内容替换
+        # 然后手动删 row：FAR 级的 thought/tool 行从 messages 中移除
+        from ca.store import get_turn_ca_rows
+        store = plugin._engine.store
+        sid = plugin._session_id
+
+        # Phase 1: 确定每个 turn 的 topic_grade
+        topic_mgr = plugin._topic_mgr
+
+        # Phase 2: 扫描需删除的 conv_idx
+        # 只有 FAR 排在 tail 保护区之外的 thought/tool 才删除
+        drop_indices: set = set()
+        current_turn = -1
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "")
+            if role == "system":
+                continue
+            if role == "user":
+                current_turn += 1
+            if i >= tail_boundary:
+                continue
+            if role not in ("assistant", "tool"):
+                continue
+            # thought/tool 行
+            if topic_mgr:
+                grade = topic_mgr.get_turn_grade(current_turn + 1)
+            else:
+                continue
+            # FAR → 删除整行
+            if grade == TopicGrade.FAR:
+                drop_indices.add(i)
+                # 如果是 tool 行，一并删除其前的 thought 行
+                if role == "tool":
+                    # 向前找同一 turn 的 assistant(tool_calls) 行
+                    for j in range(i - 1, -1, -1):
+                        if j in drop_indices:
+                            continue
+                        if messages[j].get("role") == "assistant" and messages[j].get("tool_calls"):
+                            # 检查是否是同一个 turn
+                            t_turn = -1
+                            for k in range(j + 1):
+                                if messages[k].get("role") == "user":
+                                    t_turn += 1
+                            if t_turn == current_turn:
+                                drop_indices.add(j)
+                                break
+                            break
+                        break
+
+        if not drop_indices:
+            return messages
+
+        # Phase 3: 构建新消息列表（跳过 drop_indices 中的索引）
+        new_messages = [m for i, m in enumerate(messages) if i not in drop_indices]
+
+        self._last_compress_msg_len = len(messages)
+        self.compression_count += 1
+        return new_messages
+
+    # -- ContextEngine: lifecycle -----------------------------------------
+
+    def on_session_start(self, session_id: str, **kwargs) -> None:
+        """记录当前 session_id。插件实例由 _on_session_start hook 创建。"""
+        self._session_id = session_id
+
+    def on_session_end(self, session_id: str = "", messages: list = None) -> None:
+        """透传到插件实例（清理 store 资源）。"""
+        plugin = self._get_plugin()
+        if plugin:
+            plugin.on_session_end()
+
+    def on_session_reset(self) -> None:
+        """重置 CE 状态（不触及 plugin 实例）。"""
+        self._session_id = ""
+        self.last_prompt_tokens = 0
+        self.last_completion_tokens = 0
+        self.last_total_tokens = 0
+        self.compression_count = 0
+
+    # -- ContextEngine: model switch --------------------------------------
+
+    def update_model(
+        self,
+        model: str = "",
+        context_length: int = 0,
+        base_url: str = "",
+        api_key: str = "",
+        provider: str = "",
+        api_mode: str = "",
+    ) -> None:
+        """更新 context_length + threshold_tokens。"""
+        self.context_length = context_length
+        self.threshold_tokens = int(max(context_length * self.threshold_percent, 1))
+
+    # -- ContextEngine: status / display ---------------------------------
+
+    def get_status(self) -> dict:
+        return {
+            "last_prompt_tokens": self.last_prompt_tokens,
+            "threshold_tokens": self.threshold_tokens,
+            "context_length": self.context_length,
+            "usage_percent": (
+                min(100, self.last_prompt_tokens / self.context_length * 100)
+                if self.context_length else 0
+            ),
+            "compression_count": self.compression_count,
+        }
+
+    # -- Internal: plugin lookup ------------------------------------------
+
+    def _get_plugin(self):
+        """从 _engines 注册表中查找当前 session 的 plugin 实例。"""
+        if not self._session_id:
+            return None
+        with _engines_lock:
+            return _engines.get(self._session_id)
+
+
+# CAContextEngine singleton — 由 register() 注册到 Hermes
+_ce_engine = CAContextEngine()
 
 class CAContextAssemblerPlugin:
     """CA 引擎的 Hermes 插件包装。

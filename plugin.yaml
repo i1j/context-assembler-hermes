@@ -1,9 +1,10 @@
 name: ca_assembler
-version: 5.10.0
+version: 6.0.0
 description: >
-  ContextAssembler v5.10 — Hermes 插件，增量 Elm/Fct/Hdl 分层摘要 + topic-aware
-  三级替换（ACT/REL/FAR）+ 角色队列匹配 + E-stage 写即落盘 + 话题分割（Jaccard）
-  + L‑stage 异步补全。
+  ContextAssembler v6.0 — Hermes 插件 + ContextEngine ABC 壳，
+  增量 Elm/Fct/Hdl 分层摘要 + topic-aware 三级替换（ACT/REL/FAR）
+  + 角色队列匹配 + E-stage 写即落盘 + 话题分割（Jaccard）
+  + F‑stage 异步补全 + CE 路压缩（手动 /compress）。
 pip_dependencies:
   - numpy
   - urllib3

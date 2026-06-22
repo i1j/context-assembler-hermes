@@ -514,9 +514,34 @@ Hermes 有两条完全独立的机制：
 
 `graphify-out/` 目录包含项目代码的静态知识图谱分析产物，用于快速理解架构和数据流。
 
-| 文件 | 用途 |
-|------|------|
-| `GRAPH_REPORT.md` | 图谱概况：2210 节点、2930 边、303 社区。God Nodes 排名、边关系分布、动态数据流、建议查询问题 |
+|| 文件 | 用途 |
+||------|------|
+|| `GRAPH_REPORT.md` | 图谱概况：2210 节点、2930 边、303 社区。God Nodes 排名、边关系分布、动态数据流、建议查询问题 |
+
+## ContextEngine 壳（v6.0）
+
+`CAContextEngine` 实现了 `agent.context_engine.ContextEngine` ABC，通过 `register()` 中的
+`ctx.register_context_engine("ca_assembler", _ce_engine)` 注册到 Hermes。
+
+### 与插件钩子的关系
+
+```
+| 路径         | 触发时机  | 后端                          |
+|-------------|----------|-------------------------------|
+| Hook 路径   | 每轮      | pre_llm_call → topic_grade → A-stage |
+| CE 路径     | on-demand | should_compress()=False → 手动 /compress |
+```
+
+`should_compress()` 返回 `False` —— 组装由 hook 路径驱动。CE 壳仅提供接口兼容，
+使 `context.engine: ca_assembler` 配置可识别 CA 为 context engine（供手动 `/compress` 使用）。
+
+### compress() 行为
+
+- 复用 v5.10 的 turn_stream + topic_grade 数据管道
+- tail 保护区（最后 2 轮 user）不动
+- FAR 级话题的 thought/tool 行整行删除 → 消息列表缩短
+- REL/ACT 级行保留原有 content 替换逻辑
+- Hermes 对 compress() 返回的短表做 archive_and_compact（同 session_id，不轮转）
 | `graph.html` | 可交互图谱（浏览器打开），可视化节点与边关系 |
 | `graph.json` | 完整图谱数据（节点+边），可被代码分析工具消费 |
 | `manifest.json` | 文件清单（AST 哈希、mtime），用于增量更新检测 |
