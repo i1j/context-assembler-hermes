@@ -14,6 +14,7 @@ ca/grade.py — Grade 常量和定级辅助 (v5.10)
 """
 
 from enum import Enum
+from typing import Optional
 
 
 class TopicGrade(str, Enum):
@@ -44,11 +45,16 @@ class Grade(str, Enum):
     HDL = "Hdl"  # 历元摘要（精简版 Fct）
 
     @classmethod
-    def from_topic_grade(cls, tg: "TopicGrade") -> "Grade":
-        """从话题等级映射到行摘要等级（降一级）。
+    def from_topic_grade(cls, tg: Optional["TopicGrade"]) -> Optional["Grade"]:
+        """从话题等级映射到行摘要等级（thought/tool 行降一级）。
 
         设计决策: TP-002
-          ACT→FCT, REL→HDL, FAR→ELM(fallback)
+          ACT→FCT (完整摘要), REL→HDL (截断150ch), FAR→None (清空为"略")
+          user/fin 行不降级，不使用此方法。
         """
-        mapping = {TopicGrade.ACT: cls.FCT, TopicGrade.REL: cls.HDL}
-        return mapping.get(tg, cls.ELM)
+        mapping = {
+            TopicGrade.ACT: cls.FCT,
+            TopicGrade.REL: cls.HDL,
+            TopicGrade.FAR: None,
+        }
+        return mapping.get(tg, cls.ELM)  # ELM as fallback for unknown

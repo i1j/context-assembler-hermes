@@ -252,7 +252,7 @@ def _on_session_reset(**kwargs: Any) -> None:
 class CAContextEngine(ContextEngine):
     """ContextEngine ABC 壳 — CA 的 context engine 注册形态。
 
-    should_compress 返回 False（压缩由 pre_llm_call hook 驱动），
+    should_compress 返回 True（每轮触发 compress_context 做 FAR 行删除），
     compress() 作为手动 /compress 回退路径，复用 v5.10 数据管道
     （turn_stream + topic_grade + Fct/Hdl/Elm）构建消息列表。
 
@@ -289,12 +289,20 @@ class CAContextEngine(ContextEngine):
         self.last_total_tokens = usage.get("total_tokens", 0) or 0
 
     def should_compress(self, prompt_tokens: int = None) -> bool:
-        """返回 False — 组装由 pre_llm_call hook 每轮驱动。
+        """始终返回 True — 每轮都走 CE 管线做 FAR 行删除。
 
-        CA 不通过 Hermes compress_context() 路径触发压缩。
-        但支持手动 /compress 走 compress() 路径。
+        由 should_compress 触发 compress_context() → compress() 路径，
+        compress() 原地删行 + 设 abort 标志，阻止 session rotation。
+
+        三个约束：
+          1. should_compress 无条件 True（不论 FAR 有无、对话长短）
+          2. compress 永不触发 session ID 变更（archive/rotation 全部跳过）
+          3. post_llm_call 从 _full_backup 完整恢复原始数据 → state.db
         """
-        return False
+        # Pre-set abort 标志，使 compress_context 跳过 archive/rotation
+        self._last_compress_aborted = True
+        self._last_summary_error = "CA: in-place FAR deletion, no rotation"
+        return True
 
     def compress(
         self,
@@ -303,16 +311,17 @@ class CAContextEngine(ContextEngine):
         focus_topic: str = None,
         force: bool = False,
     ) -> list:
-        """手动 /compress 回退路径。
+        """CE 管线入口：备份 + 删除 FAR thought/tool 行对。
 
-        复用 v5.10 的 _simple_mutation_mode_v5 逻辑（turn_stream + topic_grade），
-        但将 FAR 话题行整行删除而非替换为"略"。
-
-        返回新消息列表（比原始短，FAR 话题的行被删除）。
+        在 messages 上原地删除（messages[:] = filtered），
+        配合 should_compress 预设的 abort 标志使 compress_context
+        跳过 archive_and_compact 和 session rotation。
         """
         plugin = self._get_plugin()
         if not plugin or plugin._engine_errored or not plugin._engine:
             return messages
+        # 保存全量备份（含 FAR 行），供 post_llm_call 恢复原始内容 → state.db
+        plugin._full_backup = [{**m} for m in messages]
 
         # 安全检查：如果已组装过且未 force，直接返回
         last_len = getattr(self, '_last_compress_msg_len', 0)
@@ -381,12 +390,14 @@ class CAContextEngine(ContextEngine):
         if not drop_indices:
             return messages
 
-        # Phase 3: 构建新消息列表（跳过 drop_indices 中的索引）
-        new_messages = [m for i, m in enumerate(messages) if i not in drop_indices]
+        # Phase 3: 原地删除 — 修改 messages 长度但不换对象
+        # 配合 should_compress 预设的 abort 标志，compress_context 跳过 archive/rotation
+        new_msgs = [m for i, m in enumerate(messages) if i not in drop_indices]
+        messages[:] = new_msgs
 
         self._last_compress_msg_len = len(messages)
         self.compression_count += 1
-        return new_messages
+        return messages
 
     # -- ContextEngine: lifecycle -----------------------------------------
 
@@ -462,6 +473,7 @@ class CAContextAssemblerPlugin:
         self._session_id = ""
         self._context_length: int = Config.CONTEXT_LENGTH
         self._saved_history_snapshot: Optional[List[Dict]] = None
+        self._full_backup: Optional[List[Dict]] = None
         self._topic_mgr: Optional[TopicGradeManager] = None
         # A-stage 增量缓存
         self._A_stable_cache: Optional[List[Dict]] = None
@@ -521,6 +533,7 @@ class CAContextAssemblerPlugin:
     def on_session_reset(self) -> None:
         """重置引擎状态（/new 或 /reset 时调用）。"""
         self._saved_history_snapshot = None
+        self._full_backup = None
         self._A_stable_cache = None
         self._A_cache_turns = 0
         self._A_cache_is_stale = False
@@ -624,11 +637,6 @@ class CAContextAssemblerPlugin:
             TopicGrade.REL: Grade.FCT,   # 完整摘要
             TopicGrade.FAR: Grade.HDL,   # Hdl[:150]
         }
-        thought_tool_map = {
-            TopicGrade.ACT: Grade.FCT,   # 完整摘要
-            TopicGrade.REL: Grade.HDL,   # Hdl[:150]
-            TopicGrade.FAR: None,         # 清空
-        }
 
         for turn_num, rows in turn_rows.items():
             if turn_num < 0:  # turn 1（turn_num=0）现在可处理了
@@ -638,7 +646,7 @@ class CAContextAssemblerPlugin:
             topic_grade = self._topic_mgr.get_turn_grade(turn_num + 1) if self._topic_mgr else TopicGrade.ACT
 
             # 2. 算各 row_type 的映射等级
-            thought_grade = thought_tool_map.get(topic_grade)  # FCT / HDL / None(清空)
+            thought_grade = Grade.from_topic_grade(topic_grade)  # FCT / HDL / None(清空)
             user_grade = user_fin_map.get(topic_grade)          # ELM / FCT / HDL
 
             # 3. 读 DB（现在统一拉 7 列：seq, role, finish, tc_json, content, Fct, Hdl）
@@ -877,10 +885,10 @@ class CAContextAssemblerPlugin:
         turn_pending = False
 
         for turn_num, rows in turn_rows.items():
-            if turn_num <= 0:
+            if turn_num < 0:  # 与全量路径 Phase 2 一致：允许 turn_num=0（第一个 delta turn）进入
                 continue
 
-            ca_rows = get_turn_ca_rows(store, sid, turn_num)
+            ca_rows = get_turn_ca_rows(store, sid, turn_num + 1)  # DB 是 1-indexed
             if not ca_rows:
                 skipped += sum(1 for _, t in rows if t != "fin")
                 continue
@@ -1058,19 +1066,36 @@ class CAContextAssemblerPlugin:
         )
         logger.info("[CA_v5] post_llm_call: wrote asst_fin turn=%d seq=%d", turn, seq)
 
-        _snapshot = getattr(self, "_saved_history_snapshot", None)
-        if _snapshot is not None:
-            for i, orig_dict in enumerate(_snapshot):
+        _backup = getattr(self, "_full_backup", None)
+        if _backup is not None:
+            for i, orig_dict in enumerate(_backup):
                 if i >= len(conversation_history):
+                    # FAR 行已从 conv_hist 删除（compress 路径），
+                    # 不追加回内存；state.db 里有 archive 副本
                     break
                 ch = conversation_history[i]
-                # 还原所有被 mutation 修改的字段
                 for _key in ("content", "reasoning_content", "tool_calls"):
                     if _key in orig_dict:
                         ch[_key] = orig_dict[_key]
                     else:
                         ch.pop(_key, None)
-            self._saved_history_snapshot = None
+            self._full_backup = None
+            logger.info("[CA_v5] post_llm_call: restored %d rows from full_backup",
+                        len(conversation_history))
+        else:
+            _snapshot = getattr(self, "_saved_history_snapshot", None)
+            if _snapshot is not None:
+                for i, orig_dict in enumerate(_snapshot):
+                    if i >= len(conversation_history):
+                        break
+                    ch = conversation_history[i]
+                    # 还原所有被 mutation 修改的字段
+                    for _key in ("content", "reasoning_content", "tool_calls"):
+                        if _key in orig_dict:
+                            ch[_key] = orig_dict[_key]
+                        else:
+                            ch.pop(_key, None)
+                self._saved_history_snapshot = None
 
         engine.process_turn_f_stage(turn)
         logger.info("[CA_v5] post_llm_call: process_turn_f_stage called for turn %d", turn)

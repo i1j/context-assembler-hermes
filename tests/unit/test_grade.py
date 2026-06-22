@@ -55,9 +55,9 @@ class TestFromTopicGrade:
         """关联 → 降为历元摘要"""
         assert Grade.from_topic_grade(TopicGrade.REL) == Grade.HDL
 
-    def test_far_maps_to_elm(self):
-        """无关联 → 降为原文（与 topic 无关的 thought/tool 清空）"""
-        assert Grade.from_topic_grade(TopicGrade.FAR) == Grade.ELM
+    def test_far_maps_to_none(self):
+        """无关联 → thought/tool 行清空为"略" """
+        assert Grade.from_topic_grade(TopicGrade.FAR) is None
 
     def test_unknown_fallback_to_elm(self):
         """未知话题等级 → 安全降为原文"""

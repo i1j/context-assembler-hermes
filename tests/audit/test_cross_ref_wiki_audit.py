@@ -39,7 +39,7 @@ WIKI_CROSS_REF = {
         ("tests.unit.test_topic_manager", "TestGradeTopicsByRadius.test_no_query_embed_defaults_rel"),
         ("tests.unit.test_grade", "TestFromTopicGrade.test_act_maps_to_fct"),
         ("tests.unit.test_grade", "TestFromTopicGrade.test_rel_maps_to_hdl"),
-        ("tests.unit.test_grade", "TestFromTopicGrade.test_far_maps_to_elm"),
+        ("tests.unit.test_grade", "TestFromTopicGrade.test_far_maps_to_none"),
     ],
     "TP-004": [
         ("tests.stage.test_a_stage_topic_aware", "TestACTGrade.test_thought_replaced_with_full_fct"),
