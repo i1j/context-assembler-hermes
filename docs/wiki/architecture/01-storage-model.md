@@ -6,7 +6,7 @@ version_introduced: v5.0
 status: 已实装
 decisions: ["e-stage-write-on-receive", "stage-terminology-unification", "schema-v5-rewrite"]
 depends_on: []
-updated: 2026-06-18
+updated: 2026-06-22
 ---
 
 ## 问题
@@ -32,17 +32,15 @@ updated: 2026-06-18
 ```sql
 CREATE TABLE IF NOT EXISTS turn_stream (
     turn    INTEGER NOT NULL,   -- 对话轮序号
-    seq     INTEGER NOT NULL,   -- 轮内序号：0=user, 1..n=tool, 999999=final assistant
+    seq     INTEGER NOT NULL,   -- 轮内序号：0=user, 1=assistant thought, 2..n=tool, N=fin
     role    TEXT NOT NULL,
     content TEXT,
     tool_call_id   TEXT,
     tool_name      TEXT,
     tool_calls_json TEXT,
     finish_reason  TEXT,
-    Elm     TEXT NOT NULL DEFAULT '',  -- 原始数据
-    Fct     TEXT NOT NULL DEFAULT '',  -- 单轮摘要
+    Fct     TEXT NOT NULL DEFAULT '',  -- 摘要（E-stage 预填 Elm，F-stage 覆盖为真摘要）
     Hdl     TEXT NOT NULL DEFAULT '',  -- 历元摘要
-    _assemble_status INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (turn, seq)
 );
 ```
@@ -50,11 +48,9 @@ CREATE TABLE IF NOT EXISTS turn_stream (
 ### 实现要点
 
 - `turn` = 对话轮序号（从 1 递增）
-- `seq` = 轮内序号：0=user, 1=assistant 首行, 2..n=tool 行, 999999=finish_reason='stop' 的最终 assistant
-- `Elm` 列存原始 LLM request/response 文本
-- `Fct` 列由 F-stage 异步写入（单轮摘要）
+- `seq` = 轮内序号：0=user, 1=assistant thought, 2..n=tool 行, N=fin（finish_reason='stop' 的最终 assistant）
+- `Fct` 列由 E-stage 预填 Elm 原文，F-stage 异步覆盖为真摘要
 - `Hdl` 列由 F-stage 异步写入（跨轮历元摘要）
-- `_assemble_status` 列追踪 A-stage 装配状态
 
 详见 `ca/store.py` 的 `turn_stream` 表 schema。
 
@@ -67,9 +63,9 @@ PRAGMA table_info(turn_stream);
 -- 统计各类行分布
 SELECT role, seq, COUNT(*) FROM turn_stream GROUP BY role, seq;
 
--- 验证 Elm/Fct 覆盖率
-SELECT SUM(CASE WHEN Elm != '' THEN 1 ELSE 0 END) AS has_elm,
-       SUM(CASE WHEN Fct != '' THEN 1 ELSE 0 END) AS has_fct
+-- 验证 Fct/Hdl 覆盖率
+SELECT SUM(CASE WHEN Fct != '' THEN 1 ELSE 0 END) AS has_fct,
+       SUM(CASE WHEN Hdl != '' THEN 1 ELSE 0 END) AS has_hdl
 FROM turn_stream;
 ```
 

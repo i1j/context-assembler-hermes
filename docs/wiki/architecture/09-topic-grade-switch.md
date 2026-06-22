@@ -6,7 +6,7 @@ version_introduced: v5.5
 status: 已实装
 decisions: ["topic-grade-manager", "tail-protection"]
 depends_on: ["topic-segmentation", "storage-model"]
-updated: 2026-06-18
+updated: 2026-06-22
 ---
 
 ## 问题
@@ -24,35 +24,36 @@ updated: 2026-06-18
 
 ### 选定方案
 
-`get_turn_grade(turn_index) → Grade` 方法（`topic_manager.py`）：
+`get_turn_grade(turn_index) → TopicGrade` 方法（`topic_manager.py:318`）：
 
 ```python
-class Grade(enum.IntEnum):
-    ELM = 2   # L2：保留 Elm 原文
-    FCT = 1   # L1：替换为 Fct 全文
-    HDL = 0   # L0：截断 150ch
-
-def get_turn_grade(self, turn_index: int) -> Grade:
-    \"\"\"按形心半径定级\"\"\"
-    radius = self._compute_radius(turn_index)
-    if radius <= 25:
-        return Grade.ELM   # 近区：保留原文
-    elif radius <= 100:
-        return Grade.FCT   # 中区：摘要替换
-    else:
-        return Grade.HDL   # 远区：截断
+def get_turn_grade(self, turn_num: int) -> TopicGrade:
+    \"\"\"按形心半径定级 ACT/REL/FAR\"\"\"
+    topic_id = self._turn_to_topic.get(turn_num)
+    if topic_id is None:
+        return TopicGrade.ACT  # 保守：保留完整摘要
+    return self._topic_grades.get(topic_id, TopicGrade.ACT)
 ```
 
-**形心半径公式**：计算指定 turn 到当前话题形心的距离。
-- 形心 = 话题内所有 user turn 的平均向量位置（基于 turn 序号加权）
-- radius = abs(turn - centroid) / topic_spread
+等级由 `grade_on_switch()` 在话题切换时按形心半径公式计算并缓存：
+- **内球**（q→形心 ≤ topic_radius）→ `TopicGrade.ACT`（密切关联）
+- **外球**（q→形心 ≤ 2×topic_radius）→ `TopicGrade.REL`（关联）
+- **远距离**（q→形心 > 2×topic_radius）→ `TopicGrade.FAR`（无关联）
 
-**尾巴保护覆盖**：`protect_tail` 内的 turn 无论 radius 如何，强制返回 `Grade.ELM`。
+`TopicGrade` 与 `Grade` 的映射在 A-stage 完成：
+
+| TopicGrade | user/fin 行 | thought/tool 行（降一级） |
+|---|---|---|
+| ACT | Grade.ELM（原文保留） | Grade.FCT（完整摘要） |
+| REL | Grade.FCT（完整摘要） | Grade.HDL（截断 150ch） |
+| FAR | Grade.HDL（截断 150ch） | None（清空为"略"） |
+
+**尾巴保护覆盖**：`protect_tail` 内的 turn 无论 topic_grade 如何，强制不替换（原文保留）。
 
 ## 数据验证
 
 ```python
-# 查看各 turn 的 grade 分布
+# 查看各 turn 的 TopicGrade 分布
 from topic_manager import TopicGradeManager
 
 tgm = TopicGradeManager(...)
@@ -69,6 +70,6 @@ for turn in range(1, 50):
 
 ## 约束 / 已知问题
 
-- 25/100 阈值为经验值，不同对话模式可能需要不同配置
-- 形心计算基于 turn 序号，不反映实际语义距离
-- radius 极端值（>500）时所有历史都走 HDL，丢失细节
+- ACT/REL/FAR 三级阈值可通过 topic_manager 配置，不同对话模式可能需要不同配置
+- 形心计算基于 topic Fct 向量嵌入，不反映纯位置距离
+- tail 保护区全覆盖时，尾部 turn 即使属于 FAR 话题也不被替换

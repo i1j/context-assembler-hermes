@@ -6,7 +6,7 @@ version_introduced: v5.0
 status: 已实装
 decisions: ["e-stage-write-on-receive", "schema-v5-rewrite"]
 depends_on: ["storage-model"]
-updated: 2026-06-18
+updated: 2026-06-22
 ---
 
 ## 问题
@@ -28,10 +28,10 @@ Hermes 对话系统的 Hook 生命周期包含 `pre_llm_call`、`post_api_reques
 | Hook | 写入行 | 写入字段 | 时机 |
 |------|--------|----------|------|
 | `pre_llm_call` | `(turn=n, seq=0)` | `role='user'`, `content`, `Elm` | LLM 调用前，写 user 消息 |
-| `post_api_request` | `(turn=n, seq=0)` | `role='assistant'`, `content`, `tool_calls_json`, `finish_reason` | API 返回后，写 assistant 首行 |
+| `post_api_request` | `(turn=n, seq=1)` | `role='assistant'`, `content`, `tool_calls_json`, `finish_reason` | API 返回后，写 thought 行 |
 | `pre_tool_call` | `(turn=n, seq=m)` | `tool_call_id`, `tool_name` | 工具调用前，写元信息 |
 | `post_tool_call` | `(turn=n, seq=m)` | `role='tool'`, `content` | 工具执行后，写入结果 |
-| `post_llm_call` | `(turn=n, seq=999999)` | `role='assistant'`, `content`, `finish_reason='stop'` | 多轮对话结束 |
+| `post_llm_call` | `(turn=n, seq=max_seq+1)` | `role='assistant'`, `content`, `finish_reason='stop'` | LLM 最终回复，写 fin 行 |
 | `_f_stage_daemon` | 已有行 | `Fct`, `Hdl` | 异步线程 |
 
 ### 实现要点
@@ -39,7 +39,7 @@ Hermes 对话系统的 Hook 生命周期包含 `pre_llm_call`、`post_api_reques
 - **无回滚**：一行写入即不可撤销
 - E-stage 写入在 `ca/store.py` 的 `write_turn_stream()` 方法中完成
 - `pre_llm_call` 写入 user 行的同时，还负责注入 A-stage 装配的上下文文本
-- `post_api_request` 分为两种场景：单轮（`finish_reason='stop'` 时合并写 `seq=0`）和多轮的临时行
+- `post_api_request` 纯文本回复（无 tool_calls）跳过写入；有 tool_calls 时写入 thought 行 (seq=1)+ tool 占位行 (seq=2+)
 
 ## 数据验证
 
