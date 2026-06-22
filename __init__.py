@@ -366,26 +366,9 @@ class CAContextEngine(ContextEngine):
                 grade = topic_mgr.get_turn_grade(current_turn + 1)
             else:
                 continue
-            # FAR → 删除整行
+            # FAR → 删除整行（assistant+tool 都在主循环中被捕获，无需向后查找）
             if grade == TopicGrade.FAR:
                 drop_indices.add(i)
-                # 如果是 tool 行，一并删除其前的 thought 行
-                if role == "tool":
-                    # 向前找同一 turn 的 assistant(tool_calls) 行
-                    for j in range(i - 1, -1, -1):
-                        if j in drop_indices:
-                            continue
-                        if messages[j].get("role") == "assistant" and messages[j].get("tool_calls"):
-                            # 检查是否是同一个 turn
-                            t_turn = -1
-                            for k in range(j + 1):
-                                if messages[k].get("role") == "user":
-                                    t_turn += 1
-                            if t_turn == current_turn:
-                                drop_indices.add(j)
-                                break
-                            break
-                        break
 
         if not drop_indices:
             return messages
