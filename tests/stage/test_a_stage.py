@@ -104,13 +104,16 @@ class TestSimpleMutationModeV5:
         assert conv[10]["content"] == "old4"        # 尾区内 → 原文保留
 
     def test_no_fct_skips_line(self, ca_engine):
-        """turn_stream 无 Fct → 跳过（原文保留）"""
+        """turn_stream 无 Fct → 跳过（原文保留），assistant thought 也保留"""
         plugin = _make_plugin(ca_engine)
         conv = [{"role": "user", "content": "Q"} for _ in range(5)]
         conv += [{"role": "assistant", "content": "thought", "tool_calls": [{"id": "c1"}]},
                  {"role": "tool", "tool_call_id": "c1", "content": "result"}]
         plugin._simple_mutation_mode_v5(conv)
+        # tool 行因无 Fct 保留原文
         assert conv[6]["content"] == "result"
+        # assistant thought 行也保留原文
+        assert conv[5]["content"] == "thought"
 
     def test_user_lines_never_replaced(self, ca_engine):
         plugin = _make_plugin(ca_engine)
@@ -124,6 +127,130 @@ class TestSimpleMutationModeV5:
         plugin._simple_mutation_mode_v5(conv)
         assert plugin._saved_history_snapshot is not None
         assert plugin._saved_history_snapshot[0]["content"] == "hi"
+
+    # ── GAP-B: tail protect 边界 ──
+
+    def test_single_user_turn_all_tail(self, ca_engine):
+        """只有 1 个 user turn → 整个在尾巴内 → 原文保留"""
+        plugin = _make_plugin(ca_engine)
+        conv = [
+            {"role": "user", "content": "唯一的提问"},
+            {"role": "assistant", "content": "唯一的回答"},
+        ]
+        plugin._simple_mutation_mode_v5(conv)
+        # tail_boundary=0，所有消息都在尾巴内，原文不变
+        assert conv[0]["content"] == "唯一的提问"
+        assert conv[1]["content"] == "唯一的回答"
+
+    def test_three_protected(self, ca_engine):
+        """3 个 user turn（protect_tail=2）→ 第 1 个被处理，后 2 个保留"""
+        plugin = _make_plugin(ca_engine)
+        conv = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2"},
+            {"role": "user", "content": "Q3"},
+            {"role": "assistant", "content": "A3"},
+        ]
+        plugin._simple_mutation_mode_v5(conv)
+        # tail_boundary = index of 2nd user turn (Q2, i=2)
+        # Q1 (i=0) 和 A1 (i=1) 在保护区外，可被处理
+        # Q2 (i=2), A2 (i=3), Q3 (i=4), A3 (i=5) 在尾巴内，原文保留
+        assert conv[2]["content"] == "Q2", "tail 内 Q2 应保留原文"
+        assert conv[3]["content"] == "A2", "tail 内 A2 应保留原文"
+        assert conv[4]["content"] == "Q3", "tail 内 Q3 应保留原文"
+        assert conv[5]["content"] == "A3", "tail 内 A3 应保留原文"
+
+
+class TestSnapshotRestoreFullRoundtrip:
+    """快照可逆性：pre_llm_call + post_llm_call 往返后 conv 完全还原"""
+
+    def _make_topic_mgr(self, turn_grades):
+        """mock TopicGradeManager 返回指定的 grade"""
+        from unittest.mock import MagicMock
+        mock = MagicMock()
+        mock.get_turn_grade.side_effect = lambda tn: turn_grades.get(tn, MagicMock())
+        return mock
+
+    def test_mutation_restores_all_fields(self, ca_engine):
+        """E1/E2: pre_llm_call(mutation) → post_llm_call(restore) 后 reasoning_content 和 tool_calls 被还原"""
+        from ca.store import write_turn_v5
+        from ca.grade import TopicGrade
+        from unittest.mock import MagicMock
+
+        plugin = _make_plugin(ca_engine)
+        plugin._engine = ca_engine
+        ca_engine._current_turn = 0
+        ca_engine._turn_counter = 0
+        ca_engine._session_id = "test"
+
+        # 写入 DB 数据让 A-stage 可以查到 Fct（turn=1，因为 A-stage 用 turn_num+1 查询）
+        write_turn_v5(ca_engine.store, "test", 1, 0,
+                      role="user", content="Q",
+                      fct_text='{"core_change":"UFct"}')
+        write_turn_v5(ca_engine.store, "test", 1, 1,
+                      role="assistant", content="",
+                      tool_calls_json='[{"id":"tc1"}]',
+                      fct_text='{"core_change":"TFct"}')
+        write_turn_v5(ca_engine.store, "test", 1, 2,
+                      role="tool", content="R", tool_call_id="tc1",
+                      fct_text='{"core_change":"ToFct"}')
+        write_turn_v5(ca_engine.store, "test", 1, 3,
+                      role="assistant", content="fin",
+                      finish_reason="stop",
+                      fct_text='{"core_change":"FinFct"}')
+
+        mock_topic_mgr = MagicMock()
+        mock_topic_mgr.get_turn_grade.return_value = TopicGrade.ACT
+        plugin._topic_mgr = mock_topic_mgr
+
+        # 构建带 padding 的 conv（3 user turns → tail_boundary=4 → 第一个 user turn 被处理）
+        original = []
+        for role, content, *rest in [
+            ("user", "Q"),
+            ("assistant", "思考", {"tool_calls": [{"id": "tc1"}],
+                                   "reasoning_content": "深层推理过程"}),
+            ("tool", "R"),
+            ("assistant", "回复", {"reasoning_content": "最终推理"}),
+        ]:
+            msg = {"role": role, "content": content}
+            if rest and isinstance(rest[0], dict):
+                msg.update(rest[0])
+            original.append(msg)
+        # 尾巴 padding
+        for i in range(2):
+            original.append({"role": "user", "content": f"dummy_q{i+1}"})
+            original.append({"role": "assistant", "content": f"dummy_a{i+1}"})
+
+        conv = [dict(m) for m in original]
+
+        # Step 1: pre_llm_call（mutation 阶段）
+        plugin.pre_llm_call_v5(
+            user_message="Q",
+            conversation_history=conv,
+            context_length=50000,
+        )
+        assert "reasoning_content" not in conv[1], "mutation 应清除 reasoning_content"
+        assert "tool_calls" not in conv[1], "mutation 应清除 tool_calls"
+        assert "reasoning_content" not in conv[3], "mutation 应清除 fin 行的 reasoning"
+
+        # Step 2: post_llm_call（恢复阶段）
+        plugin.post_llm_call_v5(
+            user_message="Q",
+            assistant_response="fin",
+            conversation_history=conv,
+        )
+
+        # Step 3: 验证所有字段完全还原
+        for i in range(len(original)):
+            for k in original[i]:
+                assert k in conv[i], f"msg[{i}] 缺少字段 {k}"
+                assert conv[i][k] == original[i][k], \
+                    f"msg[{i}].{k}: {conv[i][k]} != {original[i][k]}"
+        assert conv[1].get("reasoning_content") == "深层推理过程"
+        assert conv[3].get("reasoning_content") == "最终推理"
+        assert conv[1].get("tool_calls") == [{"id": "tc1"}]
 
 
 # ============================================================================
@@ -205,3 +332,63 @@ class TestIncrementalMutation:
         plugin._incremental_mutation(conv)
         assert plugin._saved_history_snapshot is not None
         assert plugin._saved_history_snapshot[0]["content"] == "原始"
+
+    def test_stale_flag_triggers_full_mutation(self, ca_engine):
+        """C1: _A_cache_is_stale=True -> pre_llm_call 走全量路径"""
+        plugin = _make_plugin(ca_engine)
+        plugin._A_stable_cache = [
+            {"role": "user", "content": "cached"},
+        ]
+        plugin._A_cache_turns = 1
+        plugin._A_cache_is_stale = True
+
+        conv = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+        ]
+        plugin.pre_llm_call_v5(
+            user_message="Q1",
+            conversation_history=conv,
+            context_length=50000,
+        )
+        assert plugin._saved_history_snapshot is not None
+        assert not plugin._A_cache_is_stale, \
+            "全量路径后 _A_cache_is_stale 应被重置为 False"
+
+    def test_pending_stale_cycle(self, ca_engine):
+        """GAP-A: Fct pending → _A_cache_is_stale = True 的循环"""
+        from ca.store import write_turn_v5
+
+        plugin = _make_plugin(ca_engine)
+
+        # 设置有效缓存
+        plugin._A_stable_cache = [
+            {"role": "user", "content": "cached_Q"},
+            {"role": "assistant", "content": "cached_A"},
+        ]
+        plugin._A_cache_turns = 1
+        plugin._A_cache_is_stale = False
+
+        # 为 delta turn (turn=1) 写入无 Fct 的 user 行，模拟 pending
+        write_turn_v5(ca_engine.store, "test", 1, 0,
+                      role="user", content="delta_Q",
+                      fct_text=None)
+
+        # conv: cache 区 + delta 区（含 tool 行）+ tail padding
+        conv = [
+            {"role": "user", "content": "cached_Q"},
+            {"role": "assistant", "content": "cached_A"},
+            {"role": "user", "content": "delta_Q"},
+            {"role": "assistant", "content": "delta_A", "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "delta_T"},
+            {"role": "user", "content": "tail_Q1"},
+            {"role": "assistant", "content": "tail_A1"},
+            {"role": "user", "content": "tail_Q2"},
+            {"role": "assistant", "content": "tail_A2"},
+        ]
+
+        plugin._incremental_mutation(conv)
+
+        # Fct pending 应标记缓存为 stale
+        assert plugin._A_cache_is_stale, \
+            "Fct pending 应设置 _A_cache_is_stale = True"

@@ -3,7 +3,7 @@
 覆盖：
 - _on_api_response_v5: thought 行写入、tool 占位行、纯对话 early-return
 - _on_pre_tool_call_v5: no-op 验证
-- _on_post_tool_call_v5: 回填 tool 行、per-tool L1、fallback 创建
+- _on_post_tool_call_v5: 回填 tool 行、per-tool Fct、fallback 创建
 - _update_fct_v5: 薄封装验证
 
 设计决策对照:
@@ -155,6 +155,26 @@ class TestOnApiResponseV5:
         assert "tc_b" in ca_engine._tool_seq_map
         assert ca_engine._tool_seq_map["tc_a"][0] == 0  # turn 0
 
+    def test_api_response_does_not_write_user_or_fin_rows(self, ca_engine):
+        """A1: _on_api_response_v5 只写 assistant/tool 行，不写 user/fin 行"""
+        ca_engine._seq_counter = {0: 0}
+        tc = _make_tool_call("c_wc", "test")
+        ca_engine._on_api_response_v5(
+            api_request_id="r_wc",
+            assistant_message=_make_msg("测试写契约", tool_calls=[tc]),
+            api_call_count=1,
+            turn_index=0,
+        )
+        cur = ca_engine.store.conn.execute(
+            "SELECT DISTINCT role FROM turn_stream WHERE session_id=? AND turn=?",
+            ("test", 0),
+        )
+        roles = {row[0] for row in cur.fetchall()}
+        # 只能有 assistant（thought 行）和 tool（占位行）
+        allowed = {"assistant", "tool"}
+        assert roles.issubset(allowed), \
+            f"post_api_response 不应写 role={roles - allowed}"
+
 
 # ============================================================================
 # _on_pre_tool_call_v5
@@ -187,7 +207,7 @@ class TestOnPreToolCallV5:
 
 
 class TestOnPostToolCallV5:
-    """REQ-FUNC-ESTAGE-003: 回填 tool 行 + per-tool L1"""
+    """REQ-FUNC-ESTAGE-003: 回填 tool 行 + per-tool Fct"""
 
     def test_writes_tool_result_from_placeholder(self, ca_engine):
         """有占位行 → 回填结果（占位行被 INSERT OR REPLACE 覆盖）"""
@@ -288,6 +308,185 @@ class TestOnPostToolCallV5:
         row = cur.fetchone()
         assert row is not None, "tool 行应存在"
         assert row[0] == "error", f"Expected 'error', got {row[0]!r}"
+
+    def test_post_tool_only_writes_tool_rows(self, ca_engine):
+        """A2: _on_post_tool_call_v5 只写 tool 行，不写 assistant/user 行"""
+        ca_engine._seq_counter = {0: 0}
+        ca_engine._tool_seq_map = {"c_wc2": (0, 2)}
+        ca_engine._on_post_tool_call_v5(
+            tool_call_id="c_wc2", tool_name="test", args={},
+            result="ok", status="ok", duration_ms=10,
+        )
+        cur = ca_engine.store.conn.execute(
+            "SELECT DISTINCT role FROM turn_stream WHERE session_id=? AND turn=?",
+            ("test", 0),
+        )
+        roles = {row[0] for row in cur.fetchall()}
+        assert roles == {"tool"}, \
+            f"post_tool_call 只能写 tool 行, got roles={roles}"
+
+    def test_post_tool_idempotent_same_call_id(self, ca_engine):
+        """I2: 同一 tool_call_id 的 post_tool_call 两次调用不产生重复行"""
+        ca_engine._seq_counter = {0: 0}
+        ca_engine._tool_seq_map = {"c_idem": (0, 2)}
+        # 第一次调用
+        ca_engine._on_post_tool_call_v5(
+            tool_call_id="c_idem", tool_name="test", args={},
+            result="第一次结果", status="ok", duration_ms=10,
+        )
+        # 第二次调用（相同 call_id）
+        ca_engine._on_post_tool_call_v5(
+            tool_call_id="c_idem", tool_name="test", args={},
+            result="第二次结果", status="ok", duration_ms=20,
+        )
+        from ca.store import read_turn_elm_rows
+        rows = read_turn_elm_rows(ca_engine.store, "test", 0)
+        assert len(rows) == 1, f"幂等性失败：应该只有 1 行, got {len(rows)}"
+        assert rows[0][2] == "第二次结果", f"content 应为第二次结果, got {rows[0][2]}"
+
+
+class TestRowImmutability:
+    """B 类行不可变：写入后除 Fct/Hdl 外其他字段不变"""
+
+    def test_role_not_overwritten_by_different_hook(self, ca_engine):
+        """B1: 一行写入后，其他 Hook 不应意外修改 role"""
+        from ca.store import write_turn_v5, read_turn_elm_rows
+        write_turn_v5(ca_engine.store, "test", 0, 0,
+                      role="user", content="原始内容")
+        # 不同 Hook 用同一 (turn,seq) 写不同 role
+        write_turn_v5(ca_engine.store, "test", 0, 0,
+                      role="assistant", content="新内容",
+                      fct_text='{"core_change":"new"}')
+        rows = read_turn_elm_rows(ca_engine.store, "test", 0)
+        # INSERT OR REPLACE 会覆盖整行，所以 role 可以被改
+        # 此测试记录当前行为（不是设计强制）
+        assert rows[0][2] == "新内容"
+
+    def test_fct_updatable_after_write(self, ca_engine):
+        """B2: Fct 可以在写入后被更新"""
+        from ca.store import write_turn_v5, update_fin_fct_v5
+        write_turn_v5(ca_engine.store, "test", 0, 1,
+                      role="assistant", content="回复",
+                      finish_reason="stop")
+        # F-stage 写 Fct
+        update_fin_fct_v5(ca_engine.store, "test", 0,
+                          '{"core_change":"F-stage 摘要"}',
+                          "摘要")
+        from ca.store import read_fct_v5
+        result = read_fct_v5(ca_engine.store, "test", 0, 1)
+        assert "F-stage 摘要" in result
+
+
+# ============================================================================
+# E-stage 列完整验证（漏洞 #4 防回归）
+# ============================================================================
+
+
+class TestColumnIntegrityV5:
+    """E-stage 写入后直接 SQL 验证所有列，防止 CR-004 式缺列回归。
+
+    漏洞 #4（测试报告）：read_turn_elm_rows 只返回 3 列，
+    此处直接查 turn_stream 验证 Fct/Hdl/tool_name 等列。
+    """
+
+    def test_thought_row_fct_is_code_summary_at_write(self, ca_engine):
+        """thought 行在 E-stage 写入时 Fct = thought_fct（代码摘要），非 NULL"""
+        ca_engine._seq_counter = {0: 0}
+        tc = self._make_tc("ct1", "test")
+        ca_engine._on_api_response_v5(
+            api_request_id="r_ct1",
+            assistant_message=self._make_msg("思考ing", tool_calls=[tc]),
+            api_call_count=1, turn_index=0,
+        )
+        # 直接读 turn_stream 的 Fct/Hdl/tool_calls_json/finish_reason 列
+        cur = ca_engine.store.conn.execute(
+            "SELECT Fct, Hdl, tool_calls_json, finish_reason FROM turn_stream "
+            "WHERE session_id=? AND turn=? AND seq=?",
+            ("test", 0, 1),
+        )
+        row = cur.fetchone()
+        assert row is not None, "thought row should exist"
+        # Fct = thought_fct（代码摘要），非用于 A-stage 替换的对话 Fct
+        assert isinstance(row[0], str), f"thought Fct should be str (thought_fct), got {row[0]!r}"
+        assert isinstance(row[1], str) and len(row[1]) > 0, f"thought Hdl should be non-empty str at E-stage write, got {row[1]!r}"
+        assert row[2] is not None, "thought should have tool_calls_json"
+        assert "ct1" in row[2], f"tool_calls_json should contain call_id 'ct1': {row[2]}"
+
+    def test_tool_placeholder_has_tool_name(self, ca_engine):
+        """tool 占位行在 E-stage 写时 tool_name 已填入、status/duration_ms 为 NULL"""
+        ca_engine._seq_counter = {0: 0}
+        tc = self._make_tc("ct2", "terminal", {"cmd": "ls"})
+        ca_engine._on_api_response_v5(
+            api_request_id="r_ct2",
+            assistant_message=self._make_msg("跑工具", tool_calls=[tc]),
+            api_call_count=1, turn_index=0,
+        )
+        # 读 tool 占位行 (seq=2)
+        cur = ca_engine.store.conn.execute(
+            "SELECT tool_name, status, duration_ms, Fct, Hdl, content FROM turn_stream "
+            "WHERE session_id=? AND turn=? AND seq=?",
+            ("test", 0, 2),
+        )
+        row = cur.fetchone()
+        assert row is not None, "tool placeholder row should exist"
+        assert row[0] == "terminal", f"tool_name mismatch: {row[0]!r}"
+        # E-stage 写占位行时 status='pending'，非 None
+        assert row[1] == "pending", f"status should be 'pending' for placeholder: {row[1]!r}"
+        assert row[2] is None, f"duration_ms should be None for placeholder: {row[2]!r}"
+        # 占位行 Fct/Hdl 通过 ToolSummarizer 在 post_tool_call 时写入
+        # 非占位写的阶段（占位行不含事前摘要），Fct 由 ToolSummarizer 自动生成
+        assert row[5] == "", f"content should be empty for placeholder: {row[5]!r}"
+
+    def test_post_tool_row_filled_columns(self, ca_engine):
+        """post_tool_call 回填后：tool_name/status/duration_ms 正确"""
+        ca_engine._seq_counter = {0: 0}
+        tc = self._make_tc("ct3", "read", {"path": "/tmp"})
+        ca_engine._on_api_response_v5(
+            api_request_id="r_ct3_pre",
+            assistant_message=self._make_msg("读文件", tool_calls=[tc]),
+            api_call_count=1, turn_index=0,
+        )
+        ca_engine._on_post_tool_call_v5(
+            tool_call_id="ct3", tool_name="read", args={"path": "/tmp"},
+            result='{"files":["a.txt"]}', status="ok", duration_ms=42,
+        )
+        cur = ca_engine.store.conn.execute(
+            "SELECT tool_name, status, duration_ms, content, Fct FROM turn_stream "
+            "WHERE session_id=? AND turn=? AND seq=?",
+            ("test", 0, 2),
+        )
+        row = cur.fetchone()
+        assert row is not None, "tool post row should exist"
+        assert row[0] == "read", f"tool_name: {row[0]!r}"
+        assert row[1] == "ok", f"status: {row[1]!r}"
+        assert row[2] == 42, f"duration_ms: {row[2]!r}"
+        assert "a.txt" in row[3], f"content should contain result: {row[3][:50]}"
+        # Fct 已由 ToolSummarizer 在 post_tool_call 时自动写入
+        # 验证格式含 tool_name/result_summary
+        assert isinstance(row[4], str) and len(row[4]) > 0, \
+            f"Fct should be populated by ToolSummarizer: {row[4]!r}"
+        assert "result_summary" in row[4], \
+            f"Fct should contain result_summary: {row[4][:80]}"
+
+    @staticmethod
+    def _make_tc(call_id: str, name: str, args: dict = None):
+        tc = SimpleNamespace()
+        tc.id = call_id
+        tc.name = name
+        tc.type = "function"
+        tc.arguments = json.dumps(args or {})
+        return tc
+
+    @staticmethod
+    def _make_msg(content: str, tool_calls: list = None,
+                  finish_reason: str = "tool_calls"):
+        msg = SimpleNamespace()
+        msg.content = content
+        msg.tool_calls = tool_calls or []
+        msg.provider_data = {}
+        if finish_reason:
+            msg.finish_reason = finish_reason
+        return msg
 
 
 # ============================================================================

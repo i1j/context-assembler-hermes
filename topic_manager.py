@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import sqlite3
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -465,6 +466,8 @@ class TopicGradeManager:
                 return fct
             if row[1] == "assistant" and row[2] == "stop":  # fin 行
                 fin_fct = fct
+        if not (fin_fct or any_fct):
+            logger.debug("[CA] _extract_turn_fct: no Fct found in %d rows", len(ca_rows))
         return fin_fct or any_fct
 
     def _init_topic_data(self) -> None:
@@ -501,7 +504,8 @@ class TopicGradeManager:
             for turn in td.get("turns", []):
                 try:
                     ca_rows = get_turn_ca_rows(self._store, self._store.session_id, turn)
-                except Exception:
+                except (AttributeError, sqlite3.Error, TypeError) as e:
+                    logger.warning("[CA] _compute_centroids: get_turn_ca_rows failed for turn %d (topic %d): %s", turn, tid, e)
                     continue
                 if not ca_rows:
                     continue
@@ -512,12 +516,14 @@ class TopicGradeManager:
                         fct_text = row[5]  # Fct
                         break
                 if not fct_text:
+                    logger.debug("[CA] _compute_centroids: turn=%d topic=%d no user Fct, skipped from centroid", turn, tid)
                     continue
                 try:
                     vec = self._embed_client.embed(fct_text)
                     if vec:
                         vectors.append(vec)
-                except Exception:
+                except (ValueError, TypeError, RuntimeError) as e:
+                    logger.warning("[CA] _compute_centroids: embed failed for turn %d (topic %d): %s", turn, tid, e)
                     continue
 
             if vectors:

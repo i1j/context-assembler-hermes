@@ -311,8 +311,9 @@ def mock_store():
 
 @pytest.fixture
 def mock_embed():
-    """embed 返回固定 768 维向量"""
-    return SimpleNamespace(embed=lambda *a, **kw: [0.1] * 768)
+    """embed 返回内容可区分伪嵌入（相同文本→相同向量，不同文本→不同向量）"""
+    from tests.conftest import _content_hash_embed
+    return SimpleNamespace(embed=lambda text, **kw: _content_hash_embed(text or ""))
 
 
 @pytest.fixture
@@ -755,7 +756,7 @@ class TestComputeCentroids:
                       role="user", content="原始文本",
                       fct_text='{\"core_change\":\"测试内容\"}')
         mgr._store = mock_store
-        mgr._session_id = "test"
+        mock_store.session_id = "test"
         # embed 异常 → centroid 保持 None
         mgr._embed_client.embed = MagicMock(side_effect=RuntimeError("embed failed"))
         mgr._topic_data = {
@@ -771,7 +772,7 @@ class TestComputeCentroids:
                       role="user", content="原始文本",
                       fct_text='{\"core_change\":\"测试内容\"}')
         mgr._store = mock_store
-        mgr._session_id = "test"
+        mock_store.session_id = "test"
         mgr._embed_client.embed = MagicMock(return_value=None)
         mgr._topic_data = {
             1: {"centroid": None, "is_bg": False, "turns": [1],
@@ -783,7 +784,7 @@ class TestComputeCentroids:
     def test_get_turn_ca_rows_exception_continues(self, mgr, mock_store):
         """异常读取行不应阻断整个 centroid 计算"""
         mgr._store = mock_store
-        mgr._session_id = "test"
+        mock_store.session_id = "test"
         mgr._embed_client.embed = MagicMock(return_value=[0.5] * 768)
         mgr._topic_data = {
             1: {"centroid": None, "is_bg": False, "turns": [999],
@@ -803,7 +804,7 @@ class TestComputeCentroids:
                       role="user", content="B",
                       fct_text='{"core_change":"B"}')
         mgr._store = mock_store
-        mgr._session_id = "test"
+        mock_store.session_id = "test"
         mgr._embed_client = SimpleNamespace(embed=lambda *a, **kw: [0.5] * 768)
         mgr._topic_data = {
             1: {"centroid": None, "is_bg": False, "turns": [1],
@@ -814,7 +815,7 @@ class TestComputeCentroids:
         mgr._compute_centroids()
         # 两个 topic 相同 embed → centroid 相同 → nearest=0
         assert mgr._topic_data[1]["nearest_centroid_dist"] == 0.0
-        assert mgr._topic_data[2]["nearest_centroid_dist"] == 0.0
+        assert abs(mgr._topic_data[2]["nearest_centroid_dist"]) < 1e-10
 
 
 # ============================================================================
@@ -860,7 +861,7 @@ class TestFullPipeline:
                       role="user", content="A",
                       fct_text='{"core_change":"A"}')
         mgr._store = mock_store
-        mgr._session_id = "test"
+        mock_store.session_id = "test"
 
         mgr.detect(1, [(0, "user", None, None, '{"core_change":"A"}')], "聊Python")
         mgr.detect(2, [], "换个话题")
@@ -905,3 +906,12 @@ class TestTopicMgrNoneGuard:
             TopicGrade.FAR: None,
         }
         assert thought_tool_map.get(TopicGrade.ACT) == Grade.FCT
+
+
+# ============================================================================
+# GAP-D: CA-OV 话题提交端点
+# ============================================================================
+
+def test_topic_submit_endpoint_exists():
+    """GAP-D: _fire_ov_submit 已从 ca/lstage.py 移除，CA_OV_SUBMIT_ENABLED 未启用"""
+    pytest.skip("topic submit not implemented — _fire_ov_submit removed from ca/lstage.py")

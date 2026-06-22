@@ -21,18 +21,15 @@ class AssembleStats:
         self.tokens_before: int = 0
         self.tokens_after: int = 0
         self.savings_pct: float = 0.0
-        self.upgrade_counts: Dict[str, int] = {}
         self.error_counts: Dict[str, str] = {}
         self.phase_timing: Dict[str, float] = {}
         # 工具轮统计
-        self.tool_upgrade_count: int = 0
-        self.tool_pre_upgrade_count: int = 0
         self.tool_backfill_success: int = 0
         self.tool_backfill_failure: int = 0
         # 话题统计（v4.6.0）
         self.topic_count: int = 0
         self.topic_retrieved_count: int = 0
-        # L1 统计（v2 refactor）
+        # Fct 统计（v2 refactor）
         self.truncated_fallback: int = 0
         self.parse_fallback_count: int = 0
         self.skipped_empty: int = 0
@@ -63,12 +60,6 @@ class AssembleStats:
                     self._outer._phase_pending = None
         return _PhaseTimer(self, name)
 
-    def record_upgrade(self, upgrade_type: str, count: int) -> None:
-        if count > 0:
-            self.upgrade_counts[upgrade_type] = (
-                self.upgrade_counts.get(upgrade_type, 0) + count
-            )
-
     def record_error(self, source: str, message: str) -> None:
         self.error_counts[source] = message
 
@@ -88,13 +79,6 @@ class AssembleStats:
             parts.append(pts)
         if self.savings_pct:
             parts.append(f"saved={self.savings_pct:.0f}%")
-        if self.upgrade_counts:
-            pts = ",".join(f"{k}={v}" for k, v in sorted(self.upgrade_counts.items()))
-            parts.append(f"upgrades=({pts})")
-        if self.tool_upgrade_count:
-            parts.append(f"tool_up={self.tool_upgrade_count}")
-        if self.tool_pre_upgrade_count:
-            parts.append(f"tool_pre={self.tool_pre_upgrade_count}")
         if self.tool_backfill_success or self.tool_backfill_failure:
             parts.append(f"backfill_ok={self.tool_backfill_success}/fail={self.tool_backfill_failure}")
         if self.topic_count:

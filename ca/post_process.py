@@ -4,44 +4,15 @@ ca/post_process.py — JSON 容错解析与清洗 (v4.4.0 alpha)
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-from enum import Enum
-from typing import Tuple
-
-class ItemState(Enum):
-    DONE = "done"
-    PLANNED = "planned"
-    DISCUSSING = "discussing"
-    UNKNOWN = "unknown"
 
 _CORE_CHANGE_RE = re.compile(r"核心摘要[：:]\s*(.{1,200})", re.DOTALL)
 
-
-def robust_json_parse(raw: str, max_repair_attempts: int = 3) -> Tuple[Dict[str, Any], str]:
-    if not raw or not raw.strip():
-        return {"core_change": "本轮无新内容"}, "empty"
-    try:
-        return json.loads(raw), "direct"
-    except json.JSONDecodeError:
-        pass
-    text = raw.strip()
-    for _ in range(max_repair_attempts):
-        if not text.endswith("}"):
-            text += "}"
-        try:
-            return json.loads(text), "bracket_repair"
-        except json.JSONDecodeError:
-            pass
-    match = _CORE_CHANGE_RE.search(raw)
-    if match:
-        return {"core_change": match.group(1).strip()}, "regex_fallback"
-    return {"core_change": "本轮无新内容"}, "regex_fallback"
 
 
 def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -91,7 +62,6 @@ def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
 
 MEANINGLESS_CORE: Set[str] = {"无", "暂无", "无有效增量", "无新增", "none", "null", "",
                             "无变化", "无明显变化", "无核心变化", "无核心变更"}
-WHITESPACE_PATTERN = re.compile(r'\s+')
 # 匹配零对或多对 <stage_tag>【状态】</stage_tag><core_change>内容</core_change>
 # 每对独立捕获，不依赖间距/换行
 PAIR_PATTERN = re.compile(
@@ -100,60 +70,8 @@ PAIR_PATTERN = re.compile(
 )
 VALID_STATES: Set[str] = {"已实施", "计划", "探讨", "已取消"}
 
-# 【状态前缀正则】：提取 【已实施】/【计划】/【探讨】
-# 匹配以 【内容】 开头的文本，捕获括号内 1-10 个字符
-STATE_PREFIX_REGEX = re.compile(r'^【([^】]{1,10})】\s*')
-
-# 模块级 Fail-Fast assert
-_test_match_1 = STATE_PREFIX_REGEX.match("【已实施】 扩容完成")
-_test_match_2 = STATE_PREFIX_REGEX.match("【计划】 拟引入Redis")
-assert _test_match_1 is not None and _test_match_1.group(1) == "已实施", "FATAL: STATE_PREFIX_REGEX 正则损坏 (Assert 1)!"
-assert _test_match_2 is not None and _test_match_2.group(1) == "计划", "FATAL: STATE_PREFIX_REGEX 正则损坏 (Assert 2)!"
-
-# 管理动作关键词：分配 Jira/拉会/创建工单等仅表示管理动作完成，不代表技术实施完成
-MANAGEMENT_ACTION_KEYWORDS = [
-    '分配', '创建了jira', '记录需求', '拉会', '开会', '确认排期',
-    '列入代办', '加入 backlog', '指派给', '分配给', '定了个会议',
-    '记录在', '同步给', '通知了', '已上报', '已报备', '知会',
-    '更新了文档', '更新了wiki', '创建了工单', '提交了工单'
-]
 
 
-def _normalize_state(prefix_text: str) -> Tuple[str, ItemState]:
-    """仅对提取出的前缀文本（如'已完成'）进行归一化，绝不扫描整句。"""
-    s = prefix_text.strip().lower()
-    if any(k in s for k in ['已实施', '已完成', '已修复', '已接入', 'done']):
-        return '【已实施】', ItemState.DONE
-    if any(k in s for k in ['探讨', '讨论', '评估', '考虑', 'tbd']):
-        return '【探讨】', ItemState.DISCUSSING
-    return '【计划】', ItemState.PLANNED
-
-
-def parse_core_change_state(raw_core: str) -> Tuple[str, ItemState]:
-    """提取、归一化并重组状态前缀，返回格式化文本与结构化枚举。
-
-    若前缀判定为已实施但正文包含管理动作关键词，降级为计划。
-    """
-    raw_core = raw_core.strip()
-    state_match = STATE_PREFIX_REGEX.match(raw_core)
-
-    if state_match:
-        # 严格只传入 group(1)（即括号内的文本，如"计划"）
-        normalized_prefix, state_enum = _normalize_state(state_match.group(1))
-        body = raw_core[state_match.end():].strip()
-        # 管理动作完成 ≠ 技术实施完成：降级状态
-        if state_enum == ItemState.DONE:
-            # 去空格/去空白后匹配，应对 "创建了 Jira" 等中英混排
-            body_flat = WHITESPACE_PATTERN.sub('', body.lower())
-            if any(kw in body_flat for kw in MANAGEMENT_ACTION_KEYWORDS):
-                normalized_prefix, state_enum = '【计划】', ItemState.PLANNED
-    else:
-        # 模型忘记加前缀，直接兜底为 【计划】
-        normalized_prefix, state_enum = '【计划】', ItemState.PLANNED
-        body = raw_core
-
-    final_text = f"{normalized_prefix} {body}" if body else normalized_prefix
-    return final_text, state_enum
 
 
 # 4 类 Markdown 标题 → 5 类英 key 映射
@@ -286,7 +204,7 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
     core_state 始终为 None（已弃用，由 prompts 负责时态）。
     """
     if not llm_output or not llm_output.strip():
-        logger.warning("[CA-METRIC] ca.l1.parse_fallback_count: llm_output is empty")
+        logger.warning("[CA-METRIC] ca.fct.parse_fallback_count: llm_output is empty")
         return _build_empty_result()
 
     # 1. 物理截断尾随噪音
@@ -302,7 +220,7 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
             changes.append({"stage_tag": state, "core_change": core})
 
     if not changes:
-        logger.warning("[CA-METRIC] ca.l1.parse_fallback_count: no valid <stage_tag>/<core_change> pairs found")
+        logger.warning("[CA-METRIC] ca.fct.parse_fallback_count: no valid <stage_tag>/<core_change> pairs found")
 
     # 3. 提取 Markdown 4 类标题下的列表项
     section_order = [
@@ -386,6 +304,6 @@ def parse_v1_markdown_xml(llm_output: str) -> Tuple[Dict[str, list], Optional[st
             hdl_text = None
 
     if hdl_text is None:
-        logger.warning("[CA-METRIC] ca.l0.skipped_empty: hdl_text is None/empty")
+        logger.warning("[CA-METRIC] ca.hdl.skipped_empty: hdl_text is None/empty")
 
     return (fct_dict, hdl_text, None)

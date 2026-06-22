@@ -38,6 +38,7 @@ class SQLiteStore:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
+        self.session_id: str = self._db_path.stem
 
     def _get_conn(self) -> sqlite3.Connection:
         """线程本地连接，WAL 模式 + turn_stream schema。"""

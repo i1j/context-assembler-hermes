@@ -105,12 +105,12 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
 
 | 话题等级 | user | fin | thought（降一级） | tool（降一级） |
 |---|---|---|---|---|
-| **ACT** | 原文保留（ELM） | 原文保留（ELM） | 替换为 **FCT**（完整摘要） | 替换为 per-tool **FCT** |
-| **REL** | 替换为 **FCT**（完整摘要） | 替换为 **FCT**（完整摘要） | 替换为 **Fct[:150]**（HDL 截断摘要） | 替换为 per-tool **Fct[:150]** |
-| **FAR** | 替换为 **Fct[:150]**（HDL 截断摘要） | 替换为 **Fct[:150]**（HDL 截断摘要） | 清空 | 清空 |
+| **ACT** | 原文保留（Elm） | 原文保留（Elm） | 替换为 **Fct**（完整摘要） | 替换为 per-tool **Fct** |
+| **REL** | 替换为 **Fct**（完整摘要） | 替换为 **Fct**（完整摘要） | 替换为 **Hdl[:150]**（截断摘要） | 替换为 per-tool **Hdl[:150]** |
+| **FAR** | 替换为 **Hdl[:150]**（截断摘要） | 替换为 **Hdl[:150]**（截断摘要） | 替换为 **略**（语义省略标记） | 替换为 **略**（语义省略标记） |
 
-**降一级规则**：thought/tool 输出行摘要等级 = 话题等级 - 1（ACT→FCT, REL→HDL, FAR→清空）。
-user/fin 不降级，直接取话题等级（ACT→ELM原文保留, REL→FCT完整摘要, FAR→HDL截断摘要）。
+**降一级规则**：thought/tool 输出行摘要等级 = 话题等级 - 1（ACT→Fct, REL→Hdl, FAR→略）。
+user/fin 不降级，直接取话题等级（ACT→Elm原文保留, REL→Fct完整摘要, FAR→Hdl[:150]截断摘要）。
 
 **尾部保护区**：倒数第 2 个 user 消息之后 → 原文保留（不受 grade 影响，所有 field 保持原样）。
 
@@ -220,9 +220,9 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 | ----------------------- | ----------------------------- | ------------------------------------------------ |
 | `Hdls`            | `Dict[int, str]`            | 对话轮 Hdl 文本，key=turn_index                   |
 | `Fcts`            | `Dict[int, str]`            | 对话轮 Fct JSON，key=turn_index                   |
-| `tool_Hdls`       | `Dict[Tuple[int,int], str]` | 个体工具 L0，key=(turn_index, seq_index)         |
+| `tool_Hdls`       | `Dict[Tuple[int,int], str]` | 个体工具 Hdl，key=(turn_index, seq_index)         |
 | `tool_Fcts`       | `Dict[Tuple[int,int], str]` | 个体工具 Fct JSON，key=(turn_index, seq_index)    |
-| `tool_group_Hdls` | `Dict[Tuple[int,int], str]` | 工具组 L0，key=(turn_index, api_call_count)      |
+| `tool_group_Hdls` | `Dict[Tuple[int,int], str]` | 工具组 Hdl，key=(turn_index, api_call_count)      |
 | `tool_group_Fcts` | `Dict[Tuple[int,int], str]` | 工具组 Fct JSON，key=(turn_index, api_call_count) |
 
 `add_tool_group()` 已由 E-stage 写即落盘替代，仅在 `cache.add_turn()` 中同步缓存。
@@ -307,10 +307,10 @@ if switched:
 1. 为每个旧话题计算形心（基于成员 turn 的 Fct embedding 均值）
 2. 以 q_emb 为查询点，形心为参考，按**半径公式**定级：
    - `topic 半径 r = min(max_intra, nearest/WEIGHT)`
-   - 内球(q→形心 ≤ r) → L2（保留 Elm）
-   - 外球(q→形心 ≤ 2r) → L1（使用 Fct）
-   - 远距离(q→形心 > 2r) → L0（使用 Hdl 截断）
-3. 新话题强制 L2
+   - 内球(q→形心 ≤ r) → TopicGrade.ACT（使用 Fct 完整摘要）
+   - 外球(q→形心 ≤ 2r) → TopicGrade.REL（使用 Hdl[:150] 截断摘要）
+   - 远距离(q→形心 > 2r) → TopicGrade.FAR（使用"略"语义省略标记）
+3. 新话题强制 ACT
 4. topic→grade 缓存冻结，至下次切换前不变
 
 ### Get Turn Grade：等级查询

@@ -51,6 +51,122 @@ logger.setLevel(logging.DEBUG)
 _engines: Dict[str, "CAContextAssemblerPlugin"] = {}
 _engines_lock = threading.Lock()
 
+# ── 断路器状态（文件持久化，每 PID 独立文件）──
+_FAILURE_THRESHOLD = 3
+_RETRY_AFTER_SECONDS = 3600  # 1 小时冷却
+
+
+def _state_file_path() -> Path:
+    """返回当前进程的断路器状态文件路径。"""
+    try:
+        from hermes_constants import get_hermes_home
+        hermes_home = get_hermes_home()
+    except ImportError:
+        hermes_home = str(Path.home() / ".hermes")
+    return Path(hermes_home) / f".ca_assembler_state_{os.getpid()}.json"
+
+
+def _read_state() -> dict:
+    """读取断路器状态，不存在时返回默认值。"""
+    path = _state_file_path()
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return {"failures": data.get("failures", 0), "retry_after": data.get("retry_after")}
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {"failures": 0, "retry_after": None}
+
+
+def _pid_exists(pid: int) -> bool:
+    """检查 PID 是否存活（POSIX 通过 /proc）。"""
+    if pid <= 0:
+        return False
+    if os.name == "posix":
+        return os.path.isdir(f"/proc/{pid}")
+    return False
+
+
+def _cleanup_stale_state_files() -> None:
+    """清理已死进程的断路器状态文件。"""
+    state_path = _state_file_path()
+    state_dir = state_path.parent
+    try:
+        if not state_dir.exists():
+            return
+    except OSError:
+        return
+    pattern = re.compile(r"^\.ca_assembler_state_(\d+)\.json$")
+    try:
+        for entry in state_dir.iterdir():
+            if not entry.is_file():
+                continue
+            m = pattern.match(entry.name)
+            if m:
+                pid = int(m.group(1))
+                if pid != os.getpid() and not _pid_exists(pid):
+                    try:
+                        entry.unlink()
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+
+
+def _write_state(data: dict) -> None:
+    """写入断路器状态，写入前清理 stale 文件。"""
+    try:
+        _cleanup_stale_state_files()
+    except Exception:
+        pass  # 清理失败不影响写入
+    path = _state_file_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("[CA] breaker state write failed: %s", exc)
+
+
+def _record_success() -> None:
+    """记录一次成功，重置断路器。"""
+    old = _read_state()
+    old["failures"] = 0
+    old["retry_after"] = None
+    _write_state(old)
+
+
+def _record_failure() -> None:
+    """记录一次失败，超阈值时启动冷却。"""
+    old = _read_state()
+    old["failures"] = old.get("failures", 0) + 1
+    if old["failures"] >= _FAILURE_THRESHOLD:
+        retry_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=_RETRY_AFTER_SECONDS)
+        old["retry_after"] = retry_at.isoformat()
+    _write_state(old)
+
+
+def is_available() -> bool:
+    """断路器是否允许操作（失败 < 阈值 或 冷却已过）。"""
+    state = _read_state()
+    if state["failures"] < _FAILURE_THRESHOLD:
+        return True
+    retry_after = state.get("retry_after")
+    if not retry_after:
+        # 旧文件无 retry_after 时视为冷却有效
+        return False
+    try:
+        if isinstance(retry_after, str):
+            retry_at = datetime.datetime.fromisoformat(retry_after)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=datetime.timezone.utc)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if now >= retry_at:
+                _record_success()  # 冷却结束，自动恢复
+                return True
+        return False
+    except (ValueError, TypeError):
+        return False
+
 
 def register(ctx) -> None:
     """注册 CA 插件 v5.0 hooks。"""
@@ -136,7 +252,6 @@ class CAContextAssemblerPlugin:
         self._engine_errored = False
         self._session_id = ""
         self._context_length: int = Config.CONTEXT_LENGTH
-        self._saved_history: Optional[Dict[int, str]] = None
         self._saved_history_snapshot: Optional[List[Dict]] = None
         self._topic_mgr: Optional[TopicGradeManager] = None
         # A-stage 增量缓存
@@ -196,7 +311,6 @@ class CAContextAssemblerPlugin:
 
     def on_session_reset(self) -> None:
         """重置引擎状态（/new 或 /reset 时调用）。"""
-        self._saved_history = None
         self._saved_history_snapshot = None
         self._A_stable_cache = None
         self._A_cache_turns = 0
@@ -237,7 +351,6 @@ class CAContextAssemblerPlugin:
         if not conversation_history:
             return None
         self._saved_history_snapshot = [{**m} for m in conversation_history]
-        self._saved_history = None
         store = self._engine.store
         sid = self._session_id
 
@@ -280,6 +393,15 @@ class CAContextAssemblerPlugin:
                 continue
 
             turn_rows.setdefault(current_turn, []).append((i, row_type))
+
+        # Phase 1.5: 每轮只保留最后一个 "fin" 为真 fin
+        # Hermes 在做 conv_hist 时，含 content+tool_calls 的 assistant 行被丢掉 tool_calls，
+        # 使 Phase 1 误判为 fin。真 fin 必然是每轮最后一个无 tool_calls 的 assistant 行。
+        for _t, _rows in turn_rows.items():
+            _fin_positions = [_p for _p, (_ci, _rt) in enumerate(_rows) if _rt == "fin"]
+            if len(_fin_positions) > 1:
+                for _p in _fin_positions[:-1]:
+                    _rows[_p] = (_rows[_p][0], "thought")
 
         # Phase 2: 逐 turn 做角色队列匹配
         replaced = 0
@@ -330,28 +452,44 @@ class CAContextAssemblerPlugin:
             ca_tools: list = []
             for _seq, role, finish_reason, tc_json, content, fct, hdl in ca_rows:
                 if role == "user":
-                    if user_grade == Grade.FCT:
-                        ca_users.append(fct or "")
+                    if user_grade == Grade.FCT and fct:
+                        ca_users.append(fct)
+                    elif user_grade == Grade.FCT:
+                        logger.warning("[CA_v5] turn=%d user Fct is empty/NULL for grade FCT, falling back to Elm", turn_num + 1)
                     elif user_grade == Grade.HDL:
                         ca_users.append((hdl or "")[:150])
+                        if not hdl:
+                            logger.warning("[CA_v5] turn=%d user Hdl is empty/NULL for grade HDL, content will be empty", turn_num + 1)
                     # ELM: 原文在 conv 中，不填队列
                 elif role == "assistant" and finish_reason == "stop":
-                    if user_grade == Grade.FCT:
-                        ca_fins.append(fct or "")
+                    if user_grade == Grade.FCT and fct:
+                        ca_fins.append(fct)
+                    elif user_grade == Grade.FCT:
+                        logger.warning("[CA_v5] turn=%d fin Fct is empty/NULL for grade FCT, falling back to Elm", turn_num + 1)
                     elif user_grade == Grade.HDL:
                         ca_fins.append((hdl or "")[:150])
+                        if not hdl:
+                            logger.warning("[CA_v5] turn=%d fin Hdl is empty/NULL for grade HDL, content will be empty", turn_num + 1)
                     # ELM: 原文保留
                 elif role == "assistant":
-                    if thought_grade == Grade.FCT:
-                        ca_thoughts.append(fct or "")
+                    if thought_grade == Grade.FCT and fct:
+                        ca_thoughts.append(fct)
+                    elif thought_grade == Grade.FCT:
+                        logger.warning("[CA_v5] turn=%d thought Fct is empty/NULL for grade FCT, falling back to Elm", turn_num + 1)
                     elif thought_grade == Grade.HDL:
                         ca_thoughts.append((hdl or "")[:150])
+                        if not hdl:
+                            logger.warning("[CA_v5] turn=%d thought Hdl is empty/NULL for grade HDL, content will be empty", turn_num + 1)
                     # None(FAR): 清空，不填队列
                 elif role == "tool":
-                    if thought_grade == Grade.FCT:
-                        ca_tools.append(fct or "")
+                    if thought_grade == Grade.FCT and fct:
+                        ca_tools.append(fct)
+                    elif thought_grade == Grade.FCT:
+                        logger.warning("[CA_v5] turn=%d tool Fct is empty/NULL for grade FCT, falling back to Elm", turn_num + 1)
                     elif thought_grade == Grade.HDL:
                         ca_tools.append((hdl or "")[:150])
+                        if not hdl:
+                            logger.warning("[CA_v5] turn=%d tool Hdl is empty/NULL for grade HDL, content will be empty", turn_num + 1)
                     # None(FAR): 清空，不填队列
 
             # 5. 替换（直接 pop，无 if/else 选择列）
@@ -383,8 +521,8 @@ class CAContextAssemblerPlugin:
                     replaced += 1
 
                 elif row_type == "thought":
-                    if thought_grade is None:  # FAR → 清空
-                        conversation_history[conv_idx]["content"] = ""
+                    if thought_grade is None:  # FAR → 略
+                        conversation_history[conv_idx]["content"] = "略"
                         conversation_history[conv_idx].pop("reasoning_content", None)
                         conversation_history[conv_idx].pop("tool_calls", None)
                     elif ti < len(ca_thoughts):
@@ -399,8 +537,8 @@ class CAContextAssemblerPlugin:
                     replaced += 1
 
                 elif row_type == "tool":
-                    if thought_grade is None:  # FAR → 清空
-                        conversation_history[conv_idx]["content"] = ""
+                    if thought_grade is None:  # FAR → 略
+                        conversation_history[conv_idx]["content"] = "略"
                     elif tj < len(ca_tools):
                         conversation_history[conv_idx]["content"] = ca_tools[tj]
                         tj += 1
@@ -450,7 +588,6 @@ class CAContextAssemblerPlugin:
 
         # 保存快照（供 post_llm_call 还原 Elm）
         self._saved_history_snapshot = [{**m} for m in conversation_history]
-        self._saved_history = None
 
         store = self._engine.store
         sid = self._session_id
@@ -539,6 +676,8 @@ class CAContextAssemblerPlugin:
             # 检查 user 行（seq=0）的 fct；若不存在，整个 turn 尚未 Fct 化 → 保留 Elm
             user_fct = next((r[5] for r in ca_rows if r[1] == "user"), None)
             if not user_fct:
+                logger.debug("[CA_v5] incremental: turn=%d user Fct empty/NULL, marking pending (skipped=%d)",
+                             turn_num, sum(1 for _, t in rows if t != "fin"))
                 turn_pending = True
                 skipped += sum(1 for _, t in rows if t != "fin")
                 continue
@@ -552,6 +691,8 @@ class CAContextAssemblerPlugin:
                 if role_ == "assistant" and finish_reason == "stop":
                     continue
                 if fct is None:
+                    logger.debug("[CA_v5] incremental: turn=%d row role=%s Fct is None, marking pending",
+                                 turn_num, role_)
                     turn_pending = True
                     continue
                 if role_ == "assistant":
@@ -710,9 +851,12 @@ class CAContextAssemblerPlugin:
                 if i >= len(conversation_history):
                     break
                 ch = conversation_history[i]
-                orig_content = orig_dict.get("content")
-                if ch.get("content") != orig_content:
-                    ch["content"] = orig_content
+                # 还原所有被 mutation 修改的字段
+                for _key in ("content", "reasoning_content", "tool_calls"):
+                    if _key in orig_dict:
+                        ch[_key] = orig_dict[_key]
+                    else:
+                        ch.pop(_key, None)
             self._saved_history_snapshot = None
 
         engine.process_turn_f_stage(turn)
@@ -776,7 +920,7 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
 
 
 def _on_post_api_request_v5(**kwargs: Any) -> None:
-    """v5: 写 thought L2 + tool 占位行。"""
+    """v5: 写 thought 行 + tool 占位行。"""
     session_id = kwargs.get("session_id", "")
     with _engines_lock:
         plugin = _engines.get(session_id)
@@ -796,7 +940,7 @@ def _on_post_api_request_v5(**kwargs: Any) -> None:
 
 
 def _on_post_tool_call_v5(**kwargs: Any) -> None:
-    """v5: 回填 tool L2 + per-tool L1。"""
+    """v5: 回填 tool 行 + per-tool Fct。"""
     session_id = kwargs.get("session_id", "")
     with _engines_lock:
         plugin = _engines.get(session_id)

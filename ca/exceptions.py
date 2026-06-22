@@ -11,7 +11,7 @@ class FctTruncatedException(Exception):
     携带 response_text 以便降级代码读取部分输出。
     """
 
-    def __init__(self, message: str = "L1 output truncated", response_text: str = ""):
+    def __init__(self, message: str = "Fct output truncated", response_text: str = ""):
         super().__init__(message)
         self.message = message
         self.response_text = response_text

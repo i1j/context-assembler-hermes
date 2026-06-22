@@ -12,3 +12,4 @@ working_copy.db
 
 # graphify cache (regeneratable)
 graphify-out/cache/
+graphify-out/cache/

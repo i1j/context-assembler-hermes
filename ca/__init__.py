@@ -34,7 +34,6 @@ from .exceptions import FctTruncatedException
 from .store import SQLiteStore
 from .cache import AssemblyCache, CacheBuilder
 from .embedding import EmbeddingClient
-from .ooda_parser import OODAParser
 from .stats import AssembleStats
 from .tool_summarizer import ToolSummarizer
 
@@ -168,7 +167,6 @@ class ContextAssembler(EStageMixin, FStageMixin, LStageMixin, AStageMixin):
     def __init__(self, db_path: str = "./ca_store.db", session_id: str = "default"):
         self.store = SQLiteStore(db_path)
         self.embed_client = EmbeddingClient()
-        self.ooda_parser = OODAParser(self.embed_client)
         self.context_length = Config.CONTEXT_LENGTH
         self._session_id = session_id
         builder = CacheBuilder(self.store)
@@ -206,18 +204,6 @@ class ContextAssembler(EStageMixin, FStageMixin, LStageMixin, AStageMixin):
             logger.warning("Resource cleanup partially failed: %s", e)
         with self._task_lock:
             self._pending_tasks.clear()
-
-    def _shutdown_cache_executor(self):
-        if sys.version_info >= (3, 10):
-            try:
-                self.cache._rebuild_executor.shutdown(wait=True, timeout=Config.SHUTDOWN_TIMEOUT)
-            except Exception:
-                logger.warning("Cache executor shutdown timeout")
-                self.cache._rebuild_executor.shutdown(wait=False)
-        else:
-            self.cache._rebuild_executor.shutdown(wait=False)
-
-    # ── F-stage 路由 ──
 
     def process_turn_f_stage(self, turn_index: int) -> int:
         """F-stage 路由：LLM 摘要写入 fin 行的入口。

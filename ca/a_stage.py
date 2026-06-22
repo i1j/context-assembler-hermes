@@ -17,7 +17,6 @@ from typing import Any, Dict, List, Optional, Set
 
 from .config import Config
 from .post_process import _safe_truncate
-from .retrieval import cosine_similarity
 
 logger = logging.getLogger(__name__)
 

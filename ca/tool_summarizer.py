@@ -170,7 +170,7 @@ class ToolSummarizer:
             result_summary = f"pytest: {', '.join(parts)} — {el}s"
             l1 = {
                 "tool_name": "terminal",
-                "tool_args": args,
+                "tool_args": self._clean_tool_args("terminal", args),
                 "result_summary": result_summary,
                 "error": None,
                 "implicit_knowledge": [],
@@ -194,7 +194,7 @@ class ToolSummarizer:
             except (json.JSONDecodeError, AttributeError):
                 continue
 
-        # 通用终端摘要 — L0 输出内容优先
+        # 通用终端摘要 — Hdl 输出内容优先
         seen = set()
         key_lines = []
         for line in non_empty:
@@ -236,7 +236,7 @@ class ToolSummarizer:
 
         l1 = {
             "tool_name": "terminal",
-            "tool_args": args,
+            "tool_args": self._clean_tool_args("terminal", args),
             "result_summary": result_summary,
             "error": f"exit_code={exit_code}" if has_error else None,
             "implicit_knowledge": [],
@@ -244,7 +244,7 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        # L0 v4+: 命令前缀 + 关键输出，便于话题回顾
+        # Hdl v4+: 命令前缀 + 关键输出，便于话题回顾
         cmd_part = cmd_short[:40] if cmd_short else ""
         if key_lines:
             out_part = key_lines[0][:50]
@@ -266,6 +266,9 @@ class ToolSummarizer:
         """execute_code 结构化摘要：代码首行摘要 + 输出关键行，同 terminal"""
         l1, l0 = self._summarize_terminal(tool_call_msg, tool_responses, tool_label="exc")
         l1["tool_name"] = "execute_code"
+        # 用正确工具名重新清理 tool_args（terminal 不走 code 字段清理）
+        args = tool_call_msg.get("function", {}).get("arguments", {})
+        l1["tool_args"] = self._clean_tool_args("execute_code", args)
         return l1, l0
 
     def _summarize_write_file(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
@@ -298,7 +301,7 @@ class ToolSummarizer:
 
         l1 = {
             "tool_name": "write_file",
-            "tool_args": args,
+            "tool_args": self._clean_tool_args("write_file", args),
             "result_summary": result_summary,
             "error": None,
             "implicit_knowledge": [],
@@ -333,7 +336,7 @@ class ToolSummarizer:
 
         l1 = {
             "tool_name": "patch",
-            "tool_args": args,
+            "tool_args": self._clean_tool_args("patch", args),
             "result_summary": result_summary,
             "error": None,
             "implicit_knowledge": [],
@@ -932,7 +935,7 @@ class ToolSummarizer:
 
         l1 = {
             "tool_name": tool_name,
-            "tool_args": arguments,
+            "tool_args": self._clean_tool_args(tool_name, arguments),
             "result_summary": result_summary or "无返回数据",
             "error": error,
             "implicit_knowledge": [],
@@ -1075,3 +1078,22 @@ class ToolSummarizer:
                 return _safe_truncate(result, 100)
             return result
         return _safe_truncate(text, 100)
+
+    @staticmethod
+    def _clean_tool_args(tool_name: str, args: dict) -> dict:
+        """去除 tool_args 中负载型字段（完整代码体、文件内容体），保留语义关键字段。
+
+        execute_code → 去 code
+        write_file   → 去 content
+        patch        → 去 old_string, new_string
+        其他工具     → 原样保留（args 体积极小，如 read_file 的 path）
+        """
+        HEAVY_FIELDS = {
+            "execute_code": {"code"},
+            "write_file": {"content", "file_content"},
+            "patch": {"old_string", "new_string"},
+        }
+        drop = HEAVY_FIELDS.get(tool_name, set())
+        if not drop:
+            return args
+        return {k: v for k, v in args.items() if k not in drop}

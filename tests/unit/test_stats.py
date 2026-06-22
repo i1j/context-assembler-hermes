@@ -12,7 +12,6 @@ from ca.stats import AssembleStats
 class TestAssembleStats:
     def test_init(self):
         s = AssembleStats()
-        assert s.upgrade_counts == {}
         assert s.error_counts == {}
 
     def test_time_phase(self):
@@ -36,13 +35,6 @@ class TestAssembleStats:
                 raise ValueError("boom")
         assert "failing" in s._phase_times
 
-    def test_record_upgrade(self):
-        s = AssembleStats()
-        s.record_upgrade("topic", 3)
-        assert s.upgrade_counts["topic"] == 3
-        s.record_upgrade("topic", 2)
-        assert s.upgrade_counts["topic"] == 5
-
     def test_record_error(self):
         s = AssembleStats()
         s.record_error("embed", "timeout")
@@ -56,11 +48,10 @@ class TestAssembleStats:
 
     def test_str_format(self):
         s = AssembleStats()
-        s.record_upgrade("topic", 3)
         s.record_error("embed", "timeout")
         s.finalize(1000, 500)
         result = str(s)
-        assert "topic" in result
+        assert "embed" in result
 
     def test_multiple_errors(self):
         s = AssembleStats()

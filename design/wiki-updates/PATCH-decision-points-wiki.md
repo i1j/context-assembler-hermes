@@ -19,7 +19,7 @@
 | 测试文件 | 覆盖决策点 | 决策类型 |
 |---------|-----------|---------|
 | ...20 行... |
-| `tests/audit/cross_ref_wiki_audit.py` | TP-001, TP-002, TP-006, TP-007 | 交叉验证审计 |
+| `tests/audit/test_cross_ref_wiki_audit.py` | TP-001, TP-002, TP-006, TP-007, CR-007 | 交叉验证审计 |
 
 ---
 ```

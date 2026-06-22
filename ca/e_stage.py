@@ -1,20 +1,20 @@
 """ca/e_stage.py — E-stage 写即落盘 + 代码级摘要 (v5.10)
 
-设计决策: E-stage 写即落盘
-  viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-e-stage-写即落盘-v50-已实现
+设计决策: Fct 摘要重构 (PDD 哲学)
+  viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-l1-摘要重构-v470-pdd-哲学
   5 个写入点: post_api_request → pre_tool_call → post_tool_call → pre_llm_call → post_llm_call
   核心原则：写即落盘，不经过 buffer。turn_stream(turn, seq) 主键保证每行唯一。
 
 职责：
 - 逐事件接收 Hermes hook 调用
 - 写即落盘到 turn_stream（不经过 buffer）
-- 顺手计算代码级摘要（per-tool L1）
+- 顺手计算代码级摘要（per-tool Fct）
 - F-stage 负责 LLM 摘要写 fin 行（此模块仅提供 _update_fct_v5 → update_fin_fct_v5）
 
 数据流：
   _on_api_response_v5    → write thought 行 (seq=N) + tool 占位行 + thought 代码摘要
   _on_pre_tool_call_v5   → no-op（占位已在 _on_api_response 写入）
-  _on_post_tool_call_v5  → write tool 行 (seq=N+i) + per-tool L1
+  _on_post_tool_call_v5  → write tool 行 (seq=N+i) + per-tool Fct
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import Config
+from .post_process import _safe_truncate
 from .store import write_turn_v5
 from .tool_summarizer import ToolSummarizer
 
@@ -82,11 +83,28 @@ class EStageMixin:
         self._seq_counter[turn] = seq
 
         # thought 代码摘要（无需 LLM）
-        thought_l1 = ""
+        thought_fct = ""
         try:
-            thought_l1 = ToolSummarizer.generate_group_summary(thought)
+            thought_fct = ToolSummarizer.generate_group_summary(thought)
         except Exception:
             pass
+        if not thought_fct.strip():
+            thought_fct = "空"
+
+        # thought Hdl：去掉过渡前缀后的首句（~60 字）
+        thought_hdl = ""
+        try:
+            raw = thought.strip()
+            for prefix in ToolSummarizer._TRANSITION_PREFIXES:
+                if raw.startswith(prefix):
+                    raw = raw[len(prefix):].strip()
+                    break
+            if raw:
+                thought_hdl = _safe_truncate(raw, max_len=60)
+            if not thought_hdl.strip():
+                thought_hdl = "空"
+        except Exception:
+            thought_hdl = "空"
 
         write_turn_v5(
             self.store, self._session_id, turn, seq,
@@ -95,7 +113,8 @@ class EStageMixin:
             finish_reason=finish_reason,
             usage_prompt_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
             usage_completion_tokens=getattr(usage, "completion_tokens", None) if usage else None,
-            fct_text=thought_l1,
+            fct_text=thought_fct,
+            hdl_text=thought_hdl,
             written_at=time.time(),
         )
         logger.info("[CA_v5] _on_api_response: wrote thought turn=%d seq=%d tools=%d",
@@ -143,7 +162,7 @@ class EStageMixin:
         error_message: Optional[str] = None,
         api_request_id: str = "",
     ) -> None:
-        """v5: 回填 tool 行 + per-tool L1。"""
+        """v5: 回填 tool 行 + per-tool Fct。"""
         entry = self._tool_seq_map.get(tool_call_id)
         if entry:
             turn, seq = entry
@@ -160,7 +179,7 @@ class EStageMixin:
             else ""
         )
 
-        # ── per-tool L1（代码级摘要） ──
+        # ── per-tool Fct（代码级摘要） ──
         fct_str, hdl_text = "", ""
         try:
             tc_def = {
@@ -172,6 +191,8 @@ class EStageMixin:
             fct_str = json.dumps(fct_dict, ensure_ascii=False) if fct_dict else ""
         except Exception as e:
             logger.warning("[CA_v5] tool summarize failed: %s", e)
+        if not fct_str.strip() and not hdl_text.strip():
+            hdl_text = "空"
 
         write_turn_v5(
             self.store, self._session_id, turn, seq,

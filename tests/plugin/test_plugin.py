@@ -468,3 +468,68 @@ def test_tc_reset_001_fd_no_leak(engine):
     final_fd = len(os.listdir("/proc/self/fd"))
     assert final_fd - init_fd <= 5,         f"FD leak: initial={init_fd}, final={final_fd}"
 
+
+# ============================================================================
+# bg_review 路径
+# ============================================================================
+
+
+class TestBgReview:
+    """GAP-C: bg_review 检测 → 跳过 A-stage → 同步写 Fct"""
+
+    def test_bg_review_writes_fct_equals_content(self, engine, ca_engine, monkeypatch):
+        """bg_review 轮：Fct = user_message, Hdl = user_message[:100], A-stage 跳过"""
+        import sys
+        from unittest.mock import MagicMock
+
+        # 将 ca_engine 注册到 _engines，使 _on_pre_llm_call_v5 能找到 plugin
+        plugin = CAContextAssemblerPlugin()
+        plugin._engine = ca_engine
+        plugin._engine_errored = False
+        plugin._session_id = "test_bg"
+        _ca_plugin._engines["test_bg"] = plugin
+
+        # 注入 mock 模块 tools.skill_provenance（该模块在测试环境不存在）
+        mock_sp = MagicMock()
+        mock_sp.get_current_write_origin = lambda: "background_review"
+        sys.modules["tools.skill_provenance"] = mock_sp
+
+        try:
+            # 调用模块级 hook
+            result = _ca_plugin._on_pre_llm_call_v5(
+                session_id="test_bg",
+                user_message="这是后台审查内容",
+                conversation_history=[],
+                context_length=50000,
+            )
+
+            # 1. 返回 None（跳过 A-stage）
+            assert result is None, "bg_review 应返回 None 跳过 A-stage"
+
+            # 2. Fct = user_message
+            from ca.store import read_fct_v5
+            fct = read_fct_v5(ca_engine.store, "test_bg", 0, 0)
+            assert fct is not None, "bg_review 应写入 Fct"
+            assert fct == "这是后台审查内容", f"Fct 应为 user_message, got {fct!r}"
+
+            # 3. Hdl = user_message[:100]
+            cur = ca_engine.store.conn.execute(
+                "SELECT Hdl FROM turn_stream WHERE session_id=? AND turn=? AND seq=?",
+                ("test_bg", 0, 0),
+            )
+            row = cur.fetchone()
+            assert row is not None, "Hdl 应被写入"
+            assert row[0] == "这是后台审查内容", f"Hdl 应为 user_message[:100], got {row[0]!r}"
+
+            # 4. biz_category = 'bg_review'
+            cur = ca_engine.store.conn.execute(
+                "SELECT biz_category FROM turn_stream WHERE session_id=? AND turn=? AND seq=?",
+                ("test_bg", 0, 0),
+            )
+            row = cur.fetchone()
+            assert row[0] == "bg_review", f"biz_category 应为 bg_review, got {row[0]!r}"
+        finally:
+            # 清理
+            _ca_plugin._engines.pop("test_bg", None)
+            sys.modules.pop("tools.skill_provenance", None)
+
