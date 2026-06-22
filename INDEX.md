@@ -61,4 +61,4 @@
 > **项目入口**: `design/decision-points-wiki.md`（决策树全文）
 > **测试入口**: `tests/INDEX.md`（测试体系总览）
 > **导航起点**: `design/decision-points/INDEX.md`（节点索引）
-> **代码基线**: master=v4.4.0 (`~/projects/context-assembler/`) / deploy=v5.10 (`~/.hermes/profiles/tester/plugins/ca_assembler/`)
+> **代码基线**: master=v4.4.0 (`~/projects/context-assembler/`) / deploy=v6.0 (`~/.hermes/profiles/tester/plugins/ca_assembler/`)

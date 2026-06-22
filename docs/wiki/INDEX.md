@@ -153,7 +153,8 @@ flowchart LR
 | 27 | **TopicGradeManager** | v5.5 | 话题 | topic-segmentation, topic-grade-switch, a-stage-role-match |
 | 28 | **增量缓存** | v5.8 | 缓存 | incremental-cache |
 | 29 | **CA-OV 提交** | v5.5 | 持久化 | ca-ov-topic-submit |
-| 30 | **已拒绝方案** | v5.0~5.8 | meta | rejected-approaches |
+|| 30 | [已拒绝方案](decisions/30-rejected-approaches.md) | v5.0~5.8 | meta | rejected-approaches |
+|| 31 | **[CE 壳注册](decisions/31-ce-shell-registration.md)** | v6.0 | 插件 | plugin-responsibility, naming-convention |
 
 **粗体** = v5.x 新决策（旧决策树中无对应节点）
 
