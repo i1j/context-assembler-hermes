@@ -247,7 +247,7 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 | `CA_COMPRESSION_THRESHOLD`  | 0.50                       | 压缩警戒比值                                                                   |
 | `CA_HISTORY_INJECTION`      | `replace`                | 注入模式：`replace`(mutation)/`append`(annotation)/`off`(仅数据积累)     |
 | `CA_HISTORY_MUTATE`         | (已弃用)                   | 2值开关，`1`→替换 `0`→追加。未设 `CA_HISTORY_INJECTION` 时兼容此旧变量 |
-| `CA_LLM_THINK`              | 未设置                     | Fct LLM think 参数（1/0/true/false）                                            |
+| `CA_LLM_THINK`              | 未设置（等效 false）       | Fct LLM think 参数（1/0/true/false）。Fct 是结构化提取任务，默认关闭推理链以节省 token。CA_LLM_THINK=1 开启。 |
 
 ### 话题等级配置（TopicGradeManager）
 
@@ -383,7 +383,7 @@ pre_llm_call_v5()
 
 ## Fct 摘要生成架构
 
-关键模块表见上。数据流详见 [v5.2 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md#2-hdl_embedding-孤儿数据清理)。
+关键模块表见上。数据流详见 [v5.2 分析报告](docs/changelog.md)（v5.1.0 节）。
 
 ## 断路器
 
@@ -451,11 +451,11 @@ python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts="
 
 ### 调试记录
 
-详见 `docs/analysis/` 分析报告、`docs/debug/` 调试记录和三源验证报告。
+详见 `docs/changelog.md` 历史记录和 `docs/wiki/decisions/20-incidents-review.md` 事故报告。
 
 ### 预算实测
 
-所有行 `_assemble_status=0`，budget 从未耗尽。详见 [v5.2 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md)。
+所有行 `_assemble_status=0`，budget 从未耗尽。详见 [变更历史](docs/changelog.md)（v5.1.0 节）。
 
 ## 已知问题 / 待办
 
@@ -466,7 +466,7 @@ python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts="
 | `_simple_mutation_mode_v5` 中 `grade` 比较已改用 `Grade`/`TopicGrade` 枚举 | ✅ 已修复 |
 | `reasoning_content`（模型思考链）被 A-stage 完全忽略 — 只替换 `content`，但 assistant 行还携带 `reasoning_content`（5-8KB/条）和 `tool_calls`，叠加占保护区外总 token 的 69% | ⏳ 待优化 |
 
-详见 [docs/debug/](docs/debug/) 和 [docs/changelog.md](docs/changelog.md)。
+详见 [docs/changelog.md](docs/changelog.md) 和 [wiki 事故记录](docs/wiki/decisions/20-incidents-review.md)。
 
 ## ⚠️ 关键概念：CA 不是 context engine
 
@@ -498,10 +498,10 @@ Hermes 有两条完全独立的机制：
 | ------------ | --------------------------- | --------------------------------------------------------------------------- |
 | **技术方案**（双维度） | `docs/wiki/`          | **权威技术方案**：`architecture/`（14 页，空间维度）+ `decisions/`（30 页，时间维度） |
 | 变更历史     | `docs/changelog.md`         | 全版本变更记录（唯一权威源）                                                |
-| 设计（历史） | `docs/design/`              | 旧设计文档（已被 wiki 取代，保留参考）                                      |
-| 分析         | `docs/analysis/`            | 缓存分析、注入重构报告（v5.1）、Fct-OODA 链式结构设计分析                  |
-| 调试         | `docs/debug/`               | 调试记录（A-stage、F-stage、前端验证、话题分割等）                         |
-| 知识图谱     | `graphify-out/`             | 代码静态图：2210 节点、2930 边、303 社区。God Nodes、数据流图              |
+| 设计（历史） | — | 旧设计文档已 [[清]]理，详见 OV `projects/context-assembler/design/` |
+| 分析         | `docs/changelog.md`        | 历史分析见变更日志（v5.1.0/v5.2.0 节），详见 OV `design/` |
+| 调试         | — | 调试记录已归档，详见 OV `projects/context-assembler/design/` |
+| 知识图谱     | `graphify-out/`             | 代码静态图：573 节点、766 边、55 社区。God Nodes、社区结构              |
 
 ### 快速入口
 
@@ -514,9 +514,22 @@ Hermes 有两条完全独立的机制：
 
 `graphify-out/` 目录包含项目代码的静态知识图谱分析产物，用于快速理解架构和数据流。
 
-|| 文件 | 用途 |
-||------|------|
-|| `GRAPH_REPORT.md` | 图谱概况：2210 节点、2930 边、303 社区。God Nodes 排名、边关系分布、动态数据流、建议查询问题 |
+| 文件 | 用途 |
+|------|------|
+| `GRAPH_REPORT.md` | 图谱概况：573 节点、766 边、55 社区（DeepSeek 命名）。God Nodes 排名、社区结构、边关系分布 |
+| `graph.json` | 完整图谱数据（过滤后，不含 .graphify_pylib 缓存库） |
+| `graph.html` | 力导向可视化（vis-network） |
+
+**当前状态：** 0 孤立节点，全部 55 社区已命名，Wiki 文档 63 条代码外联边。
+
+**构建命令：**
+```bash
+# 增量更新
+PYTHONPATH=.graphify_pylib .graphify_pylib/bin/graphify update .
+
+# 过滤缓存库 + 添加缺失边 + 重聚类 + 社区命名（四步完整流程）
+# → 见 graphify skill 的「Graph Cleanup Workflow」节
+```
 
 ## ContextEngine 壳（v6.0）
 
@@ -525,23 +538,36 @@ Hermes 有两条完全独立的机制：
 
 ### 与插件钩子的关系
 
+CE 路径与 Hook 路径的执行时序（由 Hermes `turn_context.py` 驱动）：
+
 ```
+                                    ← should_compress()=True（每轮）
+                                    ← compress() 原地删 FAR 行
+                                    ← _full_backup 保存删行前快照
+ pre_llm_call                      ← A-stage 在缩短后的消息上替换 content
+ LLM 调用
+ post_llm_call                     ← _full_backup 恢复 content → F-stage
+```
+
+
 | 路径         | 触发时机  | 后端                          |
 |-------------|----------|-------------------------------|
 | Hook 路径   | 每轮      | pre_llm_call → topic_grade → A-stage |
-| CE 路径     | on-demand | should_compress()=False → 手动 /compress |
-```
+| CE 路径     | 每轮自动  | should_compress()=True → compress() 删 FAR 行 |
 
-`should_compress()` 返回 `False` —— 组装由 hook 路径驱动。CE 壳仅提供接口兼容，
-使 `context.engine: ca_assembler` 配置可识别 CA 为 context engine（供手动 `/compress` 使用）。
+`should_compress()` 返回 `True`（每轮触发）。CE 壳复用 v5.10 的 turn_stream + topic_grade 数据管道，
+在 pre_llm_call 之前删除 FAR 级话题的全部消息行，缩短 LLM 上下文。被删行的原始 content
+通过 `_full_backup` 在 post_llm_call 中恢复，保证 state.db 不丢失数据。
 
-### compress() 行为
+### compress() 行为（CE 路径）
 
 - 复用 v5.10 的 turn_stream + topic_grade 数据管道
 - tail 保护区（最后 2 轮 user）不动
-- FAR 级话题的 thought/tool 行整行删除 → 消息列表缩短
+- compress() 在 pre_llm_call 之前删除 FAR 级话题的 thought/tool 行对
 - REL/ACT 级行保留原有 content 替换逻辑
-- Hermes 对 compress() 返回的短表做 archive_and_compact（同 session_id，不轮转）
+- `_full_backup` 在 compress() 入口保存全量快照，post_llm_call 恢复已删行的 content（行本身不恢复）
+- `should_compress()` 设 `_last_compress_aborted=True` → Hermes `compress_context` 跳过 archive_and_compact 和 session rotation
+
 | `graph.html` | 可交互图谱（浏览器打开），可视化节点与边关系 |
 | `graph.json` | 完整图谱数据（节点+边），可被代码分析工具消费 |
 | `manifest.json` | 文件清单（AST 哈希、mtime），用于增量更新检测 |

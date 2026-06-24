@@ -42,10 +42,8 @@ def _make_tool_call(call_id: str, name: str, args: dict = None,
 
 
 def _make_usage(prompt: int = 10, completion: int = 20):
-    u = SimpleNamespace()
-    u.prompt_tokens = prompt
-    u.completion_tokens = completion
-    return u
+    """构造 usage dict（与生产环境 Hermes 传递的真实格式一致）"""
+    return {"prompt_tokens": prompt, "completion_tokens": completion}
 
 
 # ============================================================================
@@ -117,11 +115,16 @@ class TestOnApiResponseV5:
             turn_index=0,
             usage=usage,
         )
-        # 无法直接读 token 列（read_turn_elm_rows 只返回 seq/role/content），
-        # 验证整体写入成功即可
-        from ca.store import read_turn_elm_rows
-        rows = read_turn_elm_rows(ca_engine.store, "test", 0)
-        assert len(rows) == 2  # thought + tool
+        # 直接 SQL 查 thought 行 (seq=1) 的 token 列
+        cur = ca_engine.store.conn.execute(
+            "SELECT usage_prompt_tokens, usage_completion_tokens FROM turn_stream "
+            "WHERE session_id=? AND turn=? AND seq=?",
+            ("test", 0, 1),
+        )
+        row = cur.fetchone()
+        assert row is not None, "thought row should exist"
+        assert row[0] == 100, f"expected prompt_tokens=100, got {row[0]!r}"
+        assert row[1] == 50, f"expected completion_tokens=50, got {row[1]!r}"
 
     def test_reasoning_content_as_thought(self, ca_engine):
         """provider_data.reasoning_content 优先于 content（thinking LLM 路径）"""

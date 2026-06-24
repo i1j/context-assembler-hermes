@@ -30,11 +30,12 @@ _LLM_MOCK_RESPONSE = (
 )
 
 
-@pytest.fixture(autouse=True)
-def _mock_embed(ca_engine):
+@pytest.fixture
+def _mock_embed():
     """防止测试挂死在 Ollama 嵌入连接。
     
     使用内容可区分伪嵌入（不再用常量向量）。
+    不依赖 ca_engine fixture：patch 作用于 EmbeddingClient 类方法，无需实例。
     """
     with patch(
         "ca.embedding.EmbeddingClient.embed",
@@ -43,7 +44,7 @@ def _mock_embed(ca_engine):
         yield
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def _mock_llm(request):
     """防止 C-stage / F-stage 测试阻塞在真实 LLM 调用。
 

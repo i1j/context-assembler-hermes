@@ -47,11 +47,13 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 # 日志同时写到 /tmp/ca_assembler.log 以便诊断
-_log_handler = logging.FileHandler("/tmp/ca_assembler.log", encoding="utf-8")
-_log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-_log_handler.setLevel(logging.DEBUG)
-logger.addHandler(_log_handler)
-logger.setLevel(logging.DEBUG)
+if not any(isinstance(h, logging.FileHandler) and h.baseFilename == "/tmp/ca_assembler.log"
+           for h in logger.handlers):
+    _log_handler = logging.FileHandler("/tmp/ca_assembler.log", encoding="utf-8")
+    _log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    _log_handler.setLevel(logging.DEBUG)
+    logger.addHandler(_log_handler)
+    logger.setLevel(logging.DEBUG)
 
 # ── 模块级引擎注册表（session_id → plugin 实例）──
 _engines: Dict[str, "CAContextAssemblerPlugin"] = {}
@@ -311,72 +313,30 @@ class CAContextEngine(ContextEngine):
         focus_topic: str = None,
         force: bool = False,
     ) -> list:
-        """CE 管线入口：备份 + 删除 FAR thought/tool 行对。
+        """CE 管线入口：备份 + 交 A-stage 统一处理删行与替换。
 
-        在 messages 上原地删除（messages[:] = filtered），
+        设置 _full_backup 后委托 plugin.pre_llm_call_v5 处理，
+        A-stage 负责删除 FAR thought/tool 行对并替换剩余行 content。
         配合 should_compress 预设的 abort 标志使 compress_context
         跳过 archive_and_compact 和 session rotation。
         """
         plugin = self._get_plugin()
         if not plugin or plugin._engine_errored or not plugin._engine:
             return messages
-        # 保存全量备份（含 FAR 行），供 post_llm_call 恢复原始内容 → state.db
-        plugin._full_backup = [{**m} for m in messages]
 
-        # 安全检查：如果已组装过且未 force，直接返回
+        # 守卫：如果消息未增长跳过
         last_len = getattr(self, '_last_compress_msg_len', 0)
         if not force and len(messages) <= last_len:
             return messages
 
-        # 复用 v5.10 尾区保护逻辑
-        tail_boundary = 0
-        _user_count = 0
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "user":
-                _user_count += 1
-                if _user_count >= 2:
-                    tail_boundary = i
-                    break
+        # 全量备份，供 post_llm_call 恢复 content → state.db
+        plugin._full_backup = [{**m} for m in messages]
 
-        # 通过 plugin 的 _simple_mutation_mode_v5 做内容替换
-        # 然后手动删 row：FAR 级的 thought/tool 行从 messages 中移除
-        from ca.store import get_turn_ca_rows
-        store = plugin._engine.store
-        sid = plugin._session_id
+        # 交给 A-stage 统一处理（传入原始 messages 引用，可做删行+替换）
+        plugin.pre_llm_call_v5(conversation_history=messages)
 
-        # Phase 1: 确定每个 turn 的 topic_grade
-        topic_mgr = plugin._topic_mgr
-
-        # Phase 2: 扫描需删除的 conv_idx
-        # 只有 FAR 排在 tail 保护区之外的 thought/tool 才删除
-        drop_indices: set = set()
-        current_turn = -1
-        for i, msg in enumerate(messages):
-            role = msg.get("role", "")
-            if role == "system":
-                continue
-            if role == "user":
-                current_turn += 1
-            if i >= tail_boundary:
-                continue
-            if role not in ("assistant", "tool"):
-                continue
-            # thought/tool 行
-            if topic_mgr:
-                grade = topic_mgr.get_turn_grade(current_turn + 1)
-            else:
-                continue
-            # FAR → 删除整行（assistant+tool 都在主循环中被捕获，无需向后查找）
-            if grade == TopicGrade.FAR:
-                drop_indices.add(i)
-
-        if not drop_indices:
-            return messages
-
-        # Phase 3: 原地删除 — 修改 messages 长度但不换对象
-        # 配合 should_compress 预设的 abort 标志，compress_context 跳过 archive/rotation
-        new_msgs = [m for i, m in enumerate(messages) if i not in drop_indices]
-        messages[:] = new_msgs
+        # _full_backup 保留不动：post_llm_call_v5 直接用原表替换压缩后的 conv_hist，
+        # 天然解决索引错位（替代逐行 idx 拷贝 + 回退 _saved_history_snapshot 的方案）。
 
         self._last_compress_msg_len = len(messages)
         self.compression_count += 1
@@ -533,6 +493,49 @@ class CAContextAssemblerPlugin:
 
 
 
+
+    def _delete_far_thought_tool_rows(self, messages: list) -> None:
+        """从原始消息中删除 FAR 级的 thought + tool 行对，保留 fin 行。
+
+        仅由 CE compress() 路径调用（_full_backup 已设置），此时 messages
+        是原始列表引用，可做原地 delete 操作（messages[:]=filtered）。
+        fin 行（assistant, finish_reason='stop'）保留，A-stage 后续替换为 Hdl[:150]。
+        user 行保留到 content 替换阶段处理。
+        """
+        # tail 保护区：最后 2 个 user
+        tail_boundary = 0
+        _user_count = 0
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                _user_count += 1
+                if _user_count >= 2:
+                    tail_boundary = i
+                    break
+
+        drop_indices: set = set()
+        current_turn = -1
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "")
+            if role == "system":
+                continue
+            if role == "user":
+                current_turn += 1
+            if i >= tail_boundary:
+                continue
+            # fin 行保留（A-stage 替换为 Hdl[:150]）
+            if role == "assistant" and msg.get("finish_reason") == "stop":
+                continue
+            if role not in ("assistant", "tool"):
+                continue
+            # FAR thought/tool → 删除
+            if self._topic_mgr:
+                grade = self._topic_mgr.get_turn_grade(current_turn + 1)
+                if grade == TopicGrade.FAR:
+                    drop_indices.add(i)
+
+        if not drop_indices:
+            return
+        messages[:] = [m for i, m in enumerate(messages) if i not in drop_indices]
 
     # ═════════════════════════════════════════════════════
     # v5.0 — A-stage 替换 + E-stage final 写入
@@ -975,6 +978,10 @@ class CAContextAssemblerPlugin:
         if not isinstance(conversation_history, list) or not conversation_history:
             return None
 
+        # CE 路径：compress() 设置了 _full_backup → 先删 FAR thought/tool 行
+        if self._full_backup is not None:
+            self._delete_far_thought_tool_rows(conversation_history)
+
         # 话题检测 + 切换定级
         turn = self._engine._current_turn if self._engine else 0
         user_msg = kwargs.get("user_message", "")
@@ -987,11 +994,14 @@ class CAContextAssemblerPlugin:
             if switched:
                 q_emb = self._engine.embed_client.embed(user_msg)
                 self._topic_mgr.grade_on_switch(q_emb, user_msg)
-                # 【日志 A】话题定级后 dump
+        # 【日志 A】话题定级后 dump
                 try:
                     tg = self._topic_mgr.get_topic_grades()
                     t1g = self._topic_mgr.get_turn_grade(1)
                     td = getattr(self._topic_mgr, "_topic_data", {})
+                    logger.info("[CA_v5_grade] grades=%s turn1_grade=%s topic_data_has_centroid=%s",
+                               {str(k): str(v) for k, v in tg.items()}, t1g,
+                               {str(k): v.get("centroid") is not None for k, v in td.items()})
                     _dump = {
                         "turn": turn,
                         "topic_grades": {str(k): str(v) for k, v in tg.items()},
@@ -1001,9 +1011,6 @@ class CAContextAssemblerPlugin:
                         "topic_mgr_ok": self._topic_mgr is not None,
                         "engine_ok": self._engine is not None,
                     }
-                    logger.info("[CA_v5_grade] grades=%s turn1_grade=%s topic_data_has_centroid=%s",
-                               {str(k): str(v) for k, v in tg.items()}, t1g,
-                               {str(k): v.get("centroid") is not None for k, v in td.items()})
                     with open("/tmp/ca_topic_grades.jsonl", "a") as _f:
                         _f.write(json.dumps(_dump, ensure_ascii=False) + "\n")
                 except Exception as exc:
@@ -1051,19 +1058,11 @@ class CAContextAssemblerPlugin:
 
         _backup = getattr(self, "_full_backup", None)
         if _backup is not None:
-            for i, orig_dict in enumerate(_backup):
-                if i >= len(conversation_history):
-                    # FAR 行已从 conv_hist 删除（compress 路径），
-                    # 不追加回内存；state.db 里有 archive 副本
-                    break
-                ch = conversation_history[i]
-                for _key in ("content", "reasoning_content", "tool_calls"):
-                    if _key in orig_dict:
-                        ch[_key] = orig_dict[_key]
-                    else:
-                        ch.pop(_key, None)
+            # _full_backup 是 compress() 保存的完整快照（含 FAR 行），
+            # 直接替换 conv_hist 整表，避免索引错位 + 完整保留原始数据供 archive
+            conversation_history[:] = _backup
             self._full_backup = None
-            logger.info("[CA_v5] post_llm_call: restored %d rows from full_backup",
+            logger.info("[CA_v5] post_llm_call: replaced conv_hist with full_backup (%d rows)",
                         len(conversation_history))
         else:
             _snapshot = getattr(self, "_saved_history_snapshot", None)

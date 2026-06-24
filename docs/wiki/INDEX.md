@@ -120,13 +120,13 @@ flowchart LR
 | 13 | [测试策略](architecture/13-test-strategy.md) | v5.0 | — |
 | 14 | [已拒绝方案](architecture/14-rejected-approaches.md) | v5.0 | rejected-approaches |
 
-### decisions（30 页 — 时间维度：决策树）
+### decisions（31 页 — 时间维度：决策树）
 
 | # | 文件 | 版本 | 类型 | 影响组件 |
 |---|------|------|------|----------|
 | 01 | [设计哲学](decisions/01-design-philosophy.md) | v0.x | 基线 | 全系统 |
 | 02 | [SQLite + WAL](decisions/02-sqlite-wal-storage.md) | v0.x | 存储 | storage-model |
-| 03 | [工具轮规则引擎](decisions/03-tool-summarizer-rules.md) | v1.0 | 工具 | — |
+| 03 | [工具轮规则引擎](decisions/03-tool-summarizer-rules.md) | v1.0 | 工具 | fct-format-evolution |
 | 04 | [工具组格式](decisions/04-tool-group-format.md) | v1.2 | 工具 | — |
 | 05 | [双路检索 + RRF](decisions/05-dual-retrieval-rrf.md) | v2.0 | 检索 | — |
 | 06 | [嵌入服务](decisions/06-embedding-multi-backend.md) | v2.0 | 检索 | — |
@@ -153,11 +153,11 @@ flowchart LR
 | 27 | **TopicGradeManager** | v5.5 | 话题 | topic-segmentation, topic-grade-switch, a-stage-role-match |
 | 28 | **增量缓存** | v5.8 | 缓存 | incremental-cache |
 | 29 | **CA-OV 提交** | v5.5 | 持久化 | ca-ov-topic-submit |
-|| 30 | [已拒绝方案](decisions/30-rejected-approaches.md) | v5.0~5.8 | meta | rejected-approaches |
-|| 31 | **[CE 壳注册](decisions/31-ce-shell-registration.md)** | v6.0 | 插件 | plugin-responsibility, naming-convention |
+| 30 | [已拒绝方案](decisions/30-rejected-approaches.md) | v5.0~5.8 | meta | rejected-approaches |
+| 31 | **[CE 壳注册](decisions/31-ce-shell-registration.md)** | v6.0 | 插件 | plugin-responsibility, naming-convention |
 
 **粗体** = v5.x 新决策（旧决策树中无对应节点）
 
 ### 历史文档
 
-旧设计文档（`docs/design/`）和决策树（OpenViking `projects/context-assembler/design/decision-points/`）已被本 wiki 取代。保留供历史参考。
+旧设计文档（OpenViking `projects/context-assembler/design/`）和决策树（`projects/context-assembler/design/decision-points/`）已被本 wiki 取代。保留供历史参考。

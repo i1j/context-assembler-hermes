@@ -59,7 +59,161 @@ class TestUtilities:
         assert len(result) > 0
 
 
-# ── _summarize_terminal (generic handler) ──
+# ── _summarize_execute_code (Hermes execute_code handler) ──
+
+def _ec_resp(status: str, output: str = "", error: str = None,
+             tool_calls_made: int = 0, duration: float = 0.5) -> list:
+    """Build execute_code tool_responses list from status/output/error."""
+    body = {"status": status, "output": output,
+            "tool_calls_made": tool_calls_made, "duration_seconds": duration}
+    if error:
+        body["error"] = error
+    return [{"content": json.dumps(body)}]
+
+
+class TestExecuteCodeHandler:
+    def test_basic_output(self):
+        """成功响应：提取前 3 个非空输出行"""
+        s = ToolSummarizer()
+        tc = {"function": {"name": "execute_code", "arguments": {"code": "print('hello')"}},
+              "content": "跑个测试"}
+        resp = _ec_resp("success", "line1\nline2\nline3\nline4")
+        l1, l0 = s._summarize_execute_code(tc, resp)
+        assert "line1" in l0
+        assert "line2" in l1["result_summary"]
+        assert "duration_seconds" not in l1["result_summary"]
+        assert "tool_calls_made" not in l1["result_summary"]
+        assert isinstance(l1["tool_args"], dict)
+        assert "code" not in l1["tool_args"]
+
+    def test_error_with_traceback(self):
+        """错误响应：保留 status + traceback 首行"""
+        s = ToolSummarizer()
+        tc = {"function": {"name": "execute_code", "arguments": {"code": "1/0"}},
+              "content": "查一下"}
+        traceback = "Traceback (most recent call last):\n  File \"script.py\", line 1\nZeroDivisionError: division by zero"
+        resp = _ec_resp("error", output="", error=traceback)
+        l1, l0 = s._summarize_execute_code(tc, resp)
+        assert "error:" in l1["result_summary"] or "Traceback" in l1["result_summary"]
+        assert "Traceback" in l0 or "error" in l0
+
+    def test_pytest_detection(self):
+        """pytest 输出 → 'pytest: N passed — Xs'"""
+        s = ToolSummarizer()
+        tc = {"function": {"name": "execute_code", "arguments": {"code": "pytest"}},
+              "content": "跑测试"}
+        output = "some setup\n...\n3 passed, 1 failed in 2.34s\n"
+        resp = _ec_resp("success", output)
+        l1, l0 = s._summarize_execute_code(tc, resp)
+        assert l1["result_summary"] == "pytest: 3 passed, 1 failed — 2.34s"
+        assert "pytest" in l0
+
+    def test_pytest_passed_only(self):
+        """仅有 passed 无 failed"""
+        s = ToolSummarizer()
+        tc = {"function": {"name": "execute_code", "arguments": {"code": "pytest -x"}},
+              "content": "跑简洁测试"}
+        output = "....................\n19 passed in 0.58s\n"
+        resp = _ec_resp("success", output)
+        l1, l0 = s._summarize_execute_code(tc, resp)
+        assert "pytest" in l1["result_summary"]
+        assert "19 passed" in l1["result_summary"]
+
+    def test_empty_output(self):
+        """空输出 → 回退到行数"""
+        s = ToolSummarizer()
+        tc = {"function": {"name": "execute_code", "arguments": {"code": "print('')"}},
+              "content": "测空输出"}
+        resp = _ec_resp("success", "")
+        l1, l0 = s._summarize_execute_code(tc, resp)
+        assert "0 lines" in l1["result_summary"] or "0" in l1["result_summary"]
+        assert l0 is not None
+
+    def test_code_stripped_from_args(self):
+        """tool_args 不含 code 字段"""
+        s = ToolSummarizer()
+        tc = {"function": {"name": "execute_code",
+                           "arguments": {"code": "import os\nprint('hi')\n",
+                                         "timeout": 30}},
+              "content": "跑代码"}
+        resp = _ec_resp("success", "hi")
+        l1, l0 = s._summarize_execute_code(tc, resp)
+        assert "code" not in l1["tool_args"]
+        assert l1["tool_args"].get("timeout") == 30
+
+    def test_timeout_output(self):
+        """超时响应：status=timeout，保留超时信息"""
+        s = ToolSummarizer()
+        tc = {"function": {"name": "execute_code", "arguments": {"code": "import time; time.sleep(999)"}},
+              "content": "跑慢代码"}
+        resp = _ec_resp("timeout", "partial output\n⏰ Script timed out", error="Script timed out after 30s")
+        l1, l0 = s._summarize_execute_code(tc, resp)
+        assert "timeout" in l1["result_summary"] or "timed out" in l1["result_summary"] or "partial" in l1["result_summary"]
+
+    def test_error_without_error_field(self):
+        """error status 但无 error 字段：回退到 status + body"""
+        s = ToolSummarizer()
+        tc = {"function": {"name": "execute_code", "arguments": {"code": "bad"}},
+              "content": "出错查"}
+        resp = [{"content": json.dumps({"status": "error", "output": "something went wrong",
+                                        "tool_calls_made": 0, "duration_seconds": 0.1})}]
+        l1, l0 = s._summarize_execute_code(tc, resp)
+        assert "error" in l1["result_summary"]
+
+    def test_tool_calls_count_in_summary(self):
+        """tool_calls_made > 0 → result_summary 含 [N tc]"""
+        s = ToolSummarizer()
+        tc = {"function": {"name": "execute_code", "arguments": {"code": "from hermes_tools import terminal; ..."}},
+              "content": "用工具"}
+        resp = _ec_resp("success", "result: ok\n", tool_calls_made=3)
+        l1, l0 = s._summarize_execute_code(tc, resp)
+        assert "[3 tc]" in l1["result_summary"]
+        assert "duration_seconds" not in l1["result_summary"]
+
+    def test_no_tool_calls_no_suffix(self):
+        """tool_calls_made = 0 → 无 [0 tc] 后缀"""
+        s = ToolSummarizer()
+        tc = {"function": {"name": "execute_code", "arguments": {"code": "print(1)"}},
+              "content": "简单调用"}
+        resp = _ec_resp("success", "1\n", tool_calls_made=0)
+        l1, l0 = s._summarize_execute_code(tc, resp)
+        assert "[0 tc]" not in l1["result_summary"]
+
+    def test_non_json_response_fallback(self):
+        """响应非 JSON → 安全降级"""
+        s = ToolSummarizer()
+        tc = {"function": {"name": "execute_code", "arguments": {"code": "echo"}},
+              "content": ""}
+        resp = [{"content": "plain text", "status": "error"}]
+        l1, l0 = s._summarize_execute_code(tc, resp)
+        assert l0 is not None
+
+    def test_multiple_tool_responses(self):
+        """多个 tool_responses → 只解析第一个 JSON"""
+        s = ToolSummarizer()
+        tc = {"function": {"name": "execute_code", "arguments": {"code": "print(42)"}},
+              "content": "多响应"}
+        resp = [
+            {"content": json.dumps({"status": "success", "output": "42\n", "tool_calls_made": 0, "duration_seconds": 0.1})},
+            {"content": json.dumps({"status": "success", "output": "extra\n", "tool_calls_made": 0, "duration_seconds": 0.2})},
+        ]
+        l1, l0 = s._summarize_execute_code(tc, resp)
+        # 只取第一个的 "42"
+        assert "42" in l1["result_summary"]
+        assert "extra" not in l1["result_summary"]
+
+    def test_handler_dispatch(self):
+        """summarize() 正确分派到 _summarize_execute_code"""
+        s = ToolSummarizer()
+        tc_msg = {"role": "assistant",
+                  "function": {"name": "execute_code", "arguments": '{"code": "print(1)"}'},
+                  "content": "跑代码"}
+        resp = _ec_resp("success", "1\n")
+        l1, l0 = s.summarize(tc_msg, resp)
+        assert isinstance(l1, dict)
+        assert l1["tool_name"] == "execute_code"
+        assert "1" in l1["result_summary"]
+
 
 class TestTerminalHandler:
     def test_basic_output(self):

@@ -6,7 +6,8 @@ version_introduced: v5.5
 status: 已移除（v5.10 清理，`_fire_ov_submit` 已从 `lstage.py` 删除）
 decisions: ["ca-ov-topic-submit", "topic-grade-manager"]
 depends_on: ["topic-segmentation", "topic-grade-switch"]
-updated: 2026-07-26
+updated: 2026-06-23
+source_files: ["topic_manager.py"]
 ---
 
 ## 问题
@@ -73,11 +74,11 @@ viking_list("viking://resources/hermes/ca/topics/<session_id>/")
 
 ### 变更记录
 
-- **v5.10** (2026-07-26)：`_fire_ov_submit` 和相关代码已从 `lstage.py` 删除
+- **v5.10** (2026-06-23)：`_fire_ov_submit` 和相关代码已从 `lstage.py` 删除
 - 对应的占位测试已在 `test_topic_manager.py` 中添加（`pytest.skip` 标记）
 
 
 ### 变更记录
 
-- **v5.10** (2026-07-26)：`_fire_ov_submit` 和相关代码已从 `lstage.py` 删除
+- **v5.10** (2026-06-23)：`_fire_ov_submit` 和相关代码已从 `lstage.py` 删除
 - 对应的占位测试已在 `test_topic_manager.py` 中添加（`pytest.skip` 标记）

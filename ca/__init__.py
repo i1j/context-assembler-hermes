@@ -29,7 +29,7 @@ import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .config import Config
+from .config import ASSEMBLE_OK, ASSEMBLE_PENDING_BACKFILL, Config
 from .exceptions import FctTruncatedException
 from .store import SQLiteStore
 from .cache import AssemblyCache, CacheBuilder
@@ -159,7 +159,7 @@ class ContextAssembler(EStageMixin, FStageMixin, LStageMixin, AStageMixin):
 
     Stage 方法来自 mixin：
       EStageMixin  — _on_api_response_v5, _on_post_tool_call_v5, _update_fct_v5
-      FStageMixin  — _run_f_stage, _call_llm_for_fct, _extract_l0
+      FStageMixin  — _run_f_stage, _call_llm_for_fct, _extract_hdl
       LStageMixin  — reset, wait_for_pending
       AStageMixin  — _grade_topics_by_radius
     """
@@ -251,7 +251,7 @@ class ContextAssembler(EStageMixin, FStageMixin, LStageMixin, AStageMixin):
             cleaned = {
                 "changes": [{"stage_tag": "已实施", "core_change": _brief}],
                 "core_change": _brief,
-                "_assemble_status": 0,
+                "_assemble_status": ASSEMBLE_OK,
             }
             self._update_fct_v5(self._session_id, turn_index,
                                json.dumps(cleaned, ensure_ascii=False), _brief)

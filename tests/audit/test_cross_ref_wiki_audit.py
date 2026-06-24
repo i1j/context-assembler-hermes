@@ -60,7 +60,7 @@ WIKI_CROSS_REF = {
         ("tests.stage.test_a_stage_topic_aware", "TestRELGrade.test_thought_tool_hdl_fin_fct"),
     ],
     "CR-005": [
-        ("tests.store.test_store_v5", "TestSQLiteStoreContract.test_session_id_equals_db_stem"),
+        ("tests.store.test_store_contract", "TestSQLiteStoreContract.test_session_id_equals_db_stem"),
         ("tests.stage.test_a_stage_topic_aware", "TestFullPipelineRealTopicMgr.test_act_turn_replaced_with_fct"),
         ("tests.stage.test_a_stage_topic_aware", "TestFullPipelineRealTopicMgr.test_two_topics_produce_different_grades"),
     ],

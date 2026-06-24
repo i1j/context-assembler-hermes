@@ -106,13 +106,25 @@ class EStageMixin:
         except Exception:
             thought_hdl = "空"
 
+        # usage 可能是 dict (生产) 或 SimpleNamespace (测试)，兼容两者
+        if usage is not None:
+            if isinstance(usage, dict):
+                _prompt_tokens = usage.get("prompt_tokens")
+                _completion_tokens = usage.get("completion_tokens")
+            else:
+                _prompt_tokens = getattr(usage, "prompt_tokens", None)
+                _completion_tokens = getattr(usage, "completion_tokens", None)
+        else:
+            _prompt_tokens = None
+            _completion_tokens = None
+
         write_turn_v5(
             self.store, self._session_id, turn, seq,
             role="assistant", content=thought,
             tool_calls_json=json.dumps(tool_defs, ensure_ascii=False),
             finish_reason=finish_reason,
-            usage_prompt_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
-            usage_completion_tokens=getattr(usage, "completion_tokens", None) if usage else None,
+            usage_prompt_tokens=_prompt_tokens,
+            usage_completion_tokens=_completion_tokens,
             fct_text=thought_fct,
             hdl_text=thought_hdl,
             written_at=time.time(),

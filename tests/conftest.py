@@ -2,9 +2,13 @@
 
 提供：
 - 引擎 fixture（ca_engine / engine）
-- 自动 mock 外部依赖（embed / LLM）
 - v5 turn_stream fixture（v5_store / v5_turn_stream）
 - 文件描述符泄漏检测
+- _content_hash_embed 纯函数（伪嵌入生成）
+
+mock fixture（_mock_embed / _mock_llm）不再由根 conftest 导出，
+stage/ 和 plugin/ 目录通过子 conftest 开启目录级 autouse mock。
+单元测试按需 mock 自身模块。
 
 Fixtures 定义在 tests/fixtures/ 子包中，此处 re-export。
 """
@@ -13,19 +17,17 @@ import sys
 from pathlib import Path
 
 # 确保 ca/ 可被 import（需在 re-export 之前执行）
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_ca_root = str(Path(__file__).resolve().parent.parent)
+if _ca_root not in sys.path:
+    sys.path.insert(0, _ca_root)
 
-
-def pytest_configure(config):
-    config.addinivalue_line("markers", "critical: 关键路径测试")
-    config.addinivalue_line("markers", "high: 高优先级测试")
-    config.addinivalue_line("markers", "medium: 中优先级测试")
-    config.addinivalue_line("markers", "low: 低优先级/信息性测试")
-    config.addinivalue_line("markers", "fct: 需 Fct LLM 调用")
-    config.addinivalue_line("markers", "elm: 需 Elm LLM 调用")
-    config.addinivalue_line("markers", "linux_only: 仅 Linux 环境")
-    config.addinivalue_line("markers", "v460: 测试已删除的 v4.6 API，仅兼容归档")
-    config.addinivalue_line("markers", "llm_return: 注入 mock LLM 返回值（覆盖降级路径）")
+# 验证 ca/ 可导入
+try:
+    import ca
+except ImportError as exc:
+    raise RuntimeError(
+        f"CA 核心引擎 (ca/) 无法导入。请确认 {_ca_root}/ca/ 存在且无 import 错误。"
+    ) from exc
 
 
 # ── 从 fixtures/ 子包 re-export fixture ──
@@ -40,8 +42,11 @@ from tests.fixtures.fixtures_store import (
     v5_store,
     v5_turn_stream,
 )
+
+# _content_hash_embed 是纯函数（非 fixture），被 test_topic_manager 等引用
 from tests.fixtures.fixtures_mock import (
     _content_hash_embed,
-    _mock_embed,
-    _mock_llm,
 )
+
+# mock fixtures 不再 autouse 导出；需要 mocks 的目录通过子 conftest 开启
+# (stage/conftest.py, plugin/conftest.py)

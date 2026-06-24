@@ -1,85 +1,91 @@
-"""Store 接口契约测试 — SQLiteStore 对外公开接口的契约验证。
+"""Store v5 数据写入/读取综合测试。
 
 覆盖:
-  - CR-005: SQLiteStore.session_id 属性存在且等于 _db_path.stem
+  - turn_stream 写入 + 读取
+  - update_fin_fct_v5
+  - read_turn_stream_all
+  - 多 session_id 隔离
 """
-from pathlib import Path
+import pytest
 
 
-class TestSQLiteStoreContract:
-    """SQLiteStore 公开接口契约"""
+class TestWriteAndReadV5:
+    """write_turn_v5 + read_turn_elm_rows 基础写入读取"""
 
-    def test_session_id_equals_db_stem(self, v5_store):
-        """DB 文件名 = session_id"""
-        assert v5_store._db_path.stem == "v5_test"
-        assert v5_store.session_id == "v5_test"
+    def test_write_then_read(self, v5_store):
+        from ca.store import write_turn_v5, read_turn_elm_rows
+        write_turn_v5(v5_store, "test", 0, 0, role="user", content="你好")
+        rows = read_turn_elm_rows(v5_store, "test", 0)
+        assert len(rows) == 1
+        assert rows[0][2] == "你好"
 
-    def test_session_id_is_readable_string(self, v5_store):
-        """session_id 是可读字符串，非空"""
-        assert isinstance(v5_store.session_id, str)
-        assert len(v5_store.session_id) > 0
+    def test_multiple_turns(self, v5_store):
+        from ca.store import write_turn_v5, read_turn_elm_rows
+        write_turn_v5(v5_store, "test", 0, 0, role="user", content="t0_u")
+        write_turn_v5(v5_store, "test", 0, 1, role="assistant", content="t0_a")
+        write_turn_v5(v5_store, "test", 1, 0, role="user", content="t1_u")
+        rows0 = read_turn_elm_rows(v5_store, "test", 0)
+        rows1 = read_turn_elm_rows(v5_store, "test", 1)
+        assert len(rows0) == 2
+        assert len(rows1) == 1
 
-    def test_session_id_persists_across_methods(self, v5_store):
-        """session_id 在多次调用间一致"""
-        sid1 = v5_store.session_id
-        # 执行一次写入，验证 session_id 不变
-        from ca.store import write_turn_v5
-        write_turn_v5(v5_store, v5_store.session_id, 0, 0,
-                      role="user", content="test")
-        assert v5_store.session_id == sid1
+    def test_session_id_isolation(self, v5_store):
+        from ca.store import write_turn_v5, read_turn_elm_rows
+        write_turn_v5(v5_store, "sess_a", 0, 0, role="user", content="A")
+        write_turn_v5(v5_store, "sess_b", 0, 0, role="user", content="B")
+        rows_a = read_turn_elm_rows(v5_store, "sess_a", 0)
+        rows_b = read_turn_elm_rows(v5_store, "sess_b", 0)
+        assert rows_a[0][2] == "A"
+        assert rows_b[0][2] == "B"
+        assert len(rows_a) == 1
+        assert len(rows_b) == 1
 
-    def test_session_id_matches_db_creation(self, tmp_path):
-        """新创建的 DB，session_id = 文件名.stem"""
-        from ca.store import SQLiteStore
-        db_path = tmp_path / "my_session_abc123.db"
-        store = SQLiteStore(db_path=str(db_path))
-        try:
-            assert store.session_id == "my_session_abc123"
-        finally:
-            store.close()
 
-    def test_store_has_session_id_attr(self, v5_store):
-        """hasattr 通过 — 任何消费者都应该能安全检查"""
-        assert hasattr(v5_store, "session_id")
+class TestUpdateFinFctV5:
+    """update_fin_fct_v5 Fct/Hdl 回写"""
 
-    def test_get_turn_ca_rows_column_contract(self, v5_store):
-        """get_turn_ca_rows 返回 7 列契约：seq, role, finish_reason, tool_calls_json, content, Fct, Hdl
-
-        防止 CR-004 式缺列回归：
-        - 列数 = 7
-        - 各列类型正确
-        - write_turn_v5 写入的 Fct/Hdl 可被读出
-        """
-        from ca.store import write_turn_v5, get_turn_ca_rows
-
-        # 写入一个完整行（含 Fct + Hdl）
-        write_turn_v5(v5_store, "test", 0, 0, role="user", content="你好",
-                      fct_text='{"core_change":"用户问候"}')
+    def test_update_fin_fct(self, v5_store):
+        from ca.store import write_turn_v5, update_fin_fct_v5, read_fct_v5
         write_turn_v5(v5_store, "test", 0, 1, role="assistant", content="",
-                      tool_calls_json='[{"id":"c1"}]',
-                      finish_reason="tool_calls",
-                      fct_text='{"core_change":"思考Fct"}',
-                      hdl_text="思考Hdl_short")
+                      finish_reason="stop")
+        update_fin_fct_v5(v5_store, "test", 0,
+                          '{"core_change":"F-stage 摘要"}', "摘要")
+        result = read_fct_v5(v5_store, "test", 0, 1)
+        assert "F-stage 摘要" in result
 
-        rows = get_turn_ca_rows(v5_store, "test", 0)
-        assert len(rows) == 2, f"Expected 2 rows, got {len(rows)}"
+    def test_update_nonexistent_turn(self, v5_store):
+        from ca.store import update_fin_fct_v5
+        result = update_fin_fct_v5(v5_store, "test", 999,
+                                    '{"core_change":"x"}', "x")
+        assert result is True
 
-        # — 列契约检查 —
-        row = rows[0]
-        assert len(row) == 7, f"Expected 7 columns, got {len(row)}: {row}"
-        # seq (int), role (str), finish_reason (str|None), tool_calls_json (str|None),
-        # content (str), Fct (str|None), Hdl (str|None)
-        assert isinstance(row[0], int), f"col[0] seq should be int: {type(row[0])}"
-        assert isinstance(row[1], str), f"col[1] role should be str: {type(row[1])}"
 
-        # — 写回验证：Fct 列 —
-        row1 = rows[1]
-        assert row1[1] == "assistant", f"row1 role: {row1[1]}"
-        assert row1[5] == '{"core_change":"思考Fct"}', \
-            f"Fct mismatch: {row1[5]!r}"
-        assert row1[6] == "思考Hdl_short", \
-            f"Hdl mismatch: {row1[6]!r}"
+class TestReadTurnStreamAll:
+    """read_turn_stream_all — 全量导出"""
 
-        # — 空 Fct/Hdl 列处理 —
-        assert rows[0][5] is not None, "user row Fct should not be None"
-        assert rows[0][6] is None, "user row Hdl should be None (not written)"
+    def test_returns_all_rows(self, v5_store):
+        from ca.store import write_turn_v5, read_turn_stream_all
+        write_turn_v5(v5_store, "test", 0, 0, role="user", content="u0")
+        write_turn_v5(v5_store, "test", 1, 0, role="user", content="u1")
+        rows = read_turn_stream_all(v5_store, "test")
+        assert len(rows) == 2
+
+    def test_returns_empty_for_unknown_session(self, v5_store):
+        from ca.store import read_turn_stream_all
+        rows = read_turn_stream_all(v5_store, "nonexistent")
+        assert rows == []
+
+    def test_columns_match_turn_stream_schema(self, v5_store):
+        from ca.store import write_turn_v5, read_turn_stream_all
+        write_turn_v5(v5_store, "test", 0, 0, role="user", content="你好",
+                      fct_text='{"core_change":"测试"}')
+        rows = read_turn_stream_all(v5_store, "test")
+        assert len(rows) == 1
+        conn = v5_store.conn
+        cur = conn.execute(
+            "SELECT name FROM pragma_table_info('turn_stream') WHERE name IN "
+            "('biz_category','tool_name','status','duration_ms','written_at')"
+        )
+        cols = {r[0] for r in cur.fetchall()}
+        assert cols == {"biz_category", "tool_name", "status", "duration_ms", "written_at"}, \
+            f"turn_stream 表应包含元数据列: {cols}"

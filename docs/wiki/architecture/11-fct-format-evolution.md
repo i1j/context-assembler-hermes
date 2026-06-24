@@ -7,6 +7,7 @@ status: 已实装
 decisions: ["fct-changes-format"]
 depends_on: ["storage-model", "f-stage-async-summary"]
 updated: 2026-06-18
+source_files: ["ca/post_process.py", "ca/prompts.py"]
 ---
 
 ## 问题
@@ -83,3 +84,10 @@ ORDER BY turn;
 - LLM 可能输出不符合 `VALID_STATES` 的 stage_tag，需用 fallback 兜底
 - 极端情况下 PAIR_PATTERN 可能误匹配嵌套标签（已通过非贪婪 `.*?` 缓解）
 - 旧数据回退路径 `_extract_l0` 可能丢失颗粒度
+
+## 关联文档
+
+| 文档 | 内容 |
+|------|------|
+| [决策: 工具轮规则引擎](../decisions/03-tool-summarizer-rules.md) | 工具 Fct 结构化摘要规则（含 execute_code 等 Handler） |
+| E-stage 写入协议 (02) | Fct 写入时机与格式约束 |

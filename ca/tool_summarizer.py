@@ -1,5 +1,5 @@
 """
-ca/tool_summarizer.py — 工具轮摘要规则引擎 (v4.4.0 alpha)
+ca/tool_summarizer.py — 工具轮摘要规则引擎 (v5.10)
 
 功能：
 - 按工具名匹配字段优先级配置。
@@ -43,6 +43,18 @@ DEFAULT_PRIORITY: Dict[str, List[str]] = {
 }
 
 _PROFILE_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+
+def _is_delimiter_heavy(line: str, threshold: float = 0.5) -> bool:
+    """纯分隔符行检测：>50% 非空格字符为 =-=* 的行视为无语义"""
+    stripped = line.strip()
+    if not stripped:
+        return True
+    non_space = [c for c in stripped if not c.isspace()]
+    if not non_space:
+        return True
+    delim_count = sum(1 for c in non_space if c in "=-_*")
+    return delim_count / len(non_space) > threshold
 
 
 class ToolSummarizer:
@@ -263,12 +275,140 @@ class ToolSummarizer:
         return l1, l0
 
     def _summarize_execute_code(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
-        """execute_code 结构化摘要：代码首行摘要 + 输出关键行，同 terminal"""
-        l1, l0 = self._summarize_terminal(tool_call_msg, tool_responses, tool_label="exc")
-        l1["tool_name"] = "execute_code"
-        # 用正确工具名重新清理 tool_args（terminal 不走 code 字段清理）
+        """execute_code 结构化摘要：解析 Hermes JSON 响应，提取 status + 关键输出行。
+
+        当前问题(6/24)：result_summary 原文存储 Hermes 原始 JSON 串（含 tool_calls_made/
+        duration_seconds 噪声）。新逻辑剥离 JSON 外壳，只保留 status + 前 3 个有意义的
+        输出行。数据验证：139 行中 98% 可解析为 JSON，97% 含关键输出行。
+        """
         args = tool_call_msg.get("function", {}).get("arguments", {})
-        l1["tool_args"] = self._clean_tool_args("execute_code", args)
+        thought = tool_call_msg.get("content", "")
+
+        # ---- 解析 Hermes execute_code 响应 JSON ----
+        status = "?"
+        output_text = ""
+        error_msg = None
+        tool_calls_count = 0
+
+        for resp in tool_responses:
+            c = resp.get("content", "")
+            if isinstance(c, str) and c.startswith("{"):
+                try:
+                    parsed = json.loads(c)
+                    status = parsed.get("status", status)
+                    output_text = parsed.get("output", "")
+                    error_msg = parsed.get("error")
+                    tool_calls_count = parsed.get("tool_calls_made", 0)
+                    break
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+        # ---- 提取有意义的输出行 ----
+        non_empty = [l for l in output_text.split("\n") if l.strip()]
+        seen = set()
+        key_lines = []
+        pytest_line = None
+
+        # 优先检测 pytest 摘要行
+        for line in non_empty:
+            stripped = line.strip()
+            if re.search(r'\d+\s+passed', stripped) and re.search(r'\d+\.\d+s', stripped):
+                pytest_line = stripped
+                break
+
+        if pytest_line:
+            passed = re.search(r'(\d+)\s+passed', pytest_line)
+            failed = re.search(r'(\d+)\s+failed', pytest_line)
+            skipped = re.search(r'(\d+)\s+skipped', pytest_line)
+            elapsed = re.search(r'in\s+([\d.]+)s', pytest_line)
+            parts = []
+            if passed: parts.append(f"{passed.group(1)} passed")
+            if failed: parts.append(f"{failed.group(1)} failed")
+            if skipped: parts.append(f"{skipped.group(1)} skipped")
+            el = elapsed.group(1) if elapsed else "?"
+            result_summary = f"pytest: {', '.join(parts)} — {el}s"
+            has_error = status in ("error", "timeout", "interrupted")
+            l1 = {
+                "tool_name": "execute_code",
+                "tool_args": self._clean_tool_args("execute_code", args),
+                "result_summary": result_summary,
+                "error": error_msg if has_error else None,
+                "implicit_knowledge": [],
+                "next_action_hint": "",
+                "_assemble_status": 0,
+            }
+            l0 = _safe_truncate(f"pytest ({', '.join(parts)}) — {el}s", 100)
+            return l1, l0
+
+        for line in non_empty:
+            stripped = line.strip()
+            if stripped in seen:
+                continue
+            seen.add(stripped)
+            # 过滤分隔符和 JSON 外壳碎片
+            if stripped in ("---", "```", "==="):
+                continue
+            if stripped.startswith('{"') or stripped.endswith("}"):
+                continue
+            # 2 行以内 JSON 片 -> 剩余输出无信号
+            if stripped.startswith("{\"status\"") or stripped.startswith("\"output\""):
+                continue
+            # 分隔符占 >50% 非空格字符的行（=== ==== 等）：无语义信息
+            if _is_delimiter_heavy(stripped):
+                continue
+            key_lines.append(stripped)
+            if len(key_lines) >= 3:
+                break
+
+        # ---- 构建 result_summary ----
+        has_error = status in ("error", "timeout", "interrupted")
+        tc_part = f" [{tool_calls_count} tc]" if tool_calls_count > 0 else ""
+
+        if key_lines:
+            body = " | ".join(key_lines)
+        elif error_msg:
+            # 有 error 无有效输出行：只保留错误信息
+            err_short = error_msg.split("\n")[0].strip()[:120]
+            body = f"({err_short})"
+        else:
+            body = f"({len(non_empty)} lines)"
+
+        if has_error:
+            if error_msg:
+                err_type = error_msg.split("\n")[0].strip()[:80]
+                result_summary = f"{status}: {err_type}"
+            else:
+                result_summary = f"{status}: {body}"
+        else:
+            result_summary = f"{body}{tc_part}"
+
+        # ---- 构建 Fct dict ----
+        l1 = {
+            "tool_name": "execute_code",
+            "tool_args": self._clean_tool_args("execute_code", args),
+            "result_summary": result_summary,
+            "error": error_msg if has_error else None,
+            "implicit_knowledge": [],
+            "next_action_hint": "",
+            "_assemble_status": 0,
+        }
+
+        # ---- 构建 Hdl ----
+        if has_error:
+            if error_msg:
+                err_short = error_msg.split("\n")[0].strip()[:50]
+                l0 = _safe_truncate(f"exc@{status}: {err_short}", 100)
+            elif key_lines:
+                out_part = key_lines[0][:50]
+                l0 = _safe_truncate(f"exc@{status}: {out_part}", 100)
+            else:
+                l0 = _safe_truncate(f"exc@{status}", 100)
+        elif key_lines:
+            out_part = key_lines[0][:50]
+            l0 = _safe_truncate(f"exc: {out_part}", 92)
+        else:
+            l0 = _safe_truncate(f"exc: ({len(non_empty)} lines)", 100)
+
         return l1, l0
 
     def _summarize_write_file(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:

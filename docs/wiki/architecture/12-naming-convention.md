@@ -6,7 +6,8 @@ version_introduced: v5.5
 status: 已实装
 decisions: ["stage-terminology-unification"]
 depends_on: []
-updated: 2026-07-26
+updated: 2026-06-23
+source_files: ["ca/grade.py"]
 ---
 
 ## 问题

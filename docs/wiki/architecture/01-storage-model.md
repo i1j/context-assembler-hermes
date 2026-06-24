@@ -6,7 +6,8 @@ version_introduced: v5.0
 status: 已实装
 decisions: ["e-stage-write-on-receive", "stage-terminology-unification", "schema-v5-rewrite"]
 depends_on: []
-updated: 2026-06-22
+updated: 2026-06-23
+source_files: ["ca/store.py"]
 ---
 
 ## 问题
@@ -22,7 +23,7 @@ updated: 2026-06-22
 ### 备选方案
 
 1. **保留 turn_cache 四主键 + conv_encoding** — 向后兼容，但复杂度不降反增
-2. **新建 turn_stream 表，走 (turn, seq) 双主键，三列存储 Elm/Fct/Hdl** — 简化主键、无编码层、术语统一
+2. **新建 turn_stream 表，走 (session_id, turn, seq) 三主键** — 简化主键、无编码层、术语统一
 3. **原地修改 turn_cache 加列** — 字段冗余无法清理
 
 ### 选定方案
@@ -31,17 +32,36 @@ updated: 2026-06-22
 
 ```sql
 CREATE TABLE IF NOT EXISTS turn_stream (
-    turn    INTEGER NOT NULL,   -- 对话轮序号
-    seq     INTEGER NOT NULL,   -- 轮内序号：0=user, 1=assistant thought, 2..n=tool, N=fin
-    role    TEXT NOT NULL,
-    content TEXT,
-    tool_call_id   TEXT,
-    tool_name      TEXT,
+    session_id   TEXT    NOT NULL,
+    turn         INTEGER NOT NULL,
+    seq          INTEGER NOT NULL,
+
+    -- 原始数据核
+    role          TEXT    NOT NULL,
+    content       TEXT    NOT NULL DEFAULT '',
+
+    -- tool 行专用
+    tool_name     TEXT,
+    tool_call_id  TEXT,
+    args_json     TEXT,
+    status        TEXT,
+    duration_ms   INTEGER,
+
+    -- thought / assistant 行专用
     tool_calls_json TEXT,
     finish_reason  TEXT,
-    Fct     TEXT NOT NULL DEFAULT '',  -- 摘要（E-stage 预填 Elm，F-stage 覆盖为真摘要）
-    Hdl     TEXT NOT NULL DEFAULT '',  -- 历元摘要
-    PRIMARY KEY (turn, seq)
+    usage_prompt_tokens     INTEGER,
+    usage_completion_tokens INTEGER,
+
+    -- 标记
+    biz_category  TEXT,
+    written_at    REAL,
+
+    -- 摘要（F-stage 写入）
+    Fct       TEXT,
+    Hdl       TEXT,
+
+    PRIMARY KEY (session_id, turn, seq)
 );
 ```
 
@@ -49,10 +69,11 @@ CREATE TABLE IF NOT EXISTS turn_stream (
 
 - `turn` = 对话轮序号（从 1 递增）
 - `seq` = 轮内序号：0=user, 1=assistant thought, 2..n=tool 行, N=fin（finish_reason='stop' 的最终 assistant）
-- `Fct` 列由 E-stage 预填 Elm 原文，F-stage 异步覆盖为真摘要
-- `Hdl` 列由 F-stage 异步写入（跨轮历元摘要）
+- `Fct` 列由 E-stage 写代码级摘要，F-stage 异步覆盖为 LLM 版真摘要（非 Elm 原文）
+- `Hdl` 列从 Fct 的 `core_change` 提取（首行摘要），非跨轮历元
+- 旧 `turn_cache` 表已于 v5.10 清理，不再写入双表
 
-详见 `ca/store.py` 的 `turn_stream` 表 schema。
+详见 `ca/store.py` 的 `turn_stream` 表 schema（`_SCHEMA_SQL_V50`）。
 
 ## 数据验证
 
@@ -71,13 +92,12 @@ FROM turn_stream;
 
 ## 优点
 
-- 主键简化：`(turn, seq)` 清晰无歧义
-- 无编码层：Elm/Fct/Hdl 直接存明文字段，可读可查
+- 主键简化：`(session_id, turn, seq)` 多会话安全
+- 无编码层：内容直接存明文字段，可读可查
 - E-stage 写即落盘，无 buffer，写入路径最短
 - 术语统一：Elm/Fct/Hdl 贯穿代码和 DB
 
 ## 约束 / 已知问题
 
-- `Elm` 列可能包含冗长 LLM 输出，需配合 truncation
-- 旧 `turn_cache` 表保留至迁移完成，写入双表有额外开销
-- v4 遗留列（`turn_type`, `tool_sub_index`, `elm_text`）保留至 PR2
+- `content` 列可能包含冗长 LLM 输出，需配合 truncation
+- 旧 `turn_cache` 表已于 v5.10 彻底删除，无迁移负担

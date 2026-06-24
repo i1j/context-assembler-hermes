@@ -1,11 +1,12 @@
 ---
+source_files: ["topic_manager.py"ca/grade.py"]
 title: TopicGradeManager 取代旧话题系统
 slug: topic-grade-manager
 category: decision
 date: "2026-06-16"
 version_introduced: v5.5
 alternatives: ["保留旧 TP 系统（v4.6 话题拣选，不可维护）", "完全消除话题分割（退化为全局上下文）"]
-chosen: "TopicGradeManager（495行）增量分割 + 形心半径定级 + Grade 枚举"
+chosen: "TopicGradeManager 增量分割 + 形心半径定级 + Grade 枚举"
 affects: ["08-topic-segmentation", "09-topic-grade-switch", "04-a-stage-role-match"]
 status: 已实装
 ---
@@ -24,14 +25,16 @@ status: 已实装
 
 ```python
 class TopicGradeManager:
-    _segment_topics(turn)  → 检测话题边界
-    get_turn_grade(turn)   → 按形心半径定级 ELM(≤25) / FCT(≤100) / HDL(>100)
-    reset()                → 话题切换时重置
+    detect(turn, ca_rows, user_msg)  → 检测话题是否切换
+    grade_on_switch(q_emb, user_msg) → 按形心半径定级 ACT/REL/FAR
+    get_turn_grade(turn_num)         → 返回 TopicGrade 枚举
+    reset()                          → 清空所有状态
 ```
 
-- Grade 枚举：`Grade.ELM=2, Grade.FCT=1, Grade.HDL=0`
-- 旧 `_compute_topic_groups`/`_jaccard_tokens`/`_is_bg_turn`/`_scan_forced_split_phrases` 物理删除（v5.7）
-- 话题配置：`CA_TOPIC_SEGMENT_ENABLED`, `CA_TOPIC_SIMILARITY_THRESHOLD`
+- Grade 枚举：`Grade.ELM="Elm", Grade.FCT="Fct", Grade.HDL="Hdl"`（字符串值）
+- TopicGrade 枚举：`TopicGrade.ACT="Act", TopicGrade.REL="Rel", TopicGrade.FAR="Far"`
+- 旧 `_compute_topic_groups`/`_jaccard_tokens`/`_is_bg_turn` 物理删除（v5.7）
+- 话题配置：`CA_TOPIC_JACCARD_ENTRY`（0.02）、`CA_TOPIC_JACCARD_CHAIN`（0.04）、`CA_TOPIC_RADIUS_WEIGHT`（2.0）
 
 ## 之前 vs 之后
 

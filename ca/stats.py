@@ -6,6 +6,7 @@ ca/stats.py — 组装统计收集 (v4.4.0 alpha)
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -34,6 +35,8 @@ class AssembleStats:
         self.parse_fallback_count: int = 0
         self.skipped_empty: int = 0
         self.fct_latency_ms: float = 0.0
+        # 线程安全：F-stage 多线程并发更新计数器
+        self._lock = threading.Lock()
 
     def time_phase(self, name: str):
         class _PhaseTimer:

@@ -369,10 +369,18 @@ class TestIncrementalMutation:
         plugin._A_cache_turns = 1
         plugin._A_cache_is_stale = False
 
-        # 为 delta turn (turn=1) 写入无 Fct 的 user 行，模拟 pending
-        write_turn_v5(ca_engine.store, "test", 1, 0,
+        # 为 delta turn (turn=2) 写入无 Fct 的 user 行 + thought + tool 行，模拟 pending
+        # DB 是 1-indexed：cache 覆盖 turn=1，delta 是 turn=2
+        write_turn_v5(ca_engine.store, "test", 2, 0,
                       role="user", content="delta_Q",
                       fct_text=None)
+        write_turn_v5(ca_engine.store, "test", 2, 1,
+                      role="assistant", content="delta_A",
+                      fct_text='{"core_change":"delta_thought"}')
+        write_turn_v5(ca_engine.store, "test", 2, 2,
+                      role="tool", content="delta_T",
+                      tool_name="test_tool",
+                      fct_text='{"core_change":"delta_tool"}')
 
         # conv: cache 区 + delta 区（含 tool 行）+ tail padding
         conv = [

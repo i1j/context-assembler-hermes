@@ -1,6 +1,6 @@
 """ca/f_stage.py — F-stage 异步摘要 (v5.10, 纯 LLM 路径)
 
-设计决策: L1-001~L1-012 (Fct 摘要重构, PDD 哲学)
+设计决策: Fct-001~Fct-012 (Fct 摘要重构, PDD 哲学)
   viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-l1-摘要重构-v470-pdd-哲学
   - daemon 线程读取 DB Elm → 调 LLM → 解析 → 写 LLM 版 Fct/Hdl
   - 覆盖 E-stage 代码级摘要
@@ -25,7 +25,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from .config import Config
+from .config import ASSEMBLE_OK, ASSEMBLE_PENDING_BACKFILL, Config
 from .post_process import clean_increment, parse_v1_markdown_xml
 from .prompts import FCT_GENERATION_PROMPT
 from .store import format_previous_summary_for_prompt, read_turn_elm_rows, read_prev_fct
@@ -88,7 +88,8 @@ class FStageMixin:
             if finish_reason == "length" or (_has_stage_tag and not response_text.strip().endswith("</core_change>")):
                 logger.warning("[CA-METRIC] ca.fct.truncated_fallback: turn=%d, finish_reason=%s, len=%d",
                                turn_index, finish_reason, len(response_text))
-                self.stats.truncated_fallback += 1
+                with self.stats._lock:
+                    self.stats.truncated_fallback += 1
                 # 截断前 partial 输出比硬编码「本轮无新内容」更有信息量
                 partial = (response_text or "").strip()
                 truncated_cleaned = {
@@ -98,7 +99,7 @@ class FStageMixin:
                     "objective_facts": [],
                     "consensus": [],
                     "todo": [],
-                    "_assemble_status": 1,
+                    "_assemble_status": ASSEMBLE_PENDING_BACKFILL,
                 }
                 fct_str = json.dumps(truncated_cleaned, ensure_ascii=False)
                 hdl_text = (user_elm or "")[:150]
@@ -110,11 +111,12 @@ class FStageMixin:
             if finish_reason == "error":
                 logger.error("[CA-METRIC] ca.fct.all_retries_failed: turn=%d, len=%d",
                              turn_index, len(response_text))
-                self.stats.truncated_fallback += 1
+                with self.stats._lock:
+                    self.stats.truncated_fallback += 1
                 fallback = json.dumps({
                     "changes": [],
                     "core_change": user_elm or "本轮无新内容",
-                    "_assemble_status": 1,
+                    "_assemble_status": ASSEMBLE_PENDING_BACKFILL,
                     "new_materials": [], "objective_facts": [],
                     "consensus": [], "todo": [],
                 }, ensure_ascii=False)
@@ -126,9 +128,10 @@ class FStageMixin:
             fct_dict, parser_hdl, _ = parse_v1_markdown_xml(response_text)
             if not parser_hdl:
                 logger.warning("[CA-METRIC] ca.hdl.skipped_empty: turn=%d", turn_index)
-                self.stats.skipped_empty += 1
+                with self.stats._lock:
+                    self.stats.skipped_empty += 1
             cleaned = clean_increment(fct_dict)
-            cleaned["_assemble_status"] = 0
+            cleaned["_assemble_status"] = ASSEMBLE_OK
             dialogue_ok = True
 
             # LLM 产物的写覆盖
@@ -149,7 +152,7 @@ class FStageMixin:
             fallback = json.dumps({
                 "changes": [],
                 "core_change": user_elm or "本轮无新内容",
-                "_assemble_status": 0,
+                "_assemble_status": ASSEMBLE_OK,
                 "new_materials": [], "objective_facts": [],
                 "consensus": [], "todo": [],
             }, ensure_ascii=False)
@@ -181,8 +184,8 @@ class FStageMixin:
             },
             "keep_alive": -1,
         }
-        if Config.LLM_THINK is not None:
-            req_body["think"] = Config.LLM_THINK
+        # Fct 是结构化提取任务，非推理任务；None=未设置→默认关闭推理
+        req_body["think"] = Config.LLM_THINK if Config.LLM_THINK is not None else False
         payload = json.dumps(req_body).encode()
         response_text = ""
         finish_reason = "error"
@@ -204,10 +207,12 @@ class FStageMixin:
 
         elapsed_ms = int((time.monotonic() - llm_start) * 1000)
         logger.warning("[CA-METRIC] ca.fct.latency_ms: turn=%d, ms=%d", self._turn_counter, elapsed_ms)
-        self.stats.fct_latency_ms += elapsed_ms
+        with self.stats._lock:
+            self.stats.fct_latency_ms += elapsed_ms
 
         if finish_reason == "error":
-            self.stats.truncated_fallback += 1
+            with self.stats._lock:
+                self.stats.truncated_fallback += 1
             return ("", "error")
 
         return (response_text, finish_reason)
@@ -230,6 +235,8 @@ class FStageMixin:
                     core = core[:_first_low].rstrip()
         if not core or core in ("无", "本轮无新内容"):
             logger.warning("[CA-METRIC] ca.hdl.skipped_empty: turn=%d", self._turn_counter)
+            with self.stats._lock:
+                self.stats.skipped_empty += 1
             return "无"
         result = _safe_truncate(core, 100)
         return result or "无"

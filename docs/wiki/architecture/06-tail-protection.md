@@ -6,7 +6,8 @@ version_introduced: v5.3
 status: 已实装
 decisions: ["tail-protection"]
 depends_on: ["storage-model", "a-stage-role-match"]
-updated: 2026-06-18
+updated: 2026-06-23
+source_files: ["ca/config.py", "ca/a_stage.py"]
 ---
 
 ## 问题
@@ -24,24 +25,26 @@ A-stage 装配时，最近几轮用户输入（对话尾部）是最关键的上
 
 ### 选定方案
 
-- 配置参数 `protect_tail`（默认 2），表示保护最后 N 个 user 轮
-- 检测方式：从 `turn_stream` 末尾向前扫描，找到最后 N 个 `role='user'` 的行
-- 这些行即使有 Fct 也不替换，保留 Elm 原文
+- 配置参数 `CA_PROTECT_TAIL_TOKENS`（默认 20000），表示保护尾部 Token 配额
+- 检测方式：从 `turn_stream` 末尾向前扫描，找到最后 `protect_tail` 个 `role='user'` 的行
+- 这些行即使有 Fct 也不替换，保留 content 原文
 - **尾巴保护判定在 Grade 判定之前执行**（尾巴优先于 topic-grade）
+
+**尾部保护区**：倒数第 2 个 user 消息之后的所有行强制原文保留（不受 grade 影响）。
 
 ### 实现要点
 
-- `ca/__init__.py` 的 `_on_pre_llm_call_v5` 中，在遍历 turn 前先确定尾巴边界
+- `plugins/ca_assembler/__init__.py` 的 `_on_pre_llm_call_v5` 中，在遍历 turn 前先确定尾巴边界
 - 尾巴内的 turn 无论 grade 判定结果如何，都强制保留 Elm
 - 与 grade 交互：尾巴内 `get_turn_grade()` 返回强制 Grade.ELM
+- 工具轮尾区（`CA_TOOL_TAIL_TURN_COUNT`，默认 2）：只保留最近 N 个对话轮的工具原文
 
 ## 数据验证
 
 ```sql
 -- 查看最后 3 个 user 行的替换状态
 SELECT turn, role, content,
-       CASE WHEN Fct != '' THEN '有Fct' ELSE '无Fct' END as has_fct,
-       Elm
+       CASE WHEN Fct != '' THEN '有Fct' ELSE '无Fct' END as has_fct
 FROM turn_stream
 WHERE role='user'
 ORDER BY turn DESC

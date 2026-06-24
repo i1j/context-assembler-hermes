@@ -91,7 +91,7 @@ class Config:
     LLM_TIMEOUT: ClassVar[float] = float(os.getenv("CA_LLM_TIMEOUT", "120"))
     LLM_MAX_RETRIES: ClassVar[int] = int(os.getenv("CA_LLM_MAX_RETRIES", "2"))
     LLM_NUM_PREDICT: ClassVar[int] = int(os.getenv("CA_LLM_NUM_PREDICT", "24768"))
-    LLM_THINK: ClassVar[Optional[bool]] = False
+    LLM_THINK: ClassVar[Optional[bool]] = None
     L1_TEMPERATURE: ClassVar[float] = float(os.getenv("CA_L1_TEMPERATURE", "0.3"))
     L1_MAX_TOKENS: ClassVar[int] = int(os.getenv("CA_L1_MAX_TOKENS", "800"))
 
