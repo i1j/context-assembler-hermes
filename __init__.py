@@ -418,6 +418,8 @@ class CAContextAssemblerPlugin:
         self._saved_history_snapshot: Optional[List[Dict]] = None
         self._full_backup: Optional[List[Dict]] = None
         self._topic_mgr: Optional[TopicGradeManager] = None
+        self._pending_ov_submit: Optional[Dict[str, Any]] = None
+        self._last_topic_id: Optional[int] = None
         # A-stage 增量缓存
         self._A_stable_cache: Optional[List[Dict]] = None
         self._A_cache_turns: int = 0
@@ -475,6 +477,16 @@ class CAContextAssemblerPlugin:
 
     def on_session_reset(self) -> None:
         """重置引擎状态（/new 或 /reset 时调用）。"""
+        # 如果有未提交的 OV 话题，尝试提交
+        if self._pending_ov_submit is not None and Config.OV_ENABLED:
+            ov_data = self._pending_ov_submit
+            self._pending_ov_submit = None
+            try:
+                self._fire_ov_submit(self._session_id, ov_data)
+            except Exception:
+                pass
+        self._pending_ov_submit = None
+        self._last_topic_id = None
         self._saved_history_snapshot = None
         self._full_backup = None
         self._A_stable_cache = None
@@ -994,6 +1006,26 @@ class CAContextAssemblerPlugin:
             if switched:
                 q_emb = self._engine.embed_client.embed(user_msg)
                 self._topic_mgr.grade_on_switch(q_emb, user_msg)
+                # 打包前一个话题数据 → OV 提交
+                old_topic_id = self._last_topic_id
+                self._last_topic_id = self._topic_mgr._current_topic_id
+                if old_topic_id is not None and Config.OV_ENABLED and self._engine:
+                    old_turns = sorted([
+                        t for t, tid in self._topic_mgr._turn_to_topic.items()
+                        if tid == old_topic_id
+                    ])
+                    if old_turns:
+                        self._pending_ov_submit = {
+                            "topic_id": old_topic_id,
+                            "turns": old_turns,
+                            "switch_turn": turn,
+                        }
+                        logger.info("[CA_OV] Topic %d packaged for submit (turns %s, switch at turn %d)",
+                                    old_topic_id, old_turns, turn)
+            elif self._topic_mgr and self._topic_mgr._current_topic_id is not None:
+                # 首次话题：记录 current_topic_id，不触发 OV 提交
+                if self._last_topic_id is None:
+                    self._last_topic_id = self._topic_mgr._current_topic_id
         # 【日志 A】话题定级后 dump
                 try:
                     tg = self._topic_mgr.get_topic_grades()
@@ -1081,6 +1113,171 @@ class CAContextAssemblerPlugin:
 
         engine.process_turn_f_stage(turn)
         logger.info("[CA_v5] post_llm_call: process_turn_f_stage called for turn %d", turn)
+
+        # OV 话题摘要提交（fire-and-forget）
+        if self._pending_ov_submit is not None and Config.OV_ENABLED:
+            ov_data = self._pending_ov_submit
+            self._pending_ov_submit = None
+            session_id = self._session_id
+            threading.Thread(
+                target=self._fire_ov_submit,
+                args=(session_id, ov_data),
+                daemon=True,
+                name="CA-OVSubmit",
+            ).start()
+            logger.info("[CA_OV] Thread CA-OVSubmit started for topic %d", ov_data.get("topic_id"))
+
+    def _fire_ov_submit(self, session_id: str, topic_data: Dict[str, Any]) -> None:
+        """将话题摘要打包为 Markdown 提交到 OpenViking。
+
+        Fire-and-forget，在 daemon 线程中执行。等待 F-stage 完成后再读 DB
+        收集各轮的 Fct 摘要，通过 OV temp_upload_signed → add_resource 流程写入。
+        """
+        topic_id = topic_data["topic_id"]
+        turns = topic_data["turns"]
+        switch_turn = topic_data["switch_turn"]
+        logger.info("[CA_OV] _fire_ov_submit: topic %d turns=%s switch=%d",
+                    topic_id, turns, switch_turn)
+
+        if not self._engine:
+            logger.warning("[CA_OV] No engine for topic %d, skipping", topic_id)
+            return
+
+        # 等待 F-stage 完成（等待当前 turn 的 Fct 落盘）
+        engine = self._engine
+        try:
+            engine.wait_for_pending(timeout=Config.LLM_TIMEOUT + 30)
+        except Exception:
+            pass  # 超时不影响——用已有 Fct 数据
+
+        # 组装 Markdown
+        lines: List[str] = []
+        lines.append(f"# Topic {topic_id}")
+        lines.append("")
+        lines.append(f"话题从 Turn {turns[0]} 延续至 Turn {turns[-1]}，在 Turn {switch_turn} 切换。")
+        lines.append("")
+
+        store = engine.store
+        if store:
+            for t in sorted(turns):
+                try:
+                    from ca.store import get_turn_ca_rows
+                    rows = get_turn_ca_rows(store, session_id, t)
+                except Exception:
+                    rows = []
+                user_text = ""
+                fct_text = ""
+                for row in rows:
+                    seq, role, _, _, content, Fct, _ = row
+                    if role == "user":
+                        user_text = content or ""
+                    if role == "assistant" and Fct:
+                        fct_text = Fct
+
+                lines.append(f"### Turn {t}")
+                lines.append(f"**User:** {(user_text or '(empty)')[:200]}")
+                if fct_text:
+                    try:
+                        fct = json.loads(fct_text)
+                        core = fct.get("core_change", "")
+                        changes = fct.get("changes", [])
+                        if changes:
+                            summary = "；".join(
+                                c.get("core_change", "") for c in changes
+                            )
+                        else:
+                            summary = core
+                        lines.append(f"**Summary:** {summary or '(empty)'}")
+                    except (json.JSONDecodeError, TypeError):
+                        lines.append(f"**Summary:** {fct_text[:200]}")
+                else:
+                    lines.append("**Summary:** (pending)")
+                lines.append("")
+
+        body = "\n".join(lines)
+
+        # 写入临时文件 → OV 上传
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, encoding="utf-8"
+        )
+        tmp.write(body)
+        tmp_path = tmp.name
+        tmp.close()
+
+        try:
+            ts = int(time.time())
+            filename = f"topic_{topic_id}_{ts}.md"
+            target_uri = (
+                Config.OV_TOPIC_DIR_PREFIX.replace("{ov_user}", Config.OV_USER)
+            )
+            # to 为目标目录，文件名为 temp 文件名。资源最终路径为 target_uri/filename
+
+            # 读取文件内容准备上传
+            import uuid
+            with open(tmp_path, "rb") as f:
+                file_data = f.read()
+
+            import http.client
+            endpoint_host = Config.OV_ENDPOINT.rstrip("/").replace("http://", "").replace("https://", "")
+            endpoint_port = 1933
+            if ":" in endpoint_host:
+                parts = endpoint_host.split(":")
+                endpoint_host = parts[0]
+                endpoint_port = int(parts[1])
+
+            # Step 1: temp_upload (multipart)
+            boundary = uuid.uuid4().hex
+            mp_header = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+                f"Content-Type: text/markdown; charset=utf-8\r\n\r\n"
+            ).encode("utf-8")
+            mp_footer = f"\r\n--{boundary}--\r\n".encode("utf-8")
+            mp_body = mp_header + file_data + mp_footer
+
+            conn = http.client.HTTPConnection(endpoint_host, endpoint_port, timeout=30)
+            conn.request(
+                "POST", "/api/v1/resources/temp_upload",
+                body=mp_body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            )
+            resp = conn.getresponse()
+            result = json.loads(resp.read())
+            conn.close()
+
+            if result.get("status") != "ok":
+                logger.error("[CA_OV] temp_upload failed for topic %d: %s",
+                             topic_id, result.get("error", result))
+                return
+
+            temp_id = result["result"]["temp_file_id"]
+
+            # Step 2: add_resource
+            import urllib.request
+            add_req = urllib.request.Request(
+                f"{Config.OV_ENDPOINT.rstrip('/')}/api/v1/resources",
+                data=json.dumps({"temp_file_id": temp_id, "to": target_uri}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(add_req, timeout=60) as resp2:
+                result2 = json.loads(resp2.read())
+
+            if result2.get("status") == "ok":
+                resource_path = target_uri.rstrip("/") + f"/{filename}"
+                logger.info("[CA_OV] Topic %d submitted → %s", topic_id, resource_path)
+            else:
+                logger.error("[CA_OV] add_resource failed for topic %d: %s",
+                             topic_id, result2.get("error", result2))
+        except Exception as exc:
+            logger.error("[CA_OV] Submit failed for topic %d: %s",
+                         topic_id, exc, exc_info=True)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -235,6 +235,13 @@ class Config:
     SHUTDOWN_TIMEOUT: ClassVar[int] = int(os.getenv("CA_SHUTDOWN_TIMEOUT", "5"))
     BM25_HIT_THRESHOLD: ClassVar[int] = int(os.getenv("CA_BM25_HIT_THRESHOLD", "5"))
 
+    # OpenViking 话题摘要提交
+    OV_ENABLED: ClassVar[bool] = os.getenv("CA_OV_ENABLED", "1") == "1"
+    OV_ENDPOINT: ClassVar[str] = os.getenv("CA_OV_ENDPOINT", "http://localhost:1933")
+    OV_USER: ClassVar[str] = os.getenv("CA_OV_USER", "tester")
+    OV_TOPIC_DIR_PREFIX: ClassVar[str] = os.getenv("CA_OV_TOPIC_DIR_PREFIX",
+                                                    "viking://resources/{ov_user}/ca_topics")
+
     @staticmethod
     def _parse_bool_env(key: str, default: bool = True) -> bool:
         raw = os.getenv(key, "").strip().lower()
@@ -349,6 +356,10 @@ class Config:
             cls.TOOL_FIELD_PRIORITY_PROFILE = os.getenv("CA_TOOL_FIELD_PRIORITY_PROFILE", cls.TOOL_FIELD_PRIORITY_PROFILE)
             cls.SHUTDOWN_TIMEOUT = int(os.getenv("CA_SHUTDOWN_TIMEOUT", str(cls.SHUTDOWN_TIMEOUT)))
             cls.BM25_HIT_THRESHOLD = int(os.getenv("CA_BM25_HIT_THRESHOLD", str(cls.BM25_HIT_THRESHOLD)))
+            cls.OV_ENABLED = os.getenv("CA_OV_ENABLED", "1") == "1"
+            cls.OV_ENDPOINT = os.getenv("CA_OV_ENDPOINT", cls.OV_ENDPOINT)
+            cls.OV_USER = os.getenv("CA_OV_USER", cls.OV_USER)
+            cls.OV_TOPIC_DIR_PREFIX = os.getenv("CA_OV_TOPIC_DIR_PREFIX", cls.OV_TOPIC_DIR_PREFIX)
             cls.TOPIC_JACCARD_ENTRY = float(os.getenv("CA_TOPIC_JACCARD_ENTRY", str(cls.TOPIC_JACCARD_ENTRY)))
             cls.TOPIC_JACCARD_CHAIN = float(os.getenv("CA_TOPIC_JACCARD_CHAIN", str(cls.TOPIC_JACCARD_CHAIN)))
             cls.TOPIC_RADIUS_WEIGHT = float(os.getenv("CA_TOPIC_RADIUS_WEIGHT", str(cls.TOPIC_RADIUS_WEIGHT)))
