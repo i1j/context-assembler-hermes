@@ -49,10 +49,10 @@ class TestSimpleMutationModeV5:
         """保护区外的 asst{tc} → content 被替换为 Fct"""
         from ca.store import write_turn_v5
         write_turn_v5(ca_engine.store, "test", 2, 1,
-                      role="assistant", content="orig2",
+                      role="assistant", elm_text="orig2",
                       fct_text='工具组：文件读取')
         write_turn_v5(ca_engine.store, "test", 2, 2,
-                      role="tool", content="result2",
+                      role="tool", elm_text="result2",
                       fct_text='read_file → 成功')
 
         plugin = _make_plugin(ca_engine)
@@ -79,9 +79,9 @@ class TestSimpleMutationModeV5:
         """尾部保护区（倒数第 2 个 user 之后）原文保留"""
         from ca.store import write_turn_v5
         write_turn_v5(ca_engine.store, "test", 2, 2,
-                      role="tool", content="old2", fct_text="新Fct2")
+                      role="tool", elm_text="old2", fct_text="新Fct2")
         write_turn_v5(ca_engine.store, "test", 4, 2,
-                      role="tool", content="old4", fct_text="新Fct4")
+                      role="tool", elm_text="old4", fct_text="新Fct4")
 
         plugin = _make_plugin(ca_engine)
         conv = [
@@ -187,17 +187,17 @@ class TestSnapshotRestoreFullRoundtrip:
 
         # 写入 DB 数据让 A-stage 可以查到 Fct（turn=1，因为 A-stage 用 turn_num+1 查询）
         write_turn_v5(ca_engine.store, "test", 1, 0,
-                      role="user", content="Q",
+                      role="user", elm_text="Q",
                       fct_text='{"core_change":"UFct"}')
         write_turn_v5(ca_engine.store, "test", 1, 1,
-                      role="assistant", content="",
+                      role="assistant", elm_text="",
                       tool_calls_json='[{"id":"tc1"}]',
                       fct_text='{"core_change":"TFct"}')
         write_turn_v5(ca_engine.store, "test", 1, 2,
-                      role="tool", content="R", tool_call_id="tc1",
+                      role="tool", elm_text="R", tool_call_id="tc1",
                       fct_text='{"core_change":"ToFct"}')
         write_turn_v5(ca_engine.store, "test", 1, 3,
-                      role="assistant", content="fin",
+                      role="assistant", elm_text="fin",
                       finish_reason="stop",
                       fct_text='{"core_change":"FinFct"}')
 
@@ -281,7 +281,7 @@ class TestIncrementalMutation:
         from ca.store import write_turn_v5
         # DB 写入 Fct（供 cache 读取时引用）
         write_turn_v5(ca_engine.store, "test", 1, 2,
-                      role="tool", content="old1", fct_text="cached_fct")
+                      role="tool", elm_text="old1", fct_text="cached_fct")
 
         plugin = _make_plugin(ca_engine)
         # 手动设置缓存
@@ -372,13 +372,13 @@ class TestIncrementalMutation:
         # 为 delta turn (turn=2) 写入无 Fct 的 user 行 + thought + tool 行，模拟 pending
         # DB 是 1-indexed：cache 覆盖 turn=1，delta 是 turn=2
         write_turn_v5(ca_engine.store, "test", 2, 0,
-                      role="user", content="delta_Q",
+                      role="user", elm_text="delta_Q",
                       fct_text=None)
         write_turn_v5(ca_engine.store, "test", 2, 1,
-                      role="assistant", content="delta_A",
+                      role="assistant", elm_text="delta_A",
                       fct_text='{"core_change":"delta_thought"}')
         write_turn_v5(ca_engine.store, "test", 2, 2,
-                      role="tool", content="delta_T",
+                      role="tool", elm_text="delta_T",
                       tool_name="test_tool",
                       fct_text='{"core_change":"delta_tool"}')
 

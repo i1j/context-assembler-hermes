@@ -125,7 +125,7 @@ class TestCEMutationRestore:
                 ("tool","R4","To4_Fct"), ("assistant","fin4","F4_Fct")],
         }.items():
             for seq, (role, content, fct) in enumerate(turns_data):
-                kw = dict(role=role, content=content, fct_text=fct)
+                kw = dict(role=role, elm_text=content, fct_text=fct)
                 if role == "assistant" and seq == 1:
                     kw["tool_calls_json"] = f'[{{"id":"tc{tn}"}}]'
                 if role == "assistant" and seq == 3:

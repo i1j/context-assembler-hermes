@@ -6,7 +6,7 @@ version_introduced: v5.0
 status: 已实装
 decisions: ["e-stage-write-on-receive", "schema-v5-rewrite"]
 depends_on: ["storage-model"]
-updated: 2026-06-23
+updated: 2026-06-25
 source_files: ["ca/e_stage.py"]
 ---
 
@@ -32,8 +32,8 @@ Hermes 对话系统的 Hook 生命周期包含 `pre_llm_call`、`post_api_reques
 | `post_api_request` | `(turn=n, seq=1)` | `role='assistant'`, `content`(thought), `tool_calls_json`, `finish_reason`, thought 代码摘要 | API 返回后，写 thought 行 + tool 占位行 |
 | `pre_tool_call` | **no-op** | — | 占位行已在 `post_api_request` 写入 |
 | `post_tool_call` | `(turn=n, seq=m)` | `role='tool'`, `content`, per-tool Fct | 工具执行后，写入结果 |
-| `post_llm_call` | `(turn=n, seq=max_seq+1)` | `role='assistant'`, `content`, `finish_reason='stop'` | LLM 最终回复，写 fin 行 |
-| `process_turn_f_stage`(触发) | 已有 fin 行 | `Fct`, `Hdl` | post_llm_call 末尾触发异步线程 |
+| `post_llm_call` | `(turn=n, seq=_seq_counter[n]+1)` | `role='assistant'`, `Elm`, `finish_reason='stop'` | LLM 最终回复，写 fin 行 |
+| `process_turn_f_stage`(触发) | 指定 fin 行 `(turn, fin_seq)` | `Fct`, `Hdl` | post_llm_call 末尾按 fin 行粒度触发异步线程 |
 
 ### 实现要点
 

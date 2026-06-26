@@ -58,6 +58,16 @@ class SQLiteStore:
             self._local.conn.execute(f"PRAGMA busy_timeout={Config.DB_BUSY_TIMEOUT_MS}")
             self._local.conn.executescript(_SCHEMA_SQL_V50)
 
+        # 迁移兼容层：旧列 content → Elm（v5.x → v5.10+）
+        try:
+            cur = self._local.conn.execute("PRAGMA table_info(turn_stream)")
+            tbl_cols = {row[1] for row in cur.fetchall()}
+            if "content" in tbl_cols and "Elm" not in tbl_cols:
+                self._local.conn.execute("ALTER TABLE turn_stream RENAME COLUMN content TO Elm")
+                self._local.conn.commit()
+        except Exception:
+            pass
+
         self._local.last_used = now
         return self._local.conn
 
@@ -80,7 +90,7 @@ def format_previous_summary_for_prompt(l1_text_from_db: str) -> str:
     - 纯文本 → 原样返回
     """
     if not l1_text_from_db or l1_text_from_db.strip() in ("无", "null"):
-        return "无"
+        return "【无历史回顾】——本轮所有内容相对空历史均为首次出现，必须选取核心发现输出 &lt;stage_tag&gt;/&lt;core_change&gt; 对"
 
     stripped = l1_text_from_db.strip()
     try:
@@ -112,7 +122,7 @@ CREATE TABLE IF NOT EXISTS turn_stream (
 
     -- 原始数据核
     role          TEXT    NOT NULL,
-    content       TEXT    NOT NULL DEFAULT '',
+    Elm       TEXT    NOT NULL DEFAULT '',
 
     -- tool 行专用
     tool_name     TEXT,
@@ -131,7 +141,7 @@ CREATE TABLE IF NOT EXISTS turn_stream (
     biz_category  TEXT,
     written_at    REAL,
 
-    -- 摘要（C-stage 填）
+    -- 摘要（E-stage 填）
     Fct       TEXT,
     Hdl       TEXT,
 
@@ -141,7 +151,7 @@ CREATE TABLE IF NOT EXISTS turn_stream (
 
 
 def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
-                  role: str = 'user', content: str = '',
+                  role: str = 'user', elm_text: str = '',
                   tool_name: Optional[str] = None,
                   tool_call_id: Optional[str] = None,
                   args_json: Optional[str] = None,
@@ -162,14 +172,14 @@ def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
         try:
             store.conn.execute(
                 """INSERT OR REPLACE INTO turn_stream
-                   (session_id, turn, seq, role, content,
+                   (session_id, turn, seq, role, Elm,
                     tool_name, tool_call_id, args_json, status, duration_ms,
                     tool_calls_json, finish_reason,
                     usage_prompt_tokens, usage_completion_tokens,
                     biz_category, written_at,
                     Fct, Hdl)
                    VALUES (?,?,?,?,?, ?,?,?,?,?, ?,?,?,?, ?,?,?,?)""",
-                (session_id, turn, seq, role, content,
+                (session_id, turn, seq, role, elm_text,
                  tool_name, tool_call_id, args_json, status, duration_ms,
                  tool_calls_json, finish_reason,
                  usage_prompt_tokens, usage_completion_tokens,
@@ -204,12 +214,12 @@ def read_fct_v5(store, session_id: str, turn: int, seq: int) -> str:
 
 
 def get_turn_ca_rows(store, session_id: str, turn: int) -> list:
-    """返回该 turn 在 turn_stream 中的所有 (seq, role, finish_reason, tool_calls_json, content, Fct, Hdl)。
-    包含原始 content（Elm）用于 ELM 等级回退。按 seq 升序。
+    """返回该 turn 在 turn_stream 中的所有 (seq, role, finish_reason, tool_calls_json, Elm, Fct, Hdl)。
+    包含原始 Elm 用于 ELM 等级回退。按 seq 升序。
     空列表 = 该 turn 无 CA 数据。"""
     try:
         cur = store.conn.execute(
-            "SELECT seq, role, finish_reason, tool_calls_json, content, Fct, Hdl FROM turn_stream "
+            "SELECT seq, role, finish_reason, tool_calls_json, Elm, Fct, Hdl FROM turn_stream "
             "WHERE session_id=? AND turn=? ORDER BY seq",
             (session_id, turn),
         )
@@ -221,11 +231,11 @@ def get_turn_ca_rows(store, session_id: str, turn: int) -> list:
 def read_turn_elm_rows(store, session_id: str, turn: int) -> list:
     """Read all Elm rows for a turn from turn_stream.
 
-    Returns list of (seq, role, content, tool_name, tool_call_id).
+    Returns list of (seq, role, Elm, tool_name, tool_call_id).
     """
     try:
         cur = store.conn.execute(
-            "SELECT seq, role, content, tool_name, tool_call_id "
+            "SELECT seq, role, Elm, tool_name, tool_call_id "
             "FROM turn_stream WHERE session_id=? AND turn=? ORDER BY seq",
             (session_id, turn),
         )
@@ -241,7 +251,8 @@ def read_prev_fct(store, session_id: str, turn: int) -> str:
     try:
         cur = store.conn.execute(
             "SELECT Fct FROM turn_stream "
-            "WHERE session_id=? AND turn=? AND role='assistant' AND finish_reason='stop'",
+            "WHERE session_id=? AND turn=? AND role='assistant' AND finish_reason='stop' "
+            "ORDER BY seq DESC LIMIT 1",
             (session_id, turn - 1),
         )
         row = cur.fetchone()
@@ -250,17 +261,18 @@ def read_prev_fct(store, session_id: str, turn: int) -> str:
         return ""
 
 
-def update_fin_fct_v5(store, session_id: str, turn: int,
+def update_fin_fct_v5(store, session_id: str, turn: int, seq: int,
                       fct_text: str, hdl_text: str) -> bool:
-    """写 assistant_fin 行的 Fct/Hdl（最末 seq, role='assistant', finish_reason='stop'）。"""
+    """写指定 fin 行 (turn, seq) 的 Fct/Hdl。
+
+    不再使用 MAX(seq) 自动定位——调用方必须传入正确的 fin seq。
+    每条 fin 行独立触发 F-stage，独立写入 Fct/Hdl。
+    """
     try:
         store.conn.execute(
             "UPDATE turn_stream SET Fct=?, Hdl=? "
-            "WHERE session_id=? AND turn=? AND seq=("
-            "  SELECT MAX(seq) FROM turn_stream "
-            "  WHERE session_id=? AND turn=? AND role='assistant' AND finish_reason='stop'"
-            ")",
-            (fct_text, hdl_text, session_id, turn, session_id, turn),
+            "WHERE session_id=? AND turn=? AND seq=?",
+            (fct_text, hdl_text, session_id, turn, seq),
         )
         store.conn.commit()
         return True
@@ -269,25 +281,65 @@ def update_fin_fct_v5(store, session_id: str, turn: int,
         return False
 
 
+def read_incremental_elm(store, session_id: str, turn: int, fin_seq: int) -> list:
+    """读取从上次 fin 之后到 fin_seq 之间的 Elm 行 + user 行，用于增量 F-stage。
+
+    返回 [(seq, role, Elm, tool_name, tool_call_id), ...]，
+    包含 user 行 + 上次 fin_seq+1 到本次 fin_seq 之间的所有行。
+    空列表 = 无可用内容。
+    """
+    try:
+        rows = read_turn_elm_rows(store, session_id, turn)
+        if not rows:
+            return []
+
+        # 一次查出所有 fin 行的 seq（效率优化：避免逐行查 SQL）
+        fin_seqs = {
+            r[0] for r in store.conn.execute(
+                "SELECT seq FROM turn_stream "
+                "WHERE session_id=? AND turn=? AND role='assistant' AND finish_reason='stop'",
+                (session_id, turn),
+            ).fetchall()
+        }
+
+        # 找到上次 fin（小于 fin_seq 的最大 fin seq）
+        last_fin_seq = -1
+        for seq, role, _, _, _ in rows:
+            if seq < fin_seq and seq in fin_seqs:
+                last_fin_seq = seq
+
+        # 收集 user 行 + 上次 fin_seq+1 到 fin_seq 之间的行
+        result: list = []
+        for row in rows:
+            seq, role = row[0], row[1]
+            if role == "user":
+                result.append(row)
+            elif last_fin_seq < seq <= fin_seq:
+                result.append(row)
+        return result
+    except sqlite3.Error:
+        return []
+
+
 def read_turn_stream_all(store, session_id: str) -> list:
     """Read all turn_stream rows for a session, ordered by turn, seq.
 
     Returns list of dicts with keys:
-      turn, seq, role, content, tool_name, tool_call_id, args_json, status, duration_ms,
+      turn, seq, role, Elm, tool_name, tool_call_id, args_json, status, duration_ms,
       tool_calls_json, finish_reason, usage_prompt_tokens, usage_completion_tokens,
       biz_category, written_at, Fct, Hdl
     Used by CacheBuilder.build to warm cache from DB.
     """
     try:
         cur = store.conn.execute(
-            "SELECT turn, seq, role, content, tool_name, tool_call_id, args_json, "
+            "SELECT turn, seq, role, Elm, tool_name, tool_call_id, args_json, "
             "       status, duration_ms, tool_calls_json, finish_reason, "
             "       usage_prompt_tokens, usage_completion_tokens, "
             "       biz_category, written_at, Fct, Hdl "
             "FROM turn_stream WHERE session_id=? ORDER BY turn, seq",
             (session_id,),
         )
-        cols = ["turn", "seq", "role", "content", "tool_name", "tool_call_id", "args_json",
+        cols = ["turn", "seq", "role", "Elm", "tool_name", "tool_call_id", "args_json",
                 "status", "duration_ms", "tool_calls_json", "finish_reason",
                 "usage_prompt_tokens", "usage_completion_tokens",
                 "biz_category", "written_at", "Fct", "Hdl"]

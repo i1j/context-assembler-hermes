@@ -427,33 +427,34 @@ class TestGradeOnSwitch:
 
     def test_old_topic_graded_by_radius(self, mgr, mock_store):
         """旧话题应被半径定级（非 ACT）"""
+        from ca.store import write_turn_v5
+        # 两个 topic 用不同 Fct 文本产生不同 embedding
+        write_turn_v5(mock_store, "test", 1, 0, role="user", elm_text="A",
+                      fct_text='{"core_change":"AAAA"}')
+        write_turn_v5(mock_store, "test", 2, 0, role="user", elm_text="B",
+                      fct_text='{"core_change":"BBBB"}')
+        mgr._store = mock_store
+        mock_store.session_id = "test"
         mgr._turn_to_topic = {1: 1, 2: 2}
         mgr._current_topic_id = 2
-        q = [0.5] * 768
-        mgr._topic_data = {
-            1: {"centroid": q, "max_intra": 0.001, "nearest_centroid_dist": 0.0,
-                "is_bg": False, "turns": [1], "embeddings": []},
-            2: {"centroid": q, "max_intra": 0.001, "nearest_centroid_dist": 0.0,
-                "is_bg": False, "turns": [2], "embeddings": []},
-        }
-        # 用反向向量使 topic 1 被定级为 Far
-        neg_q = [-v for v in q]
-        mgr._topic_data[1]["centroid"] = neg_q
+        # query 对齐 topic 2（BBBB）→ topic 1 应 FAR
+        q = mgr._embed_client.embed("BBBB")
         mgr.grade_on_switch(q, "切换")
         assert mgr._topic_grades[1] == TopicGrade.FAR
         assert mgr._topic_grades[2] == TopicGrade.ACT
 
-    def test_grade_frozen_until_next_switch(self, mgr):
+    def test_grade_frozen_until_next_switch(self, mgr, mock_store):
         """定级后缓存在 _topic_grades，切换间不变"""
-        q = [0.5] * 768
+        from ca.store import write_turn_v5
+        write_turn_v5(mock_store, "test", 1, 0, role="user", elm_text="A",
+                      fct_text='{"core_change":"AAAA"}')
+        write_turn_v5(mock_store, "test", 2, 0, role="user", elm_text="B",
+                      fct_text='{"core_change":"BBBB"}')
+        mgr._store = mock_store
+        mock_store.session_id = "test"
         mgr._turn_to_topic = {1: 1, 2: 2}
         mgr._current_topic_id = 2
-        mgr._topic_data = {
-            1: {"centroid": [-v for v in q], "max_intra": 0.001,
-                "nearest_centroid_dist": 0.001, "is_bg": False, "turns": [1], "embeddings": []},
-            2: {"centroid": q, "max_intra": 0.001,
-                "nearest_centroid_dist": 0.001, "is_bg": False, "turns": [2], "embeddings": []},
-        }
+        q = mgr._embed_client.embed("BBBB")
         mgr.grade_on_switch(q, "切换")
         # 下次查询应该返回缓存的值，不重算
         assert mgr._topic_grades[1] == TopicGrade.FAR
@@ -738,7 +739,7 @@ class TestComputeCentroids:
         from ca.store import write_turn_v5
         # 写入 user 行（seq=0），带 Fct
         write_turn_v5(mock_store, "test", 1, 0,
-                      role="user", content="原始文本",
+                      role="user", elm_text="原始文本",
                       fct_text='{"core_change":"测试内容"}')
         mgr._store = mock_store
         mock_store.session_id = "test"
@@ -753,7 +754,7 @@ class TestComputeCentroids:
     def test_embed_failure_sets_none_centroid(self, mgr, mock_store):
         from ca.store import write_turn_v5
         write_turn_v5(mock_store, "test", 1, 0,
-                      role="user", content="原始文本",
+                      role="user", elm_text="原始文本",
                       fct_text='{\"core_change\":\"测试内容\"}')
         mgr._store = mock_store
         mock_store.session_id = "test"
@@ -769,7 +770,7 @@ class TestComputeCentroids:
     def test_embed_returns_none(self, mgr, mock_store):
         from ca.store import write_turn_v5
         write_turn_v5(mock_store, "test", 1, 0,
-                      role="user", content="原始文本",
+                      role="user", elm_text="原始文本",
                       fct_text='{\"core_change\":\"测试内容\"}')
         mgr._store = mock_store
         mock_store.session_id = "test"
@@ -798,10 +799,10 @@ class TestComputeCentroids:
     def test_nearest_centroid_dist_computed(self, mgr, mock_store):
         from ca.store import write_turn_v5
         write_turn_v5(mock_store, "test", 1, 0,
-                      role="user", content="A",
+                      role="user", elm_text="A",
                       fct_text='{"core_change":"A"}')
         write_turn_v5(mock_store, "test", 2, 0,
-                      role="user", content="B",
+                      role="user", elm_text="B",
                       fct_text='{"core_change":"B"}')
         mgr._store = mock_store
         mock_store.session_id = "test"
@@ -827,23 +828,24 @@ class TestFullPipeline:
 
     def test_two_topic_switch_cycle(self, mgr, mock_store):
         """全流程：第一话题 → 切换 → 第二话题 → 查询等级"""
+        from ca.store import write_turn_v5
+        # 写 store 数据供 _compute_centroids 使用
+        write_turn_v5(mock_store, "test", 1, 0, role="user", elm_text="Python消息",
+                      fct_text='{"core_change":"Python脚本相关"}')
+        mgr._store = mock_store
+        mock_store.session_id = "test"
+
         # Turn 1: 话题 1
-        mgr.detect(1, [], "帮我写个Python脚本")
+        mgr.detect(1, [(0, "user", None, None, '{"core_change":"Python脚本相关"}')], "帮我写个Python脚本")
         # Turn 2: 强制切换
         switched = mgr.detect(2, [], "换个话题，聊Java怎么样")
         assert switched is True
 
-        q_emb = [0.5] * 768
-        mgr._topic_data = {
-            1: {"centroid": [-v for v in q_emb], "max_intra": 0.001,
-                "nearest_centroid_dist": 0.001, "is_bg": False, "turns": [1], "embeddings": []},
-            2: {"centroid": q_emb, "max_intra": 0.001,
-                "nearest_centroid_dist": 0.001, "is_bg": False, "turns": [2], "embeddings": []},
-        }
-        # 先 _init_topic_data 再 _compute_centroids（手动准备 done）
+        # query 对齐 topic 2 不相关文本 → topic 1 的嵌入应较远
+        q_emb = mgr._embed_client.embed("Java虚拟机")
         mgr.grade_on_switch(q_emb, "换个话题，聊Java怎么样")
 
-        # Turn 1（旧话题）应为 FAR
+        # Turn 1（旧话题）应为 FAR（与 Java query 嵌入距离远）
         assert mgr.get_turn_grade(1) == TopicGrade.FAR
         # Turn 2（新话题）应为 ACT
         assert mgr.get_turn_grade(2) == TopicGrade.ACT
@@ -858,7 +860,7 @@ class TestFullPipeline:
         """embed 失败时 centroid=None → REL fallback + 新话题 ACT"""
         from ca.store import write_turn_v5
         write_turn_v5(mock_store, "test", 1, 0,
-                      role="user", content="A",
+                      role="user", elm_text="A",
                       fct_text='{"core_change":"A"}')
         mgr._store = mock_store
         mock_store.session_id = "test"
@@ -873,6 +875,50 @@ class TestFullPipeline:
         assert mgr._topic_grades[1] == TopicGrade.REL
         # topic 2 新话题 → ACT
         assert mgr._topic_grades[2] == TopicGrade.ACT
+
+    def test_multi_switch_no_topic_data_leak(self, mgr, mock_store):
+        """多轮 switch：第二次 grade_on_switch 后新话题仍在 _topic_data 中"""
+        from ca.store import write_turn_v5
+        # 写 3 个 turn 的 Fct 数据，供 _compute_centroids 读取
+        for t in (1, 2, 3):
+            write_turn_v5(mock_store, "test", t, 0,
+                          role="user", elm_text=f"消息{t}",
+                          fct_text=f'{{"core_change":"内容{t}"}}')
+        mgr._store = mock_store
+        mock_store.session_id = "test"
+
+        # Turn 1 → topic 1
+        mgr.detect(1, [(0, "user", None, None, '{"core_change":"内容1"}')], "聊Python")
+        # Turn 2 → topic 2（强制切换）
+        mgr.detect(2, [(0, "user", None, None, '{"core_change":"内容2"}')], "换个话题，聊Java")
+        # 第一次 grade_on_switch：topic_data 重建 → 含 topic 1,2
+        q1 = mgr._embed_client.embed("聊Java")
+        mgr.grade_on_switch(q1, "聊Java")
+        assert 1 in mgr._topic_data, "topic 1 应在 _topic_data"
+        assert 2 in mgr._topic_data, "topic 2 应在 _topic_data"
+
+        # Turn 3 → topic 3（强制切换）
+        mgr.detect(3, [(0, "user", None, None, '{"core_change":"内容3"}')], "聊点别的，Golang")
+        # 第二次 grade_on_switch：topic_data 重建 → 必须含 topic 3
+        q2 = mgr._embed_client.embed("聊Golang")
+        mgr.grade_on_switch(q2, "聊Golang")
+        assert 1 in mgr._topic_data, "topic 1 应在 _topic_data（第二次 switch 后）"
+        assert 2 in mgr._topic_data, "topic 2 应在 _topic_data（第二次 switch 后）"
+        assert 3 in mgr._topic_data, "BUG: topic 3 不在 _topic_data（_assign_topic 创建后未同步到 _topic_data）"
+
+        # 三个 topic 都应有等级（非默认 ACT fallback）
+        assert 1 in mgr._topic_grades, "topic 1 应有等级"
+        assert 2 in mgr._topic_grades, "topic 2 应有等级"
+        assert 3 in mgr._topic_grades, "topic 3 应有等级"
+
+        # get_turn_grade 也应返回有效等级
+        g1 = mgr.get_turn_grade(1)
+        g2 = mgr.get_turn_grade(2)
+        g3 = mgr.get_turn_grade(3)
+        assert g3 == TopicGrade.ACT, "新话题（topic 3）应被强制 ACT"
+        assert isinstance(g1, TopicGrade), f"topic 1 等级类型错误: {type(g1)}"
+        assert isinstance(g2, TopicGrade), f"topic 2 等级类型错误: {type(g2)}"
+        assert isinstance(g3, TopicGrade), f"topic 3 等级类型错误: {type(g3)}"
 
 
 # ============================================================================

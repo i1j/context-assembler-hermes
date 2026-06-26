@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS turn_stream (
 
     -- 原始数据核
     role          TEXT    NOT NULL,
-    content       TEXT    NOT NULL DEFAULT '',
+    Elm       TEXT    NOT NULL DEFAULT '',
 
     -- tool 行专用
     tool_name     TEXT,

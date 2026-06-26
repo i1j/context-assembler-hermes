@@ -240,7 +240,7 @@ class Config:
     OV_ENDPOINT: ClassVar[str] = os.getenv("CA_OV_ENDPOINT", "http://localhost:1933")
     OV_USER: ClassVar[str] = os.getenv("CA_OV_USER", "tester")
     OV_TOPIC_DIR_PREFIX: ClassVar[str] = os.getenv("CA_OV_TOPIC_DIR_PREFIX",
-                                                    "viking://resources/{ov_user}/ca_topics")
+                                                    "viking://resources/{ov_user}/ca_topics/{ov_session}")
 
     @staticmethod
     def _parse_bool_env(key: str, default: bool = True) -> bool:

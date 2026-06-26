@@ -31,7 +31,7 @@ class TestSQLiteStoreContract:
         sid1 = v5_store.session_id
         from ca.store import write_turn_v5
         write_turn_v5(v5_store, v5_store.session_id, 0, 0,
-                      role="user", content="test")
+                      role="user", elm_text="test")
         assert v5_store.session_id == sid1
 
     def test_session_id_matches_db_creation(self, tmp_path):
@@ -56,9 +56,9 @@ class TestGetTurnCaRowsContract:
         """get_turn_ca_rows 返回 7 列：seq, role, finish_reason, tool_calls_json, content, Fct, Hdl"""
         from ca.store import write_turn_v5, get_turn_ca_rows
 
-        write_turn_v5(v5_store, "test", 0, 0, role="user", content="你好",
+        write_turn_v5(v5_store, "test", 0, 0, role="user", elm_text="你好",
                       fct_text='{"core_change":"用户问候"}')
-        write_turn_v5(v5_store, "test", 0, 1, role="assistant", content="",
+        write_turn_v5(v5_store, "test", 0, 1, role="assistant", elm_text="",
                       tool_calls_json='[{"id":"c1"}]',
                       finish_reason="tool_calls",
                       fct_text='{"core_change":"思考Fct"}',
@@ -95,9 +95,9 @@ class TestMaxTurnV5:
 
     def test_returns_highest_turn(self, v5_store):
         from ca.store import write_turn_v5, max_turn_v5
-        write_turn_v5(v5_store, "test", 0, 0, role="user", content="u0")
-        write_turn_v5(v5_store, "test", 5, 0, role="user", content="u5")
-        write_turn_v5(v5_store, "test", 3, 0, role="user", content="u3")
+        write_turn_v5(v5_store, "test", 0, 0, role="user", elm_text="u0")
+        write_turn_v5(v5_store, "test", 5, 0, role="user", elm_text="u5")
+        write_turn_v5(v5_store, "test", 3, 0, role="user", elm_text="u3")
         assert max_turn_v5(v5_store, "test") == 5
 
 
@@ -106,17 +106,17 @@ class TestWriteTurnV5Idempotent:
 
     def test_same_turn_seq_overwrites(self, v5_store):
         from ca.store import write_turn_v5, read_turn_elm_rows
-        write_turn_v5(v5_store, "test", 0, 0, role="user", content="原始内容")
-        write_turn_v5(v5_store, "test", 0, 0, role="user", content="新内容")
+        write_turn_v5(v5_store, "test", 0, 0, role="user", elm_text="原始内容")
+        write_turn_v5(v5_store, "test", 0, 0, role="user", elm_text="新内容")
         rows = read_turn_elm_rows(v5_store, "test", 0)
         assert rows[0][2] == "新内容"
 
     def test_insert_or_replace_maintains_row_count(self, v5_store):
         from ca.store import write_turn_v5, read_turn_elm_rows
-        write_turn_v5(v5_store, "test", 0, 0, role="user", content="u")
-        write_turn_v5(v5_store, "test", 0, 1, role="assistant", content="a")
+        write_turn_v5(v5_store, "test", 0, 0, role="user", elm_text="u")
+        write_turn_v5(v5_store, "test", 0, 1, role="assistant", elm_text="a")
         # 覆盖第 1 行
-        write_turn_v5(v5_store, "test", 0, 1, role="assistant", content="a2")
+        write_turn_v5(v5_store, "test", 0, 1, role="assistant", elm_text="a2")
         rows = read_turn_elm_rows(v5_store, "test", 0)
         assert len(rows) == 2
 
@@ -128,7 +128,7 @@ class TestStoreCloseReopen:
         from ca.store import SQLiteStore, write_turn_v5, read_turn_elm_rows
         db = tmp_path / "reopen.db"
         s1 = SQLiteStore(db_path=str(db))
-        write_turn_v5(s1, "test", 0, 0, role="user", content="持久化数据")
+        write_turn_v5(s1, "test", 0, 0, role="user", elm_text="持久化数据")
         s1.close()
 
         s2 = SQLiteStore(db_path=str(db))
@@ -138,3 +138,51 @@ class TestStoreCloseReopen:
             assert rows[0][2] == "持久化数据"
         finally:
             s2.close()
+
+
+class TestFormatPreviousSummary:
+    """format_previous_summary_for_prompt — previous_summary 输入转换"""
+
+    def test_empty_returns_descriptive_message(self):
+        """空输入 → 返回含语义指令的占位符（不再返回裸"无"）"""
+        from ca.store import format_previous_summary_for_prompt
+        result = format_previous_summary_for_prompt("")
+        assert "无历史回顾" in result
+        assert "stage_tag" in result
+        assert "core_change" in result
+        assert result != "无"
+
+    def test_none_returns_descriptive_message(self):
+        """None 输入 → 同上"""
+        from ca.store import format_previous_summary_for_prompt
+        result = format_previous_summary_for_prompt(None)
+        assert "无历史回顾" in result
+        assert result != "无"
+
+    def test_wu_literal_returns_descriptive_message(self):
+        """"无"输入 → 同上"""
+        from ca.store import format_previous_summary_for_prompt
+        result = format_previous_summary_for_prompt("无")
+        assert "无历史回顾" in result
+        assert result != "无"
+
+    def test_null_literal_returns_descriptive_message(self):
+        """"null"输入 → 同上"""
+        from ca.store import format_previous_summary_for_prompt
+        result = format_previous_summary_for_prompt("null")
+        assert "无历史回顾" in result
+
+    def test_nonempty_text_passed_through(self):
+        """非空文本 → 原样返回"""
+        from ca.store import format_previous_summary_for_prompt
+        result = format_previous_summary_for_prompt("历史摘要内容")
+        assert result == "历史摘要内容"
+
+    def test_json_previous_summary_converted(self):
+        """JSON 格式 Fct → 转换为 markdown"""
+        from ca.store import format_previous_summary_for_prompt
+        result = format_previous_summary_for_prompt(
+            '{"core_change": "修复bug", "new_materials": ["日志分析"]}'
+        )
+        assert "修复bug" in result
+        assert "日志分析" in result

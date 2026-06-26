@@ -120,7 +120,7 @@ class EStageMixin:
 
         write_turn_v5(
             self.store, self._session_id, turn, seq,
-            role="assistant", content=thought,
+            role="assistant", elm_text=thought,
             tool_calls_json=json.dumps(tool_defs, ensure_ascii=False),
             finish_reason=finish_reason,
             usage_prompt_tokens=_prompt_tokens,
@@ -138,7 +138,7 @@ class EStageMixin:
             tc_id = tc_def["id"]
             write_turn_v5(
                 self.store, self._session_id, turn, tool_seq,
-                role="tool", content="",
+                role="tool", elm_text="",
                 tool_name=tc_def.get("function", {}).get("name", ""),
                 tool_call_id=tc_id,
                 status="pending",
@@ -208,7 +208,7 @@ class EStageMixin:
 
         write_turn_v5(
             self.store, self._session_id, turn, seq,
-            role="tool", content=content,
+            role="tool", elm_text=content,
             tool_name=tool_name, tool_call_id=tool_call_id,
             args_json=json.dumps(args) if args else None,
             status=status, duration_ms=duration_ms,
@@ -218,8 +218,8 @@ class EStageMixin:
         logger.debug("[CA_v5] _on_post_tool_call: wrote %s turn=%d seq=%d status=%s",
                      tool_name, turn, seq, status)
 
-    def _update_fct_v5(self, session_id: str, turn_index: int,
+    def _update_fct_v5(self, session_id: str, turn_index: int, fin_seq: int,
                        fct_text: str, hdl_text: str) -> bool:
-        """v5: 写 turn_stream fin 行的 Fct/Hdl 列（assistant_fin），不碰 content。"""
+        """v5: 写特定 fin 行 (turn, fin_seq) 的 Fct/Hdl 列。"""
         from .store import update_fin_fct_v5
-        return update_fin_fct_v5(self.store, session_id, turn_index, fct_text, hdl_text)
+        return update_fin_fct_v5(self.store, session_id, turn_index, fin_seq, fct_text, hdl_text)

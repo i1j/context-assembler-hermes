@@ -288,6 +288,10 @@ class TestPreLlmCall:
         plugin._engine = mock_engine
         plugin._engine_errored = False
         plugin._session_id = "test_sid"
+        # MagicMock 的 _A_cache_is_stale/_A_stable_cache 默认真值，需显式设
+        mock_engine._A_cache_is_stale = False
+        mock_engine._A_stable_cache = None
+        mock_engine._full_mutation.return_value = None
 
         from ca.store import read_fct_v5
         with patch('ca.store.read_fct_v5', return_value="替换摘要"):
@@ -334,7 +338,7 @@ class TestPostLlmCall:
             mock_write.assert_called_once()
 
         # 然后 process_turn_f_stage（参数为 turn_index）
-        mock_engine.process_turn_f_stage.assert_called_once_with(1)
+        mock_engine.process_turn_f_stage.assert_called_once_with(1, fin_seq=1)
 
     def test_skipped_when_errored(self):
         """引擎错误时跳过。"""
@@ -353,7 +357,6 @@ class TestPostLlmCall:
 
         plugin.post_llm_call_v5(user_message="", assistant_response="", conversation_history=[])
         mock_engine.process_turn_async.assert_not_called()
-
 
 class TestSnapshotRestore:
     """post_llm_call 快照恢复测试。"""
@@ -375,7 +378,7 @@ class TestSnapshotRestore:
                 {"role": "user", "content": "查文件"},
                 {"role": "assistant", "content": "好的", "finish_reason": "stop"},
             ]
-            plugin._saved_history_snapshot = [{**m} for m in history]
+            mock_engine._saved_history_snapshot = [{**m} for m in history]
             # 模拟替换
             history[0]["content"] = "替换摘要"
             history[1]["content"] = "替换回复"
@@ -387,7 +390,7 @@ class TestSnapshotRestore:
             )
             assert history[0]["content"] == "查文件", f"Expected original, got {history[0]['content']}"
             assert history[1]["content"] == "好的", f"Expected original, got {history[1]['content']}"
-            assert plugin._saved_history_snapshot is None, "Snapshot should be cleared"
+            assert mock_engine._saved_history_snapshot is None, "Engine snapshot should be cleared"
 
 
 # ============================================================================

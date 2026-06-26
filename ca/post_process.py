@@ -40,7 +40,8 @@ def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 cleaned["changes"] = [{"stage_tag": "已实施", "core_change": core}]
             cleaned["core_change"] = core
-    _PLACEHOLDERS = {"", "无", "無", "none", "-", "- 无", "—", "— 无", "暂无", "无有效内容"}
+    _PLACEHOLDERS = {"", "无", "無", "none", "-", "- 无", "—", "— 无", "暂无", "无有效内容",
+                       "本轮无新增", "本轮无", "- 本轮无新增", "- 本轮无"}
     for field in ["new_materials", "objective_facts", "consensus", "todo"]:
         items = data.get(field, [])
         if not isinstance(items, list):
@@ -49,6 +50,15 @@ def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
                  if i and i.strip() and i.strip() not in _PLACEHOLDERS][:3]
         if items:
             cleaned[field] = items
+    # 🔧 当 changes 已有有效条目时，去除旧 OODA 4 字段（避免新旧格式并存）
+    _has_real_changes = cleaned.get("changes") and any(
+        c.get("core_change", "").strip() not in _PLACEHOLDERS
+        and c.get("core_change", "").strip() not in MEANINGLESS_CORE
+        for c in cleaned["changes"]
+    )
+    if _has_real_changes:
+        for field in ["new_materials", "objective_facts", "consensus", "todo"]:
+            cleaned.pop(field, None)
     if not cleaned:
         cleaned["changes"] = []
         cleaned["core_change"] = "本轮无新内容"
@@ -56,6 +66,13 @@ def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
         cleaned["changes"] = []
     if "core_change" not in cleaned:
         cleaned["core_change"] = "本轮无新内容"
+    # 首轮/空历史兜底：有叙事段内容但无 changes → 自动派生（当 changes 为空且 core_change 为默认值时）
+    if not cleaned.get("changes") and cleaned.get("core_change") == "本轮无新内容":
+        _first_priority = cleaned.get("consensus", []) or cleaned.get("new_materials", [])
+        if _first_priority and any(i not in _PLACEHOLDERS for i in _first_priority):
+            _draft_core = next(i for i in _first_priority if i not in _PLACEHOLDERS)
+            cleaned["changes"] = [{"stage_tag": "已实施", "core_change": _draft_core}]
+            cleaned["core_change"] = _draft_core
     return cleaned
 
 # ── L1 v2 解析器常量 ──

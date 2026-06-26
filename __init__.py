@@ -553,436 +553,27 @@ class CAContextAssemblerPlugin:
     # v5.0 — A-stage 替换 + E-stage final 写入
     # ═════════════════════════════════════════════════════
 
-    def _simple_mutation_mode_v5(self, conversation_history: list) -> Optional[str]:
-        """v5: 轮内按角色类型匹配注入 Fct。
 
-        设计决策: C-010 (A-stage 解耦), TP-002 (话题等级 → Grade 映射)
-          viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-a-stage-同步上下文组装
-          turn_stream 查 → 角色队列匹配 → 话题等级(ACT/REL/FAR)驱动替换
+    # ── 薄壳：委托到 engine（兼容旧测试直接调用） ──
 
-        策略（C 方案）：
-          - 每个 turn 由 user 在 conv_hist 中的位置锚定。
-          - 拉该 turn 在 CA 的所有行，按角色分队列：
-            thought（assistant, 不含 fin）和 tool。
-          - conv_hist 的 thought/tool 行依次从对应队列中取。
-          - 队列用尽则保留原始 Elm，队列多余自然孤行。
-          - fin 行（assistant, finish_reason='stop'）不进入任何队列。
-        """
-        if not conversation_history:
+    def _simple_mutation_mode_v5(self, conversation_history: list, topic_mgr: Any = None) -> Optional[str]:
+        """委托到 engine 的 AStageMixin._simple_mutation_mode_v5。"""
+        if not self._engine:
             return None
-        self._saved_history_snapshot = [{**m} for m in conversation_history]
-        store = self._engine.store
-        sid = self._session_id
+        return self._engine._simple_mutation_mode_v5(topic_mgr or self._topic_mgr, conversation_history)
 
-        from ca.store import get_turn_ca_rows
-
-        # 尾巴保护：最后 2 个 user turn 不处理
-        tail_boundary = 0
-        _user_count = 0
-        for i in range(len(conversation_history) - 1, -1, -1):
-            if conversation_history[i].get("role") == "user":
-                _user_count += 1
-                if _user_count >= 2:
-                    tail_boundary = i
-                    break
-
-        # Phase 1: 按 turn 收集 conv_hist 中需匹配的行
-        # turn 编号：0-indexed，与 DB 一致（_on_pre_llm_call_v5 写 turn 时用 len()）
-        # 注意：历史代码用 0 起始遇 user 先 +1，导致所有 turn 偏移 1。
-        # 当前代码修正为 -1 起始遇 user +1 后即为 0-indexed。
-        turn_rows: dict = {}
-        current_turn = -1
-        for i, msg in enumerate(conversation_history):
-            role = msg.get("role", "")
-            if role == "system":
-                continue
-            if role == "user":
-                current_turn += 1
-            if i >= tail_boundary:
-                continue
-
-            if role == "user":
-                row_type = "user"
-            elif role == "assistant" and not msg.get("tool_calls"):
-                row_type = "fin"
-            elif role == "assistant":
-                row_type = "thought"
-            elif role == "tool":
-                row_type = "tool"
-            else:
-                continue
-
-            turn_rows.setdefault(current_turn, []).append((i, row_type))
-
-        # Phase 1.5: 每轮只保留最后一个 "fin" 为真 fin
-        # Hermes 在做 conv_hist 时，含 content+tool_calls 的 assistant 行被丢掉 tool_calls，
-        # 使 Phase 1 误判为 fin。真 fin 必然是每轮最后一个无 tool_calls 的 assistant 行。
-        for _t, _rows in turn_rows.items():
-            _fin_positions = [_p for _p, (_ci, _rt) in enumerate(_rows) if _rt == "fin"]
-            if len(_fin_positions) > 1:
-                for _p in _fin_positions[:-1]:
-                    _rows[_p] = (_rows[_p][0], "thought")
-
-        # Phase 2: 逐 turn 做角色队列匹配
-        replaced = 0
-        skipped = 0
-
-        # 话题等级 → 行等级映射
-        # user/fin: 不降级，直接取话题等级
-        # thought/tool: 降一级
-        user_fin_map = {
-            TopicGrade.ACT: Grade.ELM,   # 原文保留
-            TopicGrade.REL: Grade.FCT,   # 完整摘要
-            TopicGrade.FAR: Grade.HDL,   # Hdl[:150]
-        }
-
-        for turn_num, rows in turn_rows.items():
-            if turn_num < 0:  # turn 1（turn_num=0）现在可处理了
-                continue
-
-            # 1. 先确定 topic_grade
-            topic_grade = self._topic_mgr.get_turn_grade(turn_num + 1) if self._topic_mgr else TopicGrade.ACT
-
-            # 2. 算各 row_type 的映射等级
-            thought_grade = Grade.from_topic_grade(topic_grade)  # FCT / HDL / None(清空)
-            user_grade = user_fin_map.get(topic_grade)          # ELM / FCT / HDL
-
-            # 3. 读 DB（现在统一拉 7 列：seq, role, finish, tc_json, content, Fct, Hdl）
-            ca_rows = get_turn_ca_rows(store, sid, turn_num + 1)
-            if not ca_rows:
-                skipped += sum(1 for _, t in rows)
-                continue
-
-            # 【日志 B】逐 turn 输出 grade
-            logger.info("[CA_v5_mutate] turn=%d topic_grade=%s thought_grade=%s user_grade=%s topic_mgr_exist=%s n_fin=%d n_thought=%d n_tool=%d",
-                       turn_num + 1, topic_grade, thought_grade, user_grade, self._topic_mgr is not None,
-                       len([r for r in ca_rows if r[1] == "assistant" and r[2] == "stop"]),
-                       len([r for r in ca_rows if r[1] == "assistant" and r[2] != "stop"]),
-                       len([r for r in ca_rows if r[1] == "tool"]))
-
-            # 4. 按需选列填充队列
-            ca_users: list = []
-            ca_fins: list = []
-            ca_thoughts: list = []
-            ca_tools: list = []
-            for _seq, role, finish_reason, tc_json, content, fct, hdl in ca_rows:
-                if role == "user":
-                    if user_grade == Grade.FCT and fct:
-                        ca_users.append(fct)
-                    elif user_grade == Grade.FCT:
-                        logger.warning("[CA_v5] turn=%d user Fct is empty/NULL for grade FCT, falling back to Elm", turn_num + 1)
-                    elif user_grade == Grade.HDL:
-                        ca_users.append((hdl or "")[:150])
-                        if not hdl:
-                            logger.warning("[CA_v5] turn=%d user Hdl is empty/NULL for grade HDL, content will be empty", turn_num + 1)
-                    # ELM: 原文在 conv 中，不填队列
-                elif role == "assistant" and finish_reason == "stop":
-                    if user_grade == Grade.FCT and fct:
-                        ca_fins.append(fct)
-                    elif user_grade == Grade.FCT:
-                        logger.warning("[CA_v5] turn=%d fin Fct is empty/NULL for grade FCT, falling back to Elm", turn_num + 1)
-                    elif user_grade == Grade.HDL:
-                        ca_fins.append((hdl or "")[:150])
-                        if not hdl:
-                            logger.warning("[CA_v5] turn=%d fin Hdl is empty/NULL for grade HDL, content will be empty", turn_num + 1)
-                    # ELM: 原文保留
-                elif role == "assistant":
-                    if thought_grade == Grade.FCT and fct:
-                        ca_thoughts.append(fct)
-                    elif thought_grade == Grade.FCT:
-                        logger.warning("[CA_v5] turn=%d thought Fct is empty/NULL for grade FCT, falling back to Elm", turn_num + 1)
-                    elif thought_grade == Grade.HDL:
-                        ca_thoughts.append((hdl or "")[:150])
-                        if not hdl:
-                            logger.warning("[CA_v5] turn=%d thought Hdl is empty/NULL for grade HDL, content will be empty", turn_num + 1)
-                    # None(FAR): 清空，不填队列
-                elif role == "tool":
-                    if thought_grade == Grade.FCT and fct:
-                        ca_tools.append(fct)
-                    elif thought_grade == Grade.FCT:
-                        logger.warning("[CA_v5] turn=%d tool Fct is empty/NULL for grade FCT, falling back to Elm", turn_num + 1)
-                    elif thought_grade == Grade.HDL:
-                        ca_tools.append((hdl or "")[:150])
-                        if not hdl:
-                            logger.warning("[CA_v5] turn=%d tool Hdl is empty/NULL for grade HDL, content will be empty", turn_num + 1)
-                    # None(FAR): 清空，不填队列
-
-            # 5. 替换（直接 pop，无 if/else 选择列）
-            ui, fi, ti, tj = 0, 0, 0, 0
-            for conv_idx, row_type in rows:
-
-                if row_type == "user":
-                    if user_grade == Grade.ELM:
-                        pass  # 原文保留
-                    elif ui < len(ca_users):
-                        conversation_history[conv_idx]["content"] = ca_users[ui]
-                        ui += 1
-                    replaced += 1
-
-                elif row_type == "fin":
-                    if user_grade == Grade.ELM:
-                        # 原文保留，但清理 reasoning/tool_calls
-                        conversation_history[conv_idx].pop("reasoning_content", None)
-                        conversation_history[conv_idx].pop("tool_calls", None)
-                    elif fi < len(ca_fins):
-                        conversation_history[conv_idx]["content"] = ca_fins[fi]
-                        conversation_history[conv_idx].pop("reasoning_content", None)
-                        conversation_history[conv_idx].pop("tool_calls", None)
-                        fi += 1
-                    else:
-                        # 队列耗尽: 原文保留
-                        conversation_history[conv_idx].pop("reasoning_content", None)
-                        conversation_history[conv_idx].pop("tool_calls", None)
-                    replaced += 1
-
-                elif row_type == "thought":
-                    if thought_grade is None:  # FAR → 略
-                        conversation_history[conv_idx]["content"] = "略"
-                        conversation_history[conv_idx].pop("reasoning_content", None)
-                        conversation_history[conv_idx].pop("tool_calls", None)
-                    elif ti < len(ca_thoughts):
-                        conversation_history[conv_idx]["content"] = ca_thoughts[ti]
-                        conversation_history[conv_idx].pop("reasoning_content", None)
-                        conversation_history[conv_idx].pop("tool_calls", None)
-                        ti += 1
-                    # 队列耗尽: 保留原文，至少清理
-                    else:
-                        conversation_history[conv_idx].pop("reasoning_content", None)
-                        conversation_history[conv_idx].pop("tool_calls", None)
-                    replaced += 1
-
-                elif row_type == "tool":
-                    if thought_grade is None:  # FAR → 略
-                        conversation_history[conv_idx]["content"] = "略"
-                    elif tj < len(ca_tools):
-                        conversation_history[conv_idx]["content"] = ca_tools[tj]
-                        tj += 1
-                    # 队列耗尽: 保留原文
-                    replaced += 1
-
-        last_turn = max(turn_rows, default=0)
-        logger.info("[CA_v5] simple_mutation: replaced=%d + skipped=%d (tail=%d, turns=%d)",
-                    replaced, skipped, tail_boundary, last_turn)
-
-        # Debug dump
-        if Config.DEBUG_MODE:
-            dump_dir = os.environ.get("CA_DEBUG_DUMP", "")
-            if dump_dir:
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                dump_path = os.path.join(dump_dir, f"ca_mutation_{sid}_{ts}.json")
-                try:
-                    os.makedirs(dump_dir, exist_ok=True)
-                    with open(dump_path, "w", encoding="utf-8") as f:
-                        json.dump(conversation_history, f, ensure_ascii=False, indent=2)
-                    logger.info("[CA_v5] mutation dump written: %s (%d msgs, %d KB)",
-                                dump_path, len(conversation_history),
-                                os.path.getsize(dump_path) // 1024)
-                except Exception as e:
-                    logger.warning("[CA_v5] failed to write mutation dump: %s", e)
-
-        # 写入稳定区缓存（供增量路径复用）
-        self._A_stable_cache = [{**m} for m in conversation_history[0:tail_boundary]]
-        self._A_cache_turns = sum(1 for m in self._A_stable_cache if m.get("role") == "user")
-        self._A_cache_is_stale = False
-        logger.debug("[CA_v5] full_mutation: cache written, stable_turns=%d", self._A_cache_turns)
-
-        return None
-
-    # _simple_mutation_mode_v5 别名（安全回退用）
     _full_mutation = _simple_mutation_mode_v5
 
-    def _incremental_mutation(self, conversation_history: list) -> Optional[str]:
-        """增量路径：缓存稳定区 → delta 替换 → 尾部保留。
-
-        设计决策: TP-001 (话题分割), C-010 (A-stage 解耦)
-          viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-话题拣选重构-v460-已实现
-          前提：话题未切换，_A_stable_cache 有效。用于高话题稳定性场景减少全量替换开销。
-        """
-        if not conversation_history or not self._engine:
+    def _incremental_mutation(self, conversation_history: list, topic_mgr: Any = None) -> Optional[str]:
+        """委托到 engine 的 AStageMixin._incremental_mutation。"""
+        if not self._engine:
             return None
-
-        # 保存快照（供 post_llm_call 还原 Elm）
-        self._saved_history_snapshot = [{**m} for m in conversation_history]
-
-        store = self._engine.store
-        sid = self._session_id
-        cache = self._A_stable_cache
-        if cache is None:
-            return self._full_mutation(conversation_history)
-
-        from ca.store import get_turn_ca_rows
-
-        # ── Step 1: 尾部边界（与全量路径一致） ──
-        tail_boundary = 0
-        _user_count = 0
-        for i in range(len(conversation_history) - 1, -1, -1):
-            if conversation_history[i].get("role") == "user":
-                _user_count += 1
-                if _user_count >= 2:
-                    tail_boundary = i
-                    break
-
-        # ── Step 2: 并行扫描缓存 → 覆盖稳定区 ──
-        cache_idx = 0
-        need_fallback = False
-        for i, msg in enumerate(conversation_history):
-            if cache_idx >= len(cache):
-                break
-            role = msg.get("role", "")
-            c_msg = cache[cache_idx]
-            if role == c_msg.get("role"):
-                msg["content"] = c_msg.get("content", "")
-                msg.pop("reasoning_content", None)
-                msg.pop("tool_calls", None)
-                cache_idx += 1
-            elif role == "system":
-                continue  # Hermes 新插入的 system，不消耗缓存
-            else:
-                # 结构不一致 → 回退全量
-                need_fallback = True
-                break
-
-        if need_fallback:
-            logger.info("[CA_v5] cache alignment mismatch, falling back to full mutation")
-            self._A_stable_cache = None
-            self._A_cache_turns = 0
-            return self._full_mutation(conversation_history)
-
-        # ── Step 3: Delta 区（原尾部 → 现稳定，需查表替换） ──
-        # turn 编号 0-indexed，与全量路径 Phase 1 保持一致
-        turn_rows: dict = {}
-        current_turn = self._A_cache_turns - 1  # cache 最后一个 user 的 DB turn，遇 user +1 后即为下一个 delta turn
-        for i in range(len(cache), len(conversation_history)):
-            msg = conversation_history[i]
-            role = msg.get("role", "")
-            if role == "system":
-                continue
-            if role == "user":
-                current_turn += 1
-                continue
-            if i >= tail_boundary:
-                continue
-
-            if role == "assistant":
-                # A-stage 已 pop 所有 thought 行的 tool_calls，无法用 msg.get("tool_calls")
-                # 区分 thought/fin。改为检查下一条消息是否为 tool 行。
-                next_msg = conversation_history[i + 1] if i + 1 < len(conversation_history) else None
-                if next_msg and next_msg.get("role") == "tool":
-                    row_type = "thought"
-                else:
-                    row_type = "fin"
-            elif role == "tool":
-                row_type = "tool"
-            else:
-                continue
-            turn_rows.setdefault(current_turn, []).append((i, row_type))
-
-        # ── Step 4: Delta 替换（含 Fct pending 防护） ──
-        replaced = 0
-        skipped = 0
-        turn_pending = False
-
-        for turn_num, rows in turn_rows.items():
-            if turn_num < 0:  # 与全量路径 Phase 2 一致：允许 turn_num=0（第一个 delta turn）进入
-                continue
-
-            ca_rows = get_turn_ca_rows(store, sid, turn_num + 1)  # DB 是 1-indexed
-            if not ca_rows:
-                skipped += sum(1 for _, t in rows if t != "fin")
-                continue
-
-            # ★ 整个 turn 是否 Fct pending？
-            # 检查 user 行（seq=0）的 fct；若不存在，整个 turn 尚未 Fct 化 → 保留 Elm
-            user_fct = next((r[5] for r in ca_rows if r[1] == "user"), None)
-            if not user_fct:
-                logger.debug("[CA_v5] incremental: turn=%d user Fct empty/NULL, marking pending (skipped=%d)",
-                             turn_num, sum(1 for _, t in rows if t != "fin"))
-                turn_pending = True
-                skipped += sum(1 for _, t in rows if t != "fin")
-                continue
-
-            # 角色队列构建（只取有 Fct 的行）
-            ca_thoughts: list = []
-            ca_tools: list = []
-            for _seq, role_, finish_reason, tc_json, content, fct, hdl in ca_rows:
-                if role_ == "user":
-                    continue
-                if role_ == "assistant" and finish_reason == "stop":
-                    continue
-                if fct is None:
-                    logger.debug("[CA_v5] incremental: turn=%d row role=%s Fct is None, marking pending",
-                                 turn_num, role_)
-                    turn_pending = True
-                    continue
-                if role_ == "assistant":
-                    ca_thoughts.append(fct)
-                elif role_ == "tool":
-                    ca_tools.append(fct)
-
-            # 1:1 角色匹配
-            ti, tj = 0, 0
-            for conv_idx, row_type in rows:
-                if row_type == "fin":
-                    continue
-                if row_type == "thought":
-                    if ti < len(ca_thoughts):
-                        conversation_history[conv_idx]["content"] = ca_thoughts[ti]
-                        conversation_history[conv_idx].pop("reasoning_content", None)
-                        conversation_history[conv_idx].pop("tool_calls", None)
-                        replaced += 1
-                        ti += 1
-                    else:
-                        skipped += 1
-                else:  # tool
-                    if tj < len(ca_tools):
-                        conversation_history[conv_idx]["content"] = ca_tools[tj]
-                        replaced += 1
-                        tj += 1
-                    else:
-                        skipped += 1
-
-        if turn_pending:
-            self._A_cache_is_stale = True
-
-        logger.info("[CA_v5] incremental_mutation: replaced=%d + skipped=%d (tail=%d, delta_turns=%d, pending=%s)",
-                    replaced, skipped, tail_boundary, len(turn_rows), turn_pending)
-
-        # ── Step 5: 写缓存 ──
-        self._A_stable_cache = [{**m} for m in conversation_history[0:tail_boundary]]
-        self._A_cache_turns = sum(1 for m in self._A_stable_cache if m.get("role") == "user")
-        if not turn_pending:
-            self._A_cache_is_stale = False
-        logger.debug("[CA_v5] incremental_mutation: cache updated, stable_turns=%d",
-                     self._A_cache_turns)
-
-        # Debug dump
-        if Config.DEBUG_MODE:
-            dump_dir = os.environ.get("CA_DEBUG_DUMP", "")
-            if dump_dir:
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                dump_path = os.path.join(dump_dir, f"ca_incr_mutation_{sid}_{ts}.json")
-                try:
-                    os.makedirs(dump_dir, exist_ok=True)
-                    with open(dump_path, "w", encoding="utf-8") as f:
-                        json.dump(conversation_history, f, ensure_ascii=False, indent=2)
-                    logger.info("[CA_v5] incr mutation dump written: %s (%d msgs, %d KB)",
-                                dump_path, len(conversation_history),
-                                os.path.getsize(dump_path) // 1024)
-                except Exception as e:
-                    logger.warning("[CA_v5] failed to write incr mutation dump: %s", e)
-
-        return None
+        return self._engine._incremental_mutation(topic_mgr or self._topic_mgr, conversation_history)
 
     @staticmethod
     def _estimate_conv_tokens(conv_hist: list) -> int:
-        """字符粗估 conv_hist 总 token（含 tool/assistant/reasoning 全部内容）。"""
-        total_chars = 0
-        for msg in conv_hist:
-            total_chars += len(msg.get("content", "") or "")
-            for tc in msg.get("tool_calls", []) or []:
-                total_chars += len(tc.get("function", {}).get("arguments", ""))
-        # CJK ~1.2, 工具/代码 ~3, 综合 1.5 chars/tok
-        return int(total_chars // 1.5)
+        from ca.a_stage import AStageMixin
+        return AStageMixin._estimate_conv_tokens(conv_hist)
 
     def pre_llm_call_v5(self, **kwargs: Any) -> Optional[str]:
         """v5 A-stage: 话题检测 → topic-aware 替换。"""
@@ -1050,19 +641,19 @@ class CAContextAssemblerPlugin:
 
         # ── 缓存调度 ──
         if switched:
-            self._A_stable_cache = None
-            self._A_cache_is_stale = False
+            self._engine._A_stable_cache = None
+            self._engine._A_cache_is_stale = False
 
-        if self._A_stable_cache is None:
-            return self._full_mutation(conversation_history)
+        if self._engine._A_stable_cache is None:
+            return self._engine._full_mutation(self._topic_mgr, conversation_history)
 
-        if self._A_cache_is_stale:
+        if self._engine._A_cache_is_stale:
             logger.debug("[CA_v5] cache stale (Fct pending), full mutation fallback")
-            self._A_stable_cache = None
-            self._A_cache_is_stale = False
-            return self._full_mutation(conversation_history)
+            self._engine._A_stable_cache = None
+            self._engine._A_cache_is_stale = False
+            return self._engine._full_mutation(self._topic_mgr, conversation_history)
 
-        return self._incremental_mutation(conversation_history)
+        return self._engine._incremental_mutation(self._topic_mgr, conversation_history)
 
     def post_llm_call_v5(self, **kwargs: Any) -> None:
         """v5 E-stage final: 写 asst_fin → 快照恢复 → C-stage。"""
@@ -1076,13 +667,14 @@ class CAContextAssemblerPlugin:
 
         engine = self._engine
         turn = engine._current_turn
+
         seq = engine._seq_counter.get(turn, 0) + 1
         engine._seq_counter[turn] = seq
 
         from ca.store import write_turn_v5
         write_turn_v5(
             engine.store, self._session_id, turn, seq,
-            role='assistant', content=assistant_response,
+            role='assistant', elm_text=assistant_response,
             finish_reason='stop',
             written_at=time.time(),
         )
@@ -1097,7 +689,7 @@ class CAContextAssemblerPlugin:
             logger.info("[CA_v5] post_llm_call: replaced conv_hist with full_backup (%d rows)",
                         len(conversation_history))
         else:
-            _snapshot = getattr(self, "_saved_history_snapshot", None)
+            _snapshot = getattr(self._engine, "_saved_history_snapshot", None)
             if _snapshot is not None:
                 for i, orig_dict in enumerate(_snapshot):
                     if i >= len(conversation_history):
@@ -1109,10 +701,10 @@ class CAContextAssemblerPlugin:
                             ch[_key] = orig_dict[_key]
                         else:
                             ch.pop(_key, None)
-                self._saved_history_snapshot = None
+                self._engine._saved_history_snapshot = None
 
-        engine.process_turn_f_stage(turn)
-        logger.info("[CA_v5] post_llm_call: process_turn_f_stage called for turn %d", turn)
+        engine.process_turn_f_stage(turn, fin_seq=seq)
+        logger.info("[CA_v5] post_llm_call: process_turn_f_stage called for turn %d fin_seq %d", turn, seq)
 
         # OV 话题摘要提交（fire-and-forget）
         if self._pending_ov_submit is not None and Config.OV_ENABLED:
@@ -1168,9 +760,9 @@ class CAContextAssemblerPlugin:
                 user_text = ""
                 fct_text = ""
                 for row in rows:
-                    seq, role, _, _, content, Fct, _ = row
+                    seq, role, _, _, elm_text, Fct, _ = row
                     if role == "user":
-                        user_text = content or ""
+                        user_text = elm_text or ""
                     if role == "assistant" and Fct:
                         fct_text = Fct
 
@@ -1209,7 +801,9 @@ class CAContextAssemblerPlugin:
             ts = int(time.time())
             filename = f"topic_{topic_id}_{ts}.md"
             target_uri = (
-                Config.OV_TOPIC_DIR_PREFIX.replace("{ov_user}", Config.OV_USER)
+                Config.OV_TOPIC_DIR_PREFIX
+                .replace("{ov_user}", Config.OV_USER)
+                .replace("{ov_session}", session_id)
             )
             # to 为目标目录，文件名为 temp 文件名。资源最终路径为 target_uri/filename
 
@@ -1314,7 +908,7 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
         # 后台轮：user 行 Fct=Elm（Elm 拷贝），Hdl=Elm[:100]
         write_turn_v5(
             engine.store, session_id, turn, seq=0,
-            role='user', content=user_message,
+            role='user', elm_text=user_message,
             fct_text=user_message,
             hdl_text=user_message[:100],
             biz_category='bg_review',
@@ -1325,7 +919,7 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
 
     write_turn_v5(
         engine.store, session_id, turn, seq=0,
-        role='user', content=user_message,
+        role='user', elm_text=user_message,
         fct_text=user_message,
         hdl_text=user_message[:100],
         biz_category=None,

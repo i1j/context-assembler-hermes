@@ -21,28 +21,28 @@ def v5_turn_stream(v5_store):
     s = v5_store
     # turn 0
     write_turn_v5(
-        s, "test", 0, 0, role="user", content="你好",
+        s, "test", 0, 0, role="user", elm_text="你好",
         fct_text='{"core_change":"开始讨论了","new_materials":["问候"]}',
     )
     write_turn_v5(
-        s, "test", 0, 1, role="assistant", content="",
+        s, "test", 0, 1, role="assistant", elm_text="",
         tool_calls_json='[{"id":"c0","function":{"name":"test","arguments":{}}}]',
     )
     write_turn_v5(
-        s, "test", 0, 2, role="tool", content="ok", tool_call_id="c0",
+        s, "test", 0, 2, role="tool", elm_text="ok", tool_call_id="c0",
         fct_text='{"core_change":"工具执行成功","new_materials":["结果 ok"]}',
     )
     # turn 1
     write_turn_v5(
-        s, "test", 1, 0, role="user", content="继续",
+        s, "test", 1, 0, role="user", elm_text="继续",
         fct_text='{"core_change":"用户请求继续","new_materials":["追问"]}',
     )
     write_turn_v5(
-        s, "test", 1, 1, role="assistant", content="",
+        s, "test", 1, 1, role="assistant", elm_text="",
         tool_calls_json='[{"id":"c1","function":{"name":"terminal","arguments":{"cmd":"ls"}}}]',
     )
     write_turn_v5(
-        s, "test", 1, 2, role="tool", content="file1.txt", tool_call_id="c1",
+        s, "test", 1, 2, role="tool", elm_text="file1.txt", tool_call_id="c1",
         fct_text='{"core_change":"列出文件","new_materials":["file1.txt"]}',
     )
     yield s

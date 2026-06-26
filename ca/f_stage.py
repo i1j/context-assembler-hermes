@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .config import ASSEMBLE_OK, ASSEMBLE_PENDING_BACKFILL, Config
 from .post_process import clean_increment, parse_v1_markdown_xml
 from .prompts import FCT_GENERATION_PROMPT
-from .store import format_previous_summary_for_prompt, read_turn_elm_rows, read_prev_fct
+from .store import format_previous_summary_for_prompt, read_incremental_elm, read_prev_fct
 
 logger = logging.getLogger(__name__)
 
@@ -47,19 +47,22 @@ class FStageMixin:
       self._task_lock     — threading.Lock
     """
 
-    def _run_f_stage(self, session_id: str, turn_index: int) -> None:
+    def _run_f_stage(self, session_id: str, turn_index: int, fin_seq: int) -> None:
         """F-stage 核心：仅 LLM 路径。
+
+        基于增量 Elm 输入（user 行 + 上次 fin 之后到本次 fin 的内容），
+        为指定 fin 行 (turn, fin_seq) 生成 Fct/Hdl。
 
         bg_review 分支已移除——代码级摘要已在 E-stage 的 _on_post_tool_call_v5 中完成。
         """
         start = time.monotonic()
-        logger.info("[CA] _run_f_stage: START turn %d (LLM path)", turn_index)
+        logger.info("[CA] _run_f_stage: START turn %d fin_seq %d (LLM path)", turn_index, fin_seq)
         dialogue_ok = False
 
-        # ── 从 DB 读一轮 Elm ──
-        rows = read_turn_elm_rows(self.store, session_id, turn_index)
+        # ── 从 DB 读增量 Elm（user + 上次 fin 之后到 fin_seq 之间的内容） ──
+        rows = read_incremental_elm(self.store, session_id, turn_index, fin_seq)
         if not rows:
-            logger.warning("[CA] _run_f_stage turn %d: no Elm rows found, skipping", turn_index)
+            logger.warning("[CA] _run_f_stage turn %d fin_seq %d: no Elm rows found, skipping", turn_index, fin_seq)
             return
 
         parts: List[str] = []
@@ -76,21 +79,21 @@ class FStageMixin:
         prev_fct = read_prev_fct(self.store, session_id, turn_index)
 
         try:
-            logger.info("[CA] _run_f_stage turn %d: calling LLM", turn_index)
+            logger.info("[CA] _run_f_stage turn %d fin_seq %d: calling LLM", turn_index, fin_seq)
             try:
-                response_text, finish_reason = self._call_llm_for_fct(prev_fct, elm_text)
+                response_text, finish_reason = self._call_llm_for_fct(prev_fct, elm_text, turn_index)
             except FctTruncatedException as e:
                 response_text = e.response_text
                 finish_reason = "length"
 
             # 截断检测
             _has_stage_tag = "<stage_tag>" in response_text
-            if finish_reason == "length" or (_has_stage_tag and not response_text.strip().endswith("</core_change>")):
-                logger.warning("[CA-METRIC] ca.fct.truncated_fallback: turn=%d, finish_reason=%s, len=%d",
-                               turn_index, finish_reason, len(response_text))
+            _ends_with_close = response_text.strip().endswith("</core_change>") or response_text.strip().endswith("}")
+            if finish_reason == "length" or (_has_stage_tag and not _ends_with_close):
+                logger.warning("[CA-METRIC] ca.fct.truncated_fallback: turn=%d fin_seq=%d, finish_reason=%s, len=%d",
+                               turn_index, fin_seq, finish_reason, len(response_text))
                 with self.stats._lock:
                     self.stats.truncated_fallback += 1
-                # 截断前 partial 输出比硬编码「本轮无新内容」更有信息量
                 partial = (response_text or "").strip()
                 truncated_cleaned = {
                     "changes": [],
@@ -103,14 +106,14 @@ class FStageMixin:
                 }
                 fct_str = json.dumps(truncated_cleaned, ensure_ascii=False)
                 hdl_text = (user_elm or "")[:150]
-                self._update_fct_v5(session_id, turn_index, fct_str, hdl_text)
-                logger.info("[CA] _run_f_stage turn %d: truncated, saved as pending backfill", turn_index)
+                self._update_fct_v5(session_id, turn_index, fin_seq, fct_str, hdl_text)
+                logger.info("[CA] _run_f_stage turn %d fin_seq %d: truncated, saved as pending backfill", turn_index, fin_seq)
                 return
 
             # LLM 完全失败（所有重试均返回 error）
             if finish_reason == "error":
-                logger.error("[CA-METRIC] ca.fct.all_retries_failed: turn=%d, len=%d",
-                             turn_index, len(response_text))
+                logger.error("[CA-METRIC] ca.fct.all_retries_failed: turn=%d fin_seq=%d, len=%d",
+                             turn_index, fin_seq, len(response_text))
                 with self.stats._lock:
                     self.stats.truncated_fallback += 1
                 fallback = json.dumps({
@@ -121,22 +124,21 @@ class FStageMixin:
                     "consensus": [], "todo": [],
                 }, ensure_ascii=False)
                 hdl = (user_elm or "本轮无新内容")[:100]
-                self._update_fct_v5(session_id, turn_index, fallback, hdl)
-                logger.info("[CA] _run_f_stage turn %d: error, saved fallback", turn_index)
+                self._update_fct_v5(session_id, turn_index, fin_seq, fallback, hdl)
+                logger.info("[CA] _run_f_stage turn %d fin_seq %d: error, saved fallback", turn_index, fin_seq)
                 return
 
             fct_dict, parser_hdl, _ = parse_v1_markdown_xml(response_text)
             if not parser_hdl:
-                logger.warning("[CA-METRIC] ca.hdl.skipped_empty: turn=%d", turn_index)
+                logger.warning("[CA-METRIC] ca.hdl.skipped_empty: turn=%d fin_seq=%d", turn_index, fin_seq)
                 with self.stats._lock:
                     self.stats.skipped_empty += 1
             cleaned = clean_increment(fct_dict)
             cleaned["_assemble_status"] = ASSEMBLE_OK
             dialogue_ok = True
 
-            # LLM 产物的写覆盖
             fct_str = json.dumps(cleaned, ensure_ascii=False)
-            hdl_text = self._extract_hdl(cleaned)
+            hdl_text = self._extract_hdl(cleaned, turn_index)
             try:
                 fct_emb = self.embed_client.embed(fct_str)
                 hdl_emb = self.embed_client.embed(hdl_text)
@@ -144,11 +146,11 @@ class FStageMixin:
                 fct_emb = None
                 hdl_emb = None
 
-            self._update_fct_v5(session_id, turn_index, fct_str, hdl_text)
+            self._update_fct_v5(session_id, turn_index, fin_seq, fct_str, hdl_text)
             self.cache.add_turn(turn_index, hdl_text, fct_str, hdl_emb, fct_emb)
 
         except Exception as e:
-            logger.error("F-stage crash turn %d: %s", turn_index, e, exc_info=True)
+            logger.error("F-stage crash turn %d fin_seq %d: %s", turn_index, fin_seq, e, exc_info=True)
             fallback = json.dumps({
                 "changes": [],
                 "core_change": user_elm or "本轮无新内容",
@@ -157,16 +159,16 @@ class FStageMixin:
                 "consensus": [], "todo": [],
             }, ensure_ascii=False)
             hdl = (user_elm or "本轮无新内容")[:100]
-            self._update_fct_v5(session_id, turn_index, fallback, hdl)
+            self._update_fct_v5(session_id, turn_index, fin_seq, fallback, hdl)
             self.cache.add_turn(turn_index, hdl, fallback, None, None)
 
         finally:
             with self._task_lock:
-                self._pending_tasks.pop(turn_index, None)
+                self._pending_tasks.pop((turn_index, fin_seq), None)
             elapsed = time.monotonic() - start
-            logger.info("[CA] _run_f_stage: FINISH turn %d in %.1fs (dialogue_ok=%s)",
-                       turn_index, elapsed, dialogue_ok)
-    def _call_llm_for_fct(self, prev_fct, elm_text) -> Tuple[str, str]:
+            logger.info("[CA] _run_f_stage: FINISH turn %d fin_seq %d in %.1fs (dialogue_ok=%s)",
+                       turn_index, fin_seq, elapsed, dialogue_ok)
+    def _call_llm_for_fct(self, prev_fct, elm_text, turn_index: int) -> Tuple[str, str]:
         """返回 (response_text, finish_reason)。所有重试均失败时返回 ("", "error")。"""
         import urllib.request
         llm_start = time.monotonic()
@@ -206,7 +208,7 @@ class FStageMixin:
                 time.sleep(2 ** attempt)
 
         elapsed_ms = int((time.monotonic() - llm_start) * 1000)
-        logger.warning("[CA-METRIC] ca.fct.latency_ms: turn=%d, ms=%d", self._turn_counter, elapsed_ms)
+        logger.warning("[CA-METRIC] ca.fct.latency_ms: turn=%d, ms=%d", turn_index, elapsed_ms)
         with self.stats._lock:
             self.stats.fct_latency_ms += elapsed_ms
 
@@ -217,7 +219,7 @@ class FStageMixin:
 
         return (response_text, finish_reason)
 
-    def _extract_hdl(self, fct_dict) -> str:
+    def _extract_hdl(self, fct_dict, turn_index: int) -> str:
         """从 fct_dict 提取 Hdl 文本。"""
         from .post_process import _safe_truncate
         changes = fct_dict.get("changes", [])
@@ -234,7 +236,14 @@ class FStageMixin:
                 if _first_low < len(core):
                     core = core[:_first_low].rstrip()
         if not core or core in ("无", "本轮无新内容"):
-            logger.warning("[CA-METRIC] ca.hdl.skipped_empty: turn=%d", self._turn_counter)
+            # fallback: try first consensus/new_materials item
+            for _field in ("consensus", "new_materials"):
+                _items = fct_dict.get(_field, [])
+                if _items and _items[0].strip() not in ("", "无新增", "本轮无", "- 无新增", "- 本轮无"):
+                    _safe_truncated = _safe_truncate(_items[0], 100)
+                    if _safe_truncated:
+                        return _safe_truncated
+            logger.warning("[CA-METRIC] ca.hdl.skipped_empty: turn=%d", turn_index)
             with self.stats._lock:
                 self.stats.skipped_empty += 1
             return "无"

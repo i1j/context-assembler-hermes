@@ -54,10 +54,10 @@ class TestDebugDumpGeneration:
 
         # 准备 DB 数据
         write_turn_v5(ca_engine.store, "test", 2, 1,
-                      role="assistant", content="orig",
+                      role="assistant", elm_text="orig",
                       fct_text="工具组：测试")
         write_turn_v5(ca_engine.store, "test", 2, 2,
-                      role="tool", content="result",
+                      role="tool", elm_text="result",
                       fct_text="成功")
 
         # 启用 debug dump
@@ -97,7 +97,7 @@ class TestDebugDumpGeneration:
         from ca.store import write_turn_v5
 
         write_turn_v5(ca_engine.store, "test", 1, 2,
-                      role="tool", content="old", fct_text="cached_fct")
+                      role="tool", elm_text="old", fct_text="cached_fct")
 
         tmp = tempfile.mkdtemp()
         monkeypatch.setenv("CA_DEBUG_DUMP", tmp)

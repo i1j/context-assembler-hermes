@@ -373,4 +373,4 @@ class TestGenerateGroupSummary:
 
     def test_truncated(self):
         result = ToolSummarizer.generate_group_summary(thought="a" * 200)
-        assert len(result) <= 110
+        assert len(result) <= 160  # 软目标 150 字

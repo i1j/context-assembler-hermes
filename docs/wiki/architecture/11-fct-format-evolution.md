@@ -42,13 +42,13 @@ Fct（单轮摘要）需要结构化表示当前轮相对于历史上下文的�
 
 ```python
 PAIR_PATTERN = re.compile(
-    r'<stage_tag>\s*(.*?)\s*</stage_tag>\s*'
+    r'<stage_tag>\s*【([^】]+)】\s*</stage_tag>\s*'
     r'<core_change>\s*(.*?)\s*</core_change>',
-    re.DOTALL
+    re.DOTALL | re.IGNORECASE
 )
 ```
 
-**VALID_STATES**（有效 `stage_tag` 值集合）：`已实施`, `评估中`, `已决`, `已验证`, `已回退`, `标记中`。
+**VALID_STATES**（有效 `stage_tag` 值集合）：`已实施`, `计划`, `探讨`, `已取消`。
 
 **零对输出截断检测**：当 LLM 输出的 changes 列表为空时，特殊标记"本对话轮未发现变更"。
 

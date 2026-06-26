@@ -1,5 +1,18 @@
 __pycache__/
 *.pyc
+*.pyo
+*.db
+*.db-wal
+*.db-shm
+*.bak
+*.backup
+.env
+.venv/
+venv/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
 .codegraph/
 .benchmarks/
 
@@ -11,5 +24,4 @@ __pycache__/
 working_copy.db
 
 # graphify cache (regeneratable)
-graphify-out/cache/
 graphify-out/cache/

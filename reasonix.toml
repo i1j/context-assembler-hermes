@@ -1,0 +1,2 @@
+[permissions]
+allow = ["Bash(cd /workspace && git log --oneline -5 2>/dev/null || echo \"没有提交历史\")"]

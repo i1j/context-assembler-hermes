@@ -3,11 +3,11 @@ title: CA-OV 话题提交
 slug: ca-ov-topic-submit
 category: architecture
 version_introduced: v5.5
-status: 已移除（v5.10 清理，`_fire_ov_submit` 已从 `lstage.py` 删除）
+status: 已迁移到插件层（功能仍活跃，`_fire_ov_submit` 在 v5.10 从 `lstage.py` 迁至 `plugins/ca_assembler/__init__.py`）
 decisions: ["ca-ov-topic-submit", "topic-grade-manager"]
 depends_on: ["topic-segmentation", "topic-grade-switch"]
 updated: 2026-06-23
-source_files: ["topic_manager.py"]
+source_files: ["plugins/ca_assembler/__init__.py", "topic_manager.py"]
 ---
 
 ## 问题

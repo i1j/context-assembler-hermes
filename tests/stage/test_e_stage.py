@@ -355,10 +355,10 @@ class TestRowImmutability:
         """B1: 一行写入后，其他 Hook 不应意外修改 role"""
         from ca.store import write_turn_v5, read_turn_elm_rows
         write_turn_v5(ca_engine.store, "test", 0, 0,
-                      role="user", content="原始内容")
+                      role="user", elm_text="原始内容")
         # 不同 Hook 用同一 (turn,seq) 写不同 role
         write_turn_v5(ca_engine.store, "test", 0, 0,
-                      role="assistant", content="新内容",
+                      role="assistant", elm_text="新内容",
                       fct_text='{"core_change":"new"}')
         rows = read_turn_elm_rows(ca_engine.store, "test", 0)
         # INSERT OR REPLACE 会覆盖整行，所以 role 可以被改
@@ -369,10 +369,10 @@ class TestRowImmutability:
         """B2: Fct 可以在写入后被更新"""
         from ca.store import write_turn_v5, update_fin_fct_v5
         write_turn_v5(ca_engine.store, "test", 0, 1,
-                      role="assistant", content="回复",
+                      role="assistant", elm_text="回复",
                       finish_reason="stop")
         # F-stage 写 Fct
-        update_fin_fct_v5(ca_engine.store, "test", 0,
+        update_fin_fct_v5(ca_engine.store, "test", 0, 1,
                           '{"core_change":"F-stage 摘要"}',
                           "摘要")
         from ca.store import read_fct_v5
@@ -426,7 +426,7 @@ class TestColumnIntegrityV5:
         )
         # 读 tool 占位行 (seq=2)
         cur = ca_engine.store.conn.execute(
-            "SELECT tool_name, status, duration_ms, Fct, Hdl, content FROM turn_stream "
+            "SELECT tool_name, status, duration_ms, Fct, Hdl, Elm FROM turn_stream "
             "WHERE session_id=? AND turn=? AND seq=?",
             ("test", 0, 2),
         )
@@ -438,7 +438,7 @@ class TestColumnIntegrityV5:
         assert row[2] is None, f"duration_ms should be None for placeholder: {row[2]!r}"
         # 占位行 Fct/Hdl 通过 ToolSummarizer 在 post_tool_call 时写入
         # 非占位写的阶段（占位行不含事前摘要），Fct 由 ToolSummarizer 自动生成
-        assert row[5] == "", f"content should be empty for placeholder: {row[5]!r}"
+        assert row[5] == "", f"Elm should be empty for placeholder: {row[5]!r}"
 
     def test_post_tool_row_filled_columns(self, ca_engine):
         """post_tool_call 回填后：tool_name/status/duration_ms 正确"""
@@ -454,7 +454,7 @@ class TestColumnIntegrityV5:
             result='{"files":["a.txt"]}', status="ok", duration_ms=42,
         )
         cur = ca_engine.store.conn.execute(
-            "SELECT tool_name, status, duration_ms, content, Fct FROM turn_stream "
+            "SELECT tool_name, status, duration_ms, Elm, Fct FROM turn_stream "
             "WHERE session_id=? AND turn=? AND seq=?",
             ("test", 0, 2),
         )
@@ -463,7 +463,7 @@ class TestColumnIntegrityV5:
         assert row[0] == "read", f"tool_name: {row[0]!r}"
         assert row[1] == "ok", f"status: {row[1]!r}"
         assert row[2] == 42, f"duration_ms: {row[2]!r}"
-        assert "a.txt" in row[3], f"content should contain result: {row[3][:50]}"
+        assert "a.txt" in row[3], f"Elm should contain result: {row[3][:50]}"
         # Fct 已由 ToolSummarizer 在 post_tool_call 时自动写入
         # 验证格式含 tool_name/result_summary
         assert isinstance(row[4], str) and len(row[4]) > 0, \
@@ -505,10 +505,10 @@ class TestUpdateFctV5:
         from ca.store import write_turn_v5, read_fct_v5
         # 写 assistant fin 行（role=assistant + finish_reason=stop）
         write_turn_v5(ca_engine.store, "test", 0, 1,
-                      role="assistant", content="回复",
+                      role="assistant", elm_text="回复",
                       finish_reason="stop")
         # 更新 Fct — update_fin_fct_v5 找 role=assistant AND finish_reason=stop
-        ca_engine._update_fct_v5("test", 0, '{"core_change":"测试"}', "测试")
+        ca_engine._update_fct_v5("test", 0, 1, '{"core_change":"测试"}', "测试")
         result = read_fct_v5(ca_engine.store, "test", 0, 1)
         assert "core_change" in result, f"Expected core_change in Fct, got {result!r}"
         hdl = ca_engine.store.conn.execute(
@@ -519,6 +519,6 @@ class TestUpdateFctV5:
 
     def test_updates_empty_turn_safely(self, ca_engine):
         """未写入的 turn 调用 update_fct_v5 不抛异常"""
-        result = ca_engine._update_fct_v5("test", 999,
+        result = ca_engine._update_fct_v5("test", 999, 1,
                                            '{"core_change":"x"}', "x")
         assert result is True  # UPDATE 0 rows 不影响, True 表示无 SQL 错误

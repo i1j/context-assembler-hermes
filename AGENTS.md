@@ -114,7 +114,7 @@ user/fin 不降级，直接取话题等级（ACT→Elm原文保留, REL→Fct完
 
 **尾部保护区**：倒数第 2 个 user 消息之后 → 原文保留（不受 grade 影响，所有 field 保持原样）。
 
-### `_on_post_llm_call_v5` — E-stage 写 final assistant + F-stage 触发
+### `_on_post_llm_call_v5` — E-stage 写 final assistant + F-stage 触发（fin 粒度）
 
 ```python
 def _on_post_llm_call_v5(**kwargs: Any) -> None:
@@ -130,8 +130,8 @@ def _on_post_llm_call_v5(**kwargs: Any) -> None:
 
 **F-stage 触发**：
 
-- 调用 `engine.process_turn_f_stage(turn)`，传入当前 turn 编号
-- F-stage 在 daemon 线程中异步执行，从 DB 读取 Elm 生成 Fct
+- 调用 `engine.process_turn_f_stage(turn, fin_seq=seq)`，传入当前 turn 编号和 fin 行 seq
+- F-stage 在 daemon 线程中异步执行，从 DB 读取增量 Elm（user + 上次 fin 之后到本次 fin 之间的内容）生成 Fct
 
 ### `_on_post_api_request_v5` — thought Elm 写入 + tool 占位行
 
@@ -191,7 +191,7 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 | `turn`           | INTEGER | 对话轮次（1-based，对应 user 消息数）     |
 | `seq`            | INTEGER | 轮内序号（0=user, 1=thought, 2..=tool, N=assistant_fin） |
 | `role`           | TEXT    | `user` / `assistant` / `tool`            |
-| `content`        | TEXT    | Elm（原始消息文本）                        |
+| `Elm`         | TEXT    | Elm（原始消息文本）                        |
 | `tool_name`      | TEXT    | 工具名（仅 tool 行）                       |
 | `tool_call_id`   | TEXT    | 工具调用 ID（仅 tool 行）                  |
 | `args_json`      | TEXT    | 工具参数 JSON（仅 tool 行）                |
@@ -233,9 +233,9 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 | ----------------------------- | -------------------------- | ------------------------------------------------------------------------------ |
 | `CA_EMBED_BACKEND`          | `ollama`                 | 嵌入后端                                                                       |
 | `CA_EMBED_MODEL`            | `qwen3-embedding:0.6b`   | 嵌入模型                                                                       |
-| `CA_EMBED_ENDPOINT`         | `http://localhost:11439` | 嵌入服务端点                                                                   |
+| `CA_EMBED_ENDPOINT`         | `http://127.0.0.1:11435` | 嵌入服务端点                                                                   |
 | `CA_LLM_MODEL`              | `qwen3-4b-instruct`      | Fct 摘要生成模型                                                                |
-| `CA_LLM_ENDPOINT`           | `http://localhost:11440` | LLM 服务端点                                                                   |
+| `CA_LLM_ENDPOINT`           | `http://localhost:11435` | LLM 服务端点                                                                   |
 | `CA_EMBED_TIMEOUT`          | 30                         | 嵌入超时（秒）                                                                 |
 | `CA_LLM_TIMEOUT`            | 180                        | LLM 超时（秒）                                                                 |
 | `CA_CONTEXT_LENGTH`         | 50000                      | 上下文 Token 预算上限                                                          |

@@ -418,26 +418,17 @@ class ToolSummarizer:
         thought = tool_call_msg.get("content", "")
 
         # 检查结果 - 从 JSON 提取 bytes_written
-        output = ""
-        byte_count = None
-        for resp in tool_responses:
-            c = resp.get("content", "")
-            if c:
-                output = str(c)
-                try:
-                    data = json.loads(output)
-                    byte_count = data.get("bytes_written")
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                break
+        data = self._parse_json_response(tool_responses)
+        byte_count = data.get("bytes_written") if data else None
 
         path_short = self._sanitize_path(path)
         if byte_count is not None:
             result_summary = f"已写入: {path_short} ({byte_count} 字节)"
-        elif output:
-            result_summary = f"已写入: {path_short}"
         else:
             result_summary = f"已写入: {path_short}"
+
+        # 注：写文件 always succ — 响应里如果不是 JSON 或有错误，知道文件名就够诊了
+        # 另外两个分支(elif output / else) 内容完全一致，已合并
 
         l1 = {
             "tool_name": "write_file",
@@ -459,20 +450,21 @@ class ToolSummarizer:
         replace_all = args.get("replace_all", False)
         thought = tool_call_msg.get("content", "")
 
-        # 检查结果
-        output = ""
-        for resp in tool_responses:
-            c = resp.get("content", "")
-            if c:
-                output = str(c)[:200]
-                break
+        # 检查结果 — 解析 JSON 提取 files_modified 数和 success 状态
+        data = self._parse_json_response(tool_responses)
+        success = data.get("success") if data else None
+        files_modified = data.get("files_modified") if data else None
 
         path_short = self._sanitize_path(path)
-        if output and "success" in output.lower():
+        if success is False:
+            result_summary = f"patch failed: {path_short}"
+        elif files_modified:
+            fm_count = len(files_modified)
+            flag = " (replace_all)" if replace_all else ""
+            result_summary = f"patch: {path_short} ({fm_count} files){flag}"
+        else:
             flag = " (replace_all)" if replace_all else ""
             result_summary = f"patch: {path_short}{flag}"
-        else:
-            result_summary = output or f"patch: {path_short}"
 
         l1 = {
             "tool_name": "patch",
@@ -526,17 +518,21 @@ class ToolSummarizer:
             except (json.JSONDecodeError, TypeError):
                 continue
 
-        # result_summary = Elm 全量（文件原文），冗余字段不重复
+        # result_summary = Elm 头尾截断摘要（文件原文太长时保留开头+结尾 ~200 字）
         if error:
             result_summary = error
             l1_error = error
         else:
-            result_summary = result_content if result_content else "(empty response)"
+            raw = result_content if result_content else "(empty response)"
+            # head_tail_truncate：保留文件开头(imports/签名) + 结尾(最后函数/类)
+            # 比对 _sanitize_summary_text 更适合代码文件的信息密度
+            s = str(raw).replace("/home/i1j", "~")
+            result_summary = ToolSummarizer._head_tail_truncate(s, head_ratio=0.6, max_len=200)
             l1_error = None
 
         l1 = {
             "tool_name": "read_file",
-            "tool_args": args,
+            "tool_args": self._clean_tool_args("read_file", args),
             "result_summary": result_summary,
             "total_lines": total_lines,
             "error": l1_error,
@@ -579,7 +575,7 @@ class ToolSummarizer:
                 files = data.get("files") or data.get("matches", [])
                 if isinstance(files, list):
                     all_files = [
-                        f.get("path", str(f)) if isinstance(f, dict) else str(f)
+                        self._sanitize_path(f.get("path", str(f))) if isinstance(f, dict) else self._sanitize_path(str(f))
                         for f in files
                     ]
                     matches = all_files[:3]
@@ -822,32 +818,26 @@ class ToolSummarizer:
 
         key_fields = self._pick_key_fields(args, ["action", "name", "file_path", "category"])
         error = None
-
-        output = ""
-        for resp in tool_responses:
-            c = resp.get("content", "")
-            if c:
-                output = str(c)
-                break
-
         message_content = ""
-        if isinstance(output, str) and output and output[0] == "{":
-            try:
-                data = json.loads(output)
-                if data.get("success") is False:
-                    error = data.get("error", "未知错误")
-                elif "error" in data:
-                    error = data["error"]
-                else:
-                    # success=True → 提取 message 字段
-                    msg = data.get("message", "")
-                    if msg:
-                        message_content = msg
-            except (json.JSONDecodeError, TypeError):
-                pass
 
-        if not error and "失败" in output:
-            error = output[:120]
+        data = self._parse_json_response(tool_responses)
+        if data:
+            if data.get("success") is False:
+                error = data.get("error", "未知错误")
+            elif "error" in data:
+                error = data["error"]
+            else:
+                msg = data.get("message", "")
+                if msg:
+                    message_content = msg
+
+        if not error:
+            # fallback: 无法解析 JSON 或 JSON 中无 error 时检查原始响应文本
+            for resp in tool_responses:
+                c = resp.get("content", "")
+                if isinstance(c, str) and "失败" in c:
+                    error = c[:120]
+                    break
 
         key_str = ", ".join(f"{k}={v}" for k, v in key_fields.items())
         if error:
@@ -859,7 +849,7 @@ class ToolSummarizer:
 
         l1 = {
             "tool_name": "skill_manage",
-            "tool_args": args,
+            "tool_args": self._clean_tool_args("skill_manage", args),
             "result_summary": result_summary,
             "error": error,
             "implicit_knowledge": [],
@@ -884,20 +874,9 @@ class ToolSummarizer:
         content_preview = str(args.get("content", ""))[:80]
 
         error = None
-        output = ""
-        for resp in tool_responses:
-            c = resp.get("content", "")
-            if c:
-                output = str(c)
-                break
-
-        if isinstance(output, str) and output and output[0] == "{":
-            try:
-                data = json.loads(output)
-                if data.get("success") is False:
-                    error = data.get("error", "未知错误")
-            except (json.JSONDecodeError, TypeError):
-                pass
+        data = self._parse_json_response(tool_responses)
+        if data and data.get("success") is False:
+            error = data.get("error", "未知错误")
 
         key_str = ", ".join(f"{k}={v}" for k, v in key_fields.items())
         if error:
@@ -905,7 +884,7 @@ class ToolSummarizer:
         elif content_preview:
             result_summary = f"{action} {target}: {content_preview}"
         else:
-            result_summary = output[:300] or f"{action} {target} (no output)"
+            result_summary = f"{action} {target} (no output)"
 
         l1 = {
             "tool_name": "memory",
@@ -1054,7 +1033,8 @@ class ToolSummarizer:
         if error:
             result_summary = "失败"
         else:
-            for key in ["result", "summary", "message", "conclusion", "output"]:
+            # 按配置顺序选择 P0 字段（配置即唯一真源，不用硬编码覆盖）
+            for key in priority["p0"]:
                 if key in p0 and p0[key]:
                     raw = p0[key]
                     # 确保值为字符串，过滤 raw JSON dict/list
@@ -1063,7 +1043,7 @@ class ToolSummarizer:
                     result_summary = self._sanitize_summary_text(raw)
                     break
             if not result_summary:
-                for key in ["args", "parameters", "input", "metadata", "context"]:
+                for key in priority["p1"]:  # 按配置顺序选择 P1 字段
                     if key in p1 and p1[key]:
                         raw = p1[key]
                         if isinstance(raw, (dict, list)):
@@ -1072,6 +1052,10 @@ class ToolSummarizer:
                         break
             if not result_summary and vip.get("status"):
                 result_summary = self._sanitize_summary_text(vip["status"])
+
+        # 最终安全截断：不管 result_summary 来自哪条路径，超过 300 字就截掉
+        if result_summary and len(result_summary) > 300:
+            result_summary = _safe_truncate(result_summary, 300)
 
         l1 = {
             "tool_name": tool_name,
@@ -1111,6 +1095,20 @@ class ToolSummarizer:
         if tail_len < 0:
             return text[:max_len] + "…"
         return text[:head_len] + "…" + text[-tail_len:]
+
+    @staticmethod
+    def _parse_json_response(responses: List[Dict]) -> Optional[Dict]:
+        """从 tool_responses 中解析第一个可用的 JSON dict 响应。返回 None 表示无解析结果。"""
+        for resp in responses:
+            c = resp.get("content", "")
+            if isinstance(c, str) and c.startswith("{"):
+                try:
+                    data = json.loads(c)
+                    if isinstance(data, dict):
+                        return data
+                except (json.JSONDecodeError, TypeError):
+                    continue
+        return None
 
     @staticmethod
     def _sanitize_path(path_str: str, max_len: int = 120) -> str:
@@ -1179,7 +1177,7 @@ class ToolSummarizer:
     @staticmethod
     def generate_group_summary(thought: str,
                                 tool_results: List[Dict[str, Any]] = None) -> str:
-        """从 thought 提取工具组摘要（软目标 100 字，超过 100 时在句尾截断）。
+        """从 thought 提取工具组摘要（软目标 150 字，超过 150 时在句尾截断）。
 
         tool_results 参数已弃用——仅保留签名兼容历史调用。
         返回纯文本（非 JSON），直接写入 Fct 供 A-stage 注入。
@@ -1199,25 +1197,24 @@ class ToolSummarizer:
         if not text:
             return ""
 
-        # 按句尾分割后逐句累加，超过 100 字时在该句尾截断
-        import re
+        # 按句尾分割后逐句累加，超过 150 字时在该句尾截断
         sentences = re.split(r'(?<=[。！？.!?])\s*', text)
         result = ""
         for s in sentences:
             s = s.strip()
             if not s:
                 continue
-            if len(result) + len(s) > 100 and result:
-                # 超过 100 字，包含当前句后返回
+            if len(result) + len(s) > 150 and result:
+                # 超过 150 字，包含当前句后返回
                 return (result + " " + s).strip()
             if result:
                 result += " "
             result += s
         if result:
-            if len(result) > 100:
-                return _safe_truncate(result, 100)
+            if len(result) > 150:
+                return _safe_truncate(result, 150)
             return result
-        return _safe_truncate(text, 100)
+        return _safe_truncate(text, 150)
 
     @staticmethod
     def _clean_tool_args(tool_name: str, args: dict) -> dict:
@@ -1232,6 +1229,7 @@ class ToolSummarizer:
             "execute_code": {"code"},
             "write_file": {"content", "file_content"},
             "patch": {"old_string", "new_string"},
+            "skill_manage": {"file_content"},
         }
         drop = HEAVY_FIELDS.get(tool_name, set())
         if not drop:

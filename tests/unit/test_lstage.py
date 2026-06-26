@@ -50,7 +50,7 @@ class TestReset:
     def test_reset_updates_turn_counter(self, ca_engine):
         """reset 后 _turn_counter 与 DB 一致"""
         from ca.store import write_turn_v5
-        write_turn_v5(ca_engine.store, "test", 5, 0, role="user", content="u5")
+        write_turn_v5(ca_engine.store, "test", 5, 0, role="user", elm_text="u5")
         ca_engine._session_id = "test"
         ca_engine.reset()
         assert ca_engine._turn_counter == 5

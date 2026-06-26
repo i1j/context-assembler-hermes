@@ -83,15 +83,15 @@ class TestACTGrade:
     def _setup_data(self, store, turn, user_fct, thought_fct, tool_fct, fin_fct):
         from ca.store import write_turn_v5
         sid = "test"
-        write_turn_v5(store, sid, turn, 0, role="user", content="user_q",
+        write_turn_v5(store, sid, turn, 0, role="user", elm_text="user_q",
                       fct_text=user_fct)
-        write_turn_v5(store, sid, turn, 1, role="assistant", content="",
+        write_turn_v5(store, sid, turn, 1, role="assistant", elm_text="",
                       tool_calls_json='[{"id":"tc1"}]',
                       fct_text=thought_fct)
-        write_turn_v5(store, sid, turn, 2, role="tool", content="tool_r",
+        write_turn_v5(store, sid, turn, 2, role="tool", elm_text="tool_r",
                       tool_call_id="tc1",
                       fct_text=tool_fct)
-        write_turn_v5(store, sid, turn, 3, role="assistant", content="fin",
+        write_turn_v5(store, sid, turn, 3, role="assistant", elm_text="fin",
                       finish_reason="stop",
                       fct_text=fin_fct)
 
@@ -161,18 +161,18 @@ class TestRELGrade:
     def _setup_with_long_fct(self, store, turn):
         from ca.store import write_turn_v5
         write_turn_v5(store, "test", turn, 0, role="user",
-                      content="user_q",
+                      elm_text="user_q",
                       fct_text='{"core_change":"UFct"}')
-        write_turn_v5(store, "test", turn, 1, role="assistant", content="",
+        write_turn_v5(store, "test", turn, 1, role="assistant", elm_text="",
                       tool_calls_json='[{"id":"tc1"}]',
                       fct_text='{"core_change":"思考Fct_" + "x" * 200}',
                       hdl_text='思考Hdl_' + 'x' * 50)
-        write_turn_v5(store, "test", turn, 2, role="tool", content="tool_r",
+        write_turn_v5(store, "test", turn, 2, role="tool", elm_text="tool_r",
                       tool_call_id="tc1",
                       fct_text='{"core_change":"工具Fct_" + "y" * 200}',
                       hdl_text='工具Hdl_' + 'y' * 50)
         write_turn_v5(store, "test", turn, 3, role="assistant",
-                      content="fin", finish_reason="stop",
+                      elm_text="fin", finish_reason="stop",
                       fct_text='{"core_change":"回复Fct"}')
 
     def _make_topic_mgr(self, turn_grades):
@@ -209,15 +209,15 @@ class TestRELGrade:
     def test_rel_fin_replaces_original(self, ca_engine):
         from ca.store import write_turn_v5
         write_turn_v5(ca_engine.store, "test", 1, 0, role="user",
-                      content="Q", fct_text='{}')
+                      elm_text="Q", fct_text='{}')
         write_turn_v5(ca_engine.store, "test", 1, 1, role="assistant",
-                      content="", tool_calls_json='[{"id":"tc1"}]',
+                      elm_text="", tool_calls_json='[{"id":"tc1"}]',
                       fct_text='{"core_change":"T"}')
         write_turn_v5(ca_engine.store, "test", 1, 2, role="tool",
-                      content="R", tool_call_id="tc1",
+                      elm_text="R", tool_call_id="tc1",
                       fct_text='{}')
         write_turn_v5(ca_engine.store, "test", 1, 3, role="assistant",
-                      content="", finish_reason="stop",
+                      elm_text="", finish_reason="stop",
                       fct_text='{"core_change":"REL Fin Fct"}')
         plugin = _make_plugin(ca_engine)
         mock = MagicMock()
@@ -246,15 +246,15 @@ class TestFARGrade:
     def test_thought_tool_cleared_fin_hdl(self, ca_engine):
         from ca.store import write_turn_v5
         store = ca_engine.store
-        write_turn_v5(store, "test", 1, 0, role="user", content="Q",
+        write_turn_v5(store, "test", 1, 0, role="user", elm_text="Q",
                       fct_text='{}')
-        write_turn_v5(store, "test", 1, 1, role="assistant", content="",
+        write_turn_v5(store, "test", 1, 1, role="assistant", elm_text="",
                       tool_calls_json='[{"id":"tc1"}]',
                       fct_text='{"core_change":"ThoughtFct"+ "z" * 200}')
-        write_turn_v5(store, "test", 1, 2, role="tool", content="R",
+        write_turn_v5(store, "test", 1, 2, role="tool", elm_text="R",
                       tool_call_id="tc1",
                       fct_text='{"core_change":"ToolFct"}')
-        write_turn_v5(store, "test", 1, 3, role="assistant", content="",
+        write_turn_v5(store, "test", 1, 3, role="assistant", elm_text="",
                       finish_reason="stop",
                       fct_text='{"core_change":"FinFct_long" + "x" * 200}',
                       hdl_text='FinHdl_long_' + 'z' * 50)
@@ -293,15 +293,15 @@ class TestTopicMgrNoneGuard:
     def test_no_topic_mgr_all_act(self, ca_engine):
         from ca.store import write_turn_v5
         store = ca_engine.store
-        write_turn_v5(store, "test", 1, 0, role="user", content="Q",
+        write_turn_v5(store, "test", 1, 0, role="user", elm_text="Q",
                       fct_text='{"core_change":"UFct"}')
-        write_turn_v5(store, "test", 1, 1, role="assistant", content="",
+        write_turn_v5(store, "test", 1, 1, role="assistant", elm_text="",
                       tool_calls_json='[{"id":"tc1"}]',
                       fct_text='{"core_change":"TFct"}')
-        write_turn_v5(store, "test", 1, 2, role="tool", content="R",
+        write_turn_v5(store, "test", 1, 2, role="tool", elm_text="R",
                       tool_call_id="tc1",
                       fct_text='{"core_change":"ToFct"}')
-        write_turn_v5(store, "test", 1, 3, role="assistant", content="",
+        write_turn_v5(store, "test", 1, 3, role="assistant", elm_text="",
                       finish_reason="stop",
                       fct_text='{"core_change":"FinFct"}')
 
@@ -334,7 +334,7 @@ class TestUserInvariants:
         """ACT: user 保留原文"""
         from ca.store import write_turn_v5
         write_turn_v5(ca_engine.store, "test", 1, 0, role="user",
-                      content="用户消息_ACT",
+                      elm_text="用户消息_ACT",
                       fct_text='{"core_change":"Fct_ACT"}')
         plugin = _make_plugin(ca_engine)
         mock = MagicMock()
@@ -352,7 +352,7 @@ class TestUserInvariants:
         """REL: user 被替换为 Fct（预期行为：user_fin_map REL→FCT）"""
         from ca.store import write_turn_v5
         write_turn_v5(ca_engine.store, "test", 1, 0, role="user",
-                      content="用户消息_REL",
+                      elm_text="用户消息_REL",
                       fct_text='{"core_change":"Fct_REL"}')
         plugin = _make_plugin(ca_engine)
         mock = MagicMock()
@@ -370,7 +370,7 @@ class TestUserInvariants:
         """FAR: user 被替换为 Hdl[:150]（预期行为：user_fin_map FAR→HDL）"""
         from ca.store import write_turn_v5
         write_turn_v5(ca_engine.store, "test", 1, 0, role="user",
-                      content="用户消息_FAR",
+                      elm_text="用户消息_FAR",
                       fct_text='{"core_change":"Fct_FAR_long_' + 'x' * 200 + '"}',
                       hdl_text='Hdl_FAR_long_' + 'z' * 50)
         plugin = _make_plugin(ca_engine)
@@ -392,21 +392,21 @@ class TestUserInvariants:
         from ca.store import write_turn_v5
         store = ca_engine.store
         # Turn 1（保护区外）
-        write_turn_v5(store, "test", 1, 0, role="user", content="Q1_out",
+        write_turn_v5(store, "test", 1, 0, role="user", elm_text="Q1_out",
                       fct_text='{}')
-        write_turn_v5(store, "test", 1, 1, role="assistant", content="",
+        write_turn_v5(store, "test", 1, 1, role="assistant", elm_text="",
                       finish_reason="stop",
                       fct_text='{"core_change":"Replaced"}')
         # Turn 2（保护区内）
-        write_turn_v5(store, "test", 2, 0, role="user", content="Q2_in",
+        write_turn_v5(store, "test", 2, 0, role="user", elm_text="Q2_in",
                       fct_text='{}')
-        write_turn_v5(store, "test", 2, 1, role="assistant", content="",
+        write_turn_v5(store, "test", 2, 1, role="assistant", elm_text="",
                       finish_reason="stop",
                       fct_text='{"core_change":"InTail"}')
         # Turn 3（保护区内）
-        write_turn_v5(store, "test", 3, 0, role="user", content="Q3_in",
+        write_turn_v5(store, "test", 3, 0, role="user", elm_text="Q3_in",
                       fct_text='{}')
-        write_turn_v5(store, "test", 3, 1, role="assistant", content="",
+        write_turn_v5(store, "test", 3, 1, role="assistant", elm_text="",
                       finish_reason="stop",
                       fct_text='{"core_change":"AlsoInTail"}')
 
@@ -452,18 +452,18 @@ class TestMultiTurnMixedGrades:
             3: ("U3_REL", "T3_REL", "To3_REL", "F3_REL", "F3_Hdl"),
         }.items():
             write_turn_v5(store, "test", turn, 0, role="user",
-                          content=f"Q{turn}",
+                          elm_text=f"Q{turn}",
                           fct_text=f'{{"core_change":"{ufct}"}}')
             write_turn_v5(store, "test", turn, 1, role="assistant",
-                          content="",
+                          elm_text="",
                           tool_calls_json=f'[{{"id":"tc{turn}"}}]',
                           fct_text=f'{{"core_change":"{tfct}"}}')
             write_turn_v5(store, "test", turn, 2, role="tool",
-                          content=f"R{turn}",
+                          elm_text=f"R{turn}",
                           tool_call_id=f"tc{turn}",
                           fct_text=f'{{"core_change":"{tofct}"}}')
             write_turn_v5(store, "test", turn, 3, role="assistant",
-                          content=f"Fin{turn}",
+                          elm_text=f"Fin{turn}",
                           finish_reason="stop",
                           fct_text=f'{{"core_change":"{ffct}"}}',
                           hdl_text=fhdl)
@@ -504,9 +504,9 @@ class TestEmbedFailurePipeline:
         from topic_manager import TopicGradeManager
         store = ca_engine.store
 
-        write_turn_v5(store, "test", 1, 0, role="user", content="Q1",
+        write_turn_v5(store, "test", 1, 0, role="user", elm_text="Q1",
                       fct_text='{"core_change":"U1Fct"}')
-        write_turn_v5(store, "test", 1, 1, role="assistant", content="T1",
+        write_turn_v5(store, "test", 1, 1, role="assistant", elm_text="T1",
                       finish_reason="stop",
                       fct_text='{"core_change":"F1Fct"}')
 
@@ -543,9 +543,9 @@ class TestEmbedFailurePipeline:
         """_topic_mgr = None 时 mutation 不 crash"""
         from ca.store import write_turn_v5
         write_turn_v5(ca_engine.store, "test", 1, 0, role="user",
-                      content="Q", fct_text='{}')
+                      elm_text="Q", fct_text='{}')
         write_turn_v5(ca_engine.store, "test", 1, 1, role="assistant",
-                      content="", finish_reason="stop",
+                      elm_text="", finish_reason="stop",
                       fct_text='{"core_change":"F"}')
         plugin = _make_plugin(ca_engine)
         plugin._topic_mgr = None
@@ -580,15 +580,15 @@ class TestFullPipelineRealTopicMgr:
         store = ca_engine.store
         store.session_id = "test"
 
-        write_turn_v5(store, "test", 1, 0, role="user", content="Q1",
+        write_turn_v5(store, "test", 1, 0, role="user", elm_text="Q1",
                       fct_text='{"core_change":"主题A讨论"}')
-        write_turn_v5(store, "test", 1, 1, role="assistant", content="",
+        write_turn_v5(store, "test", 1, 1, role="assistant", elm_text="",
                       tool_calls_json='[{"id":"t1"}]',
                       fct_text='{"core_change":"思路A"}')
-        write_turn_v5(store, "test", 1, 2, role="tool", content="R",
+        write_turn_v5(store, "test", 1, 2, role="tool", elm_text="R",
                       tool_call_id="t1",
                       fct_text='{"core_change":"工具结果A"}')
-        write_turn_v5(store, "test", 1, 3, role="assistant", content="",
+        write_turn_v5(store, "test", 1, 3, role="assistant", elm_text="",
                       finish_reason="stop",
                       fct_text='{"core_change":"结论A"}',
                       hdl_text="HdlA")
@@ -631,23 +631,23 @@ class TestFullPipelineRealTopicMgr:
         store.session_id = "test"
 
         # Topic 1: Python 相关（close to query → ACT）
-        write_turn_v5(store, "test", 1, 0, role="user", content="Python性能",
+        write_turn_v5(store, "test", 1, 0, role="user", elm_text="Python性能",
                       fct_text='{"core_change":"Python优化"}')
-        write_turn_v5(store, "test", 1, 1, role="assistant", content="",
+        write_turn_v5(store, "test", 1, 1, role="assistant", elm_text="",
                       finish_reason="stop",
                       fct_text='{"core_change":"Python优化建议"}',
                       hdl_text="关于")
         # Topic 2: 数据库（far from query → FAR）
-        write_turn_v5(store, "test", 2, 0, role="user", content="数据库索引",
+        write_turn_v5(store, "test", 2, 0, role="user", elm_text="数据库索引",
                       fct_text='{"core_change":"数据库设计"}')
-        write_turn_v5(store, "test", 2, 1, role="assistant", content="",
+        write_turn_v5(store, "test", 2, 1, role="assistant", elm_text="",
                       finish_reason="stop",
                       fct_text='{"core_change":"数据库建议"}',
                       hdl_text="建议")
         # Topic 3: 当前切换话题（被 grade_on_switch 强制 ACT）
-        write_turn_v5(store, "test", 3, 0, role="user", content="今天天气真好",
+        write_turn_v5(store, "test", 3, 0, role="user", elm_text="今天天气真好",
                       fct_text='{"core_change":"天气问候"}')
-        write_turn_v5(store, "test", 3, 1, role="assistant", content="",
+        write_turn_v5(store, "test", 3, 1, role="assistant", elm_text="",
                       finish_reason="stop",
                       fct_text='{"core_change":"天气回复"}',
                       hdl_text="回复")
@@ -711,11 +711,11 @@ class TestFctNullDegradation:
     def test_act_fct_null_preserves_elm(self, ca_engine):
         """ACT grade + Fct=NULL → 原文保留"""
         from ca.store import write_turn_v5
-        write_turn_v5(ca_engine.store, "test", 1, 0, role="user", content="用户原文",
+        write_turn_v5(ca_engine.store, "test", 1, 0, role="user", elm_text="用户原文",
                       fct_text='{}')
         # fin 行不写 Fct → Fct=NULL
         write_turn_v5(ca_engine.store, "test", 1, 1, role="assistant",
-                      content="原始回复", finish_reason="stop")
+                      elm_text="原始回复", finish_reason="stop")
 
         plugin = _make_plugin(ca_engine)
         mock = MagicMock()
@@ -726,18 +726,18 @@ class TestFctNullDegradation:
             ("assistant", "原始回复"),
         ])
         plugin._simple_mutation_mode_v5(conv)
-        # ACT fin → Elm（Fct=NULL → 保留 content="原始回复"）
+        # ACT fin → Elm（Fct=NULL → 保留 elm_text="原始回复"）
         assert conv[1]["content"] == "原始回复", \
             f"ACT fin with NULL Fct should preserve Elm, got: {conv[1]['content']}"
 
     def test_rel_fct_written_replaces_original(self, ca_engine):
         """REL grade + Fct 存在 → fin 被替换为 Fct"""
         from ca.store import write_turn_v5
-        write_turn_v5(ca_engine.store, "test", 1, 0, role="user", content="Q",
+        write_turn_v5(ca_engine.store, "test", 1, 0, role="user", elm_text="Q",
                       fct_text='{}')
         # fin: Fct 存在
         write_turn_v5(ca_engine.store, "test", 1, 1, role="assistant",
-                      content="原始回复", finish_reason="stop",
+                      elm_text="原始回复", finish_reason="stop",
                       fct_text='{"core_change":"REL_Fct"}')
 
         plugin = _make_plugin(ca_engine)
@@ -756,11 +756,11 @@ class TestFctNullDegradation:
     def test_far_fct_hdl_null_not_crash(self, ca_engine):
         """FAR grade + Fct=NULL + Hdl=NULL → 不崩溃，内容清空"""
         from ca.store import write_turn_v5
-        write_turn_v5(ca_engine.store, "test", 1, 0, role="user", content="Q",
+        write_turn_v5(ca_engine.store, "test", 1, 0, role="user", elm_text="Q",
                       fct_text='{}')
         # fin: Fct=NULL, Hdl=NULL
         write_turn_v5(ca_engine.store, "test", 1, 1, role="assistant",
-                      content="", finish_reason="stop")
+                      elm_text="", finish_reason="stop")
 
         plugin = _make_plugin(ca_engine)
         mock = MagicMock()
@@ -781,11 +781,11 @@ class TestFctNullDegradation:
         from ca.store import write_turn_v5
         import logging
         caplog.set_level(logging.WARNING)
-        write_turn_v5(ca_engine.store, "test", 1, 0, role="user", content="Q",
+        write_turn_v5(ca_engine.store, "test", 1, 0, role="user", elm_text="Q",
                       fct_text='{}')
         # fin: Fct=NULL（不传 fct_text）
         write_turn_v5(ca_engine.store, "test", 1, 1, role="assistant",
-                      content="原始回复原文", finish_reason="stop")
+                      elm_text="原始回复原文", finish_reason="stop")
 
         plugin = _make_plugin(ca_engine)
         mock = MagicMock()
@@ -822,16 +822,16 @@ class TestIncrementalWithRealTopicMgr:
         store.session_id = "test"
 
         # Turn 1: 初始轮 → 建立缓存
-        write_turn_v5(store, "test", 1, 0, role="user", content="你好",
+        write_turn_v5(store, "test", 1, 0, role="user", elm_text="你好",
                       fct_text='{"core_change":"问候"}')
-        write_turn_v5(store, "test", 1, 1, role="assistant", content="",
+        write_turn_v5(store, "test", 1, 1, role="assistant", elm_text="",
                       finish_reason="stop",
                       fct_text='{"core_change":"回复问候"}')
 
         # Turn 2: 同话题新增轮
-        write_turn_v5(store, "test", 2, 0, role="user", content="Python 怎么样",
+        write_turn_v5(store, "test", 2, 0, role="user", elm_text="Python 怎么样",
                       fct_text='{"core_change":"询问技术"}')
-        write_turn_v5(store, "test", 2, 1, role="assistant", content="",
+        write_turn_v5(store, "test", 2, 1, role="assistant", elm_text="",
                       finish_reason="stop",
                       fct_text='{"core_change":"技术回复"}')
 

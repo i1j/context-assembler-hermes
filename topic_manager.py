@@ -93,7 +93,7 @@ def _scan_forced_split_phrases(user_msg: str) -> bool:
     return False
 
 
-_INTERNAL_PENALTY = 0.30  # 水位满压扣减值（内部控制，不暴露）
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -293,9 +293,8 @@ class TopicGradeManager:
         """
         switch_turn = self._last_processed_turn
 
-        # 如果 topic_data 还没建好，先初始化
-        if not self._topic_data:
-            self._init_topic_data()
+        # 每次都从 _turn_to_topic 重建 _topic_data（确保新话题不漏）
+        self._init_topic_data()
 
         # 为每个旧话题计算形心（基于成员 turn 的 Fct embedding）
         self._compute_centroids()
@@ -425,9 +424,7 @@ class TopicGradeManager:
     def _apply_water_pressure(self, raw_j: float, total_tokens: int) -> float:
         """水位压力：conv_hist 总 token → 柔性扣减 Jaccard。
 
-        窗口由 TOPIC_PEAK_TOKEN 与 _INTERNAL_PENALTY 对称定位：
-          start = peak × 0.30
-          end   = peak
+        窗口由 ACCUMULATED_SPLIT_START~TOPIC_PEAK_TOKEN 定义。
 
         Args:
             raw_j: Jaccard 原始匹配值
@@ -437,8 +434,8 @@ class TopicGradeManager:
             扣减后的 effective_j
         """
         peak = Config.TOPIC_PEAK_TOKEN
-        start = int(peak * _INTERNAL_PENALTY)
-        penalty = _INTERNAL_PENALTY
+        start = Config.ACCUMULATED_SPLIT_START
+        penalty = Config.JACCARD_PENALTY_MAX
 
         if total_tokens <= start:
             return raw_j
@@ -471,7 +468,8 @@ class TopicGradeManager:
         return fin_fct or any_fct
 
     def _init_topic_data(self) -> None:
-        """根据现有 turn→topic 映射初始化 topic_data。"""
+        """根据现有 turn→topic 映射重建 topic_data（先清空，防增量遗漏）。"""
+        self._topic_data.clear()
         for turn, tid in self._turn_to_topic.items():
             if tid not in self._topic_data:
                 self._topic_data[tid] = {

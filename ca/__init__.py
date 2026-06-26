@@ -171,7 +171,7 @@ class ContextAssembler(EStageMixin, FStageMixin, LStageMixin, AStageMixin):
         self._session_id = session_id
         builder = CacheBuilder(self.store)
         self.cache: AssemblyCache = builder.build(session_id)
-        self._pending_tasks: Dict[int, threading.Thread] = {}
+        self._pending_tasks: Dict[Tuple[int, int], threading.Thread] = {}
         self._task_lock = threading.Lock()
         self._turn_counter = self._restore_turn_index()
 
@@ -179,6 +179,12 @@ class ContextAssembler(EStageMixin, FStageMixin, LStageMixin, AStageMixin):
         self._topic_tool_boost: Set[int] = set()
         self.stats = AssembleStats()
         self._original_messages: Optional[List[Dict]] = None
+
+        # v5.10 A-stage 缓存状态
+        self._A_stable_cache: Optional[List[Dict]] = None
+        self._A_cache_turns: int = 0
+        self._A_cache_is_stale: bool = False
+        self._saved_history_snapshot: Optional[List[Dict]] = None
 
         # v5.0 E-stage 属性
         self._current_turn: int = 0
@@ -205,47 +211,49 @@ class ContextAssembler(EStageMixin, FStageMixin, LStageMixin, AStageMixin):
         with self._task_lock:
             self._pending_tasks.clear()
 
-    def process_turn_f_stage(self, turn_index: int) -> int:
+    def process_turn_f_stage(self, turn_index: int, fin_seq: int) -> int:
         """F-stage 路由：LLM 摘要写入 fin 行的入口。
 
         流程：
-          1. 检查 fin 行（assistant, finish_reason='stop'）是否已有 Fct
+          1. 检查指定 fin 行（fin_seq）是否已有 Fct
              → 有则跳过 F-stage
           2. 检测 bg_review write_origin → 同步写代码级 Fct，跳过 F-stage
           3. 否则 → 启 F-stage 线程（LLM）
+
+        每条 fin 行独立触发 F-stage，互不阻塞。
         """
 
-        # ── 1. 检查 fin 行已有 Fct ──
+        # ── 1. 检查指定 fin 行已有 Fct ──
         try:
             cur = self.store.conn.execute(
                 "SELECT Fct FROM turn_stream "
-                "WHERE session_id=? AND turn=? AND role='assistant' AND finish_reason='stop'",
-                (self._session_id, turn_index),
+                "WHERE session_id=? AND turn=? AND seq=? AND role='assistant' AND finish_reason='stop'",
+                (self._session_id, turn_index, fin_seq),
             )
             row = cur.fetchone()
             if row and row[0]:
-                logger.info("[CA] process_turn_f_stage: turn %d fin row already has Fct, skipping", turn_index)
+                logger.info("[CA] process_turn_f_stage: turn %d fin_seq %d already has Fct, skipping", turn_index, fin_seq)
                 return turn_index
         except Exception:
             pass
 
         with self._task_lock:
-            if turn_index in self._pending_tasks and self._pending_tasks[turn_index].is_alive():
-                logger.info("[CA] process_turn_f_stage: turn %d already pending, returning", turn_index)
+            if (turn_index, fin_seq) in self._pending_tasks and self._pending_tasks[(turn_index, fin_seq)].is_alive():
+                logger.info("[CA] process_turn_f_stage: turn %d fin_seq %d already pending, returning", turn_index, fin_seq)
                 return turn_index
             self._turn_counter = turn_index
 
         # ── 2. 检测 bg_review → 同步写代码级 Fct ──
         _bg_review = (get_current_write_origin() == "background_review")
         if _bg_review:
-            logger.info("[CA] process_turn_f_stage: background review for turn %d, writing code-level Fct inline",
-                        turn_index)
+            logger.info("[CA] process_turn_f_stage: background review for turn %d fin_seq %d, writing code-level Fct inline",
+                        turn_index, fin_seq)
             from .store import read_turn_elm_rows
             rows = read_turn_elm_rows(self.store, self._session_id, turn_index)
             user_elm = ""
-            for seq, role, content, tool_name, tool_call_id in (rows or []):
+            for seq, role, elm_text, tool_name, tool_call_id in (rows or []):
                 if role == "user":
-                    user_elm = content or ""
+                    user_elm = elm_text or ""
                     break
             _brief = (user_elm or "")[:80].strip() or "后台审查"
             cleaned = {
@@ -253,26 +261,26 @@ class ContextAssembler(EStageMixin, FStageMixin, LStageMixin, AStageMixin):
                 "core_change": _brief,
                 "_assemble_status": ASSEMBLE_OK,
             }
-            self._update_fct_v5(self._session_id, turn_index,
+            self._update_fct_v5(self._session_id, turn_index, fin_seq,
                                json.dumps(cleaned, ensure_ascii=False), _brief)
-            logger.info("[CA] process_turn_f_stage: wrote code-level Fct for bg_review turn %d: %s",
-                        turn_index, _brief)
+            logger.info("[CA] process_turn_f_stage: wrote code-level Fct for bg_review turn %d fin_seq %d: %s",
+                        turn_index, fin_seq, _brief)
             return turn_index
 
         # ── 3. 启 F-stage 线程（LLM 路径） ──
-        logger.info("[CA] process_turn_f_stage: starting F-stage for turn %d", turn_index)
+        logger.info("[CA] process_turn_f_stage: starting F-stage for turn %d fin_seq %d", turn_index, fin_seq)
 
         thread = threading.Thread(
             target=self._run_f_stage,
-            args=(self._session_id, turn_index),
+            args=(self._session_id, turn_index, fin_seq),
             daemon=True,
-            name=f"CA-FStage-{turn_index}",
+            name=f"CA-FStage-{turn_index}-{fin_seq}",
         )
         with self._task_lock:
-            self._pending_tasks[turn_index] = thread
-        logger.info("[CA] process_turn_f_stage: starting thread CA-FStage-%d", turn_index)
+            self._pending_tasks[(turn_index, fin_seq)] = thread
+        logger.info("[CA] process_turn_f_stage: starting thread CA-FStage-%d-%d", turn_index, fin_seq)
         thread.start()
-        logger.info("[CA] process_turn_f_stage: thread CA-FStage-%d started", turn_index)
+        logger.info("[CA] process_turn_f_stage: thread CA-FStage-%d-%d started", turn_index, fin_seq)
         return turn_index
 
 

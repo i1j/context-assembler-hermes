@@ -7,7 +7,7 @@ status: 已实装
 decisions: ["topic-grade-manager", "tail-protection", "bg-review-sync", "incremental-cache"]
 depends_on: ["storage-model", "e-stage-write-protocol"]
 updated: 2026-06-23
-source_files: ["ca/a_stage.py"]
+source_files: ["ca/a_stage.py", "ca/__init__.py", "topic_manager.py"]
 ---
 
 ## 问题
@@ -28,7 +28,7 @@ A-stage 负责在 `pre_llm_call` 中将历史上下文装配为最终的 prompt 
 
 ### 选定方案
 
-核心逻辑在 `plugins/ca_assembler/__init__.py` 的 `_on_pre_llm_call_v5`（分发）和 `ca/a_stage.py` 的 `AStageMixin`（grade 委托）中按角色分队列后逐行替换：
+核心逻辑分布在 `ca/a_stage.py`（`AStageMixin._simple_mutation_mode_v5` / `_incremental_mutation`——主力，含角色队列匹配、grade 驱动三级替换、尾巴保护、增量缓存）和 `topic_manager.py`（`TopicGradeManager`，话题等级定级）中。插件层 `plugins/ca_assembler/__init__.py` 做话题检测 + 调度委托。
 
 ```
 角色队列
@@ -79,7 +79,7 @@ A-stage 负责在 `pre_llm_call` 中将历史上下文装配为最终的 prompt 
 
 - 角色队列：user/assistant/tool 三类独立队列
 - 按 role 一一对应匹配，多余的丢弃，不足的保留 Elm
-- 函数位于 `plugins/ca_assembler/__init__.py`（`_on_pre_llm_call_v5`）+ `ca/a_stage.py`（`AStageMixin._grade_topics_by_radius` 委托给 `topic_manager._grade_topics_by_radius`）
+- 函数位于 `ca/a_stage.py`（`AStageMixin._simple_mutation_mode_v5` / `_incremental_mutation`）+ `topic_manager.py`（`TopicGradeManager` 话题定级）
 - 增量缓存优化：`_A_stable_cache`（list[dict]）缓存稳定区已替换的 conv_hist 片段
 
 ## 数据验证
