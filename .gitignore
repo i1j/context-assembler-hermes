@@ -23,5 +23,5 @@ dist/
 .tmp-*
 working_copy.db
 
-# graphify cache (regeneratable)
-graphify-out/cache/
+# graphify output (regeneratable)
+graphify-out/
