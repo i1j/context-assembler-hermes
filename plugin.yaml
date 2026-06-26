@@ -1,0 +1,51 @@
+name: ca_assembler
+version: 6.0.0
+description: >
+  ContextAssembler v6.0 — Hermes 插件 + ContextEngine ABC 壳，
+  增量 Elm/Fct/Hdl 分层摘要 + topic-aware 三级替换（ACT/REL/FAR）
+  + 角色队列匹配 + E-stage 写即落盘 + 话题分割（Jaccard）
+  + F‑stage 异步补全 + CE 路压缩（手动 /compress）。
+pip_dependencies:
+  - numpy
+  - urllib3
+  - sentence-transformers
+  - pyyaml
+requires_env: []
+hooks:
+  - on_session_start
+  - on_session_end
+  - on_session_reset
+  - pre_llm_call
+  - post_llm_call
+config_schema:
+  embed_backend:
+    type: string
+    default: "ollama"
+    enum: ["ollama", "sentence-transformers", "fallback"]
+  embed_model:
+    type: string
+    default: "qwen3-embedding:0.6b"
+  embed_endpoint:
+    type: string
+    default: "http://localhost:11439"
+  llm_model:
+    type: string
+    default: "qwen3-4b-instruct"
+  llm_endpoint:
+    type: string
+    default: "http://localhost:11440"
+  context_length:
+    type: integer
+    default: 50000
+  tool_max_upgrade_k:
+    type: integer
+    default: 3
+  embed_timeout:
+    type: integer
+    default: 10
+  llm_timeout:
+    type: integer
+    default: 120
+  debug:
+    type: boolean
+    default: false

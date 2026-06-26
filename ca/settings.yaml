@@ -1,0 +1,45 @@
+# CA 插件运行时默认配置
+# 优先级：环境变量 > settings.yaml > 代码硬编码
+# 环境变量名见 ca/config.py 中各字段的 os.getenv() key
+
+# ── 嵌入服务 ──
+embed_backend: "ollama"               # ollama | sentence-transformers | fallback
+embed_model: "qwen3-embedding:0.6b"   # 与 plugin.yaml config_schema 一致
+embed_endpoint: "http://127.0.0.1:11435"
+embed_timeout: 10
+embed_max_retries: 2
+
+# ── L1 摘要 LLM ──
+llm_model: "qwen3-4b-instruct"
+llm_endpoint: "http://localhost:11435"
+llm_timeout: 120
+llm_max_retries: 2
+llm_num_predict: 24768
+l1_temperature: 0.3
+l1_max_tokens: 800
+
+# ── 上下文预算 ──
+context_length: 50000
+protect_tail_tokens: 20000       # 当前话题块 Token 保护安全阀（被 _YAML_DEFAULTS 读取为 Config 类默认值）
+
+# ── 检索升级 ──
+tool_max_upgrade_k: 3
+tool_pre_upgrade_count: 3
+tool_pre_upgrade_window: 50
+bm25_hit_threshold: 5
+
+# ── 话题分割 ──
+topic_jaccard_entry: 0.02
+topic_jaccard_chain: 0.04
+topic_radius_weight: 2.0
+topic_max_upgrade: 10
+topic_bg_level: "Far"
+topic_peak_token: 20000      # 水位满压时的 Token 值（最后防线）
+
+# ── 数据库 ──
+db_max_retry: 3
+db_busy_timeout: 3000
+db_idle_timeout: 300
+
+# ── 其他 ──
+debug: false

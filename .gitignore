@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.db-wal
+*.db-shm
+*.bak
+*.backup
+.env
+.venv/
+venv/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+.codegraph/
+.benchmarks/
+
+# Reasonix agent config (workspace tools/skills)
+.reasonix/
+
+# Temporary files
+.tmp-*
+working_copy.db
+
+# graphify cache (regeneratable)
+graphify-out/cache/
