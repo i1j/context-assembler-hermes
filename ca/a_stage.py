@@ -90,10 +90,14 @@ class AStageMixin:
 
             if role == "user":
                 row_type = "user"
-            elif role == "assistant" and not msg.get("tool_calls"):
-                row_type = "fin"
             elif role == "assistant":
-                row_type = "thought"
+                # A-stage 已 pop 所有 thought 行的 tool_calls，无法用 msg.get("tool_calls") 区分
+                # thought/fin。改为检查下一条消息是否为 tool 行。
+                next_msg = conversation_history[i + 1] if i + 1 < len(conversation_history) else None
+                if next_msg and next_msg.get("role") == "tool":
+                    row_type = "thought"
+                else:
+                    row_type = "fin"
             elif role == "tool":
                 row_type = "tool"
             else:
