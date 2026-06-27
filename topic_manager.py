@@ -219,9 +219,11 @@ class TopicGradeManager:
         grade = mgr.get_turn_grade(turn_num)
     """
 
-    def __init__(self, store: Any, embed_client: Any) -> None:
+    def __init__(self, store: Any, embed_client: Any, session_id: str = '') -> None:
         self._store = store
         self._embed_client = embed_client
+        # session_id 优先用显式参数，回退到 store.session_id（动态读取）
+        self._explicit_session_id: str = session_id
 
         # 增量话题分割：turn → topic_id
         self._turn_to_topic: Dict[int, int] = {}
@@ -482,6 +484,12 @@ class TopicGradeManager:
                 }
             self._topic_data[tid]["turns"].append(turn)
 
+    def _session_id_resolved(self) -> str:
+        """返回 _explicit_session_id（优先）或 store.session_id（动态回退）。"""
+        if self._explicit_session_id:
+            return self._explicit_session_id
+        return getattr(self._store, 'session_id', '')
+
     def _compute_centroids(self) -> None:
         """为每个 topic 计算形心。
 
@@ -501,7 +509,7 @@ class TopicGradeManager:
             vectors: List[List[float]] = []
             for turn in td.get("turns", []):
                 try:
-                    ca_rows = get_turn_ca_rows(self._store, self._store.session_id, turn)
+                    ca_rows = get_turn_ca_rows(self._store, self._session_id_resolved(), turn)
                 except (AttributeError, sqlite3.Error, TypeError) as e:
                     logger.warning("[CA] _compute_centroids: get_turn_ca_rows failed for turn %d (topic %d): %s", turn, tid, e)
                     continue

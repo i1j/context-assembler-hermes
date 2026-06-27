@@ -415,10 +415,10 @@ class CAContextAssemblerPlugin:
         self._session_id = ""
         self._context_length: int = Config.CONTEXT_LENGTH
         self._saved_history_snapshot: Optional[List[Dict]] = None
-        self._full_backup: Optional[List[Dict]] = None
         self._topic_mgr: Optional[TopicGradeManager] = None
         self._pending_ov_submit: Optional[Dict[str, Any]] = None
         self._last_topic_id: Optional[int] = None
+        self._bg_turn: bool = False  # 当前轮是否为 bg（方向 B 跳过保护）
         # A-stage 增量缓存
         self._A_stable_cache: Optional[List[Dict]] = None
         self._A_cache_turns: int = 0
@@ -463,6 +463,7 @@ class CAContextAssemblerPlugin:
         self._topic_mgr = TopicGradeManager(
             self._engine.store,
             self._engine.embed_client,
+            session_id=session_id,
         )
         logger.info("CA plugin started for session %s (model=%s context_length=%d)",
                     session_id, model or "?", self._context_length)
@@ -487,7 +488,6 @@ class CAContextAssemblerPlugin:
         self._pending_ov_submit = None
         self._last_topic_id = None
         self._saved_history_snapshot = None
-        self._full_backup = None
         self._A_stable_cache = None
         self._A_cache_turns = 0
         self._A_cache_is_stale = False
@@ -505,50 +505,7 @@ class CAContextAssemblerPlugin:
 
 
 
-    def _delete_far_thought_tool_rows(self, messages: list) -> None:
-        """从原始消息中删除 FAR 级的 thought + tool 行对，保留 fin 行。
-
-        仅由 CE compress() 路径调用（_full_backup 已设置），此时 messages
-        是原始列表引用，可做原地 delete 操作（messages[:]=filtered）。
-        fin 行（assistant, finish_reason='stop'）保留，A-stage 后续替换为 Hdl[:150]。
-        user 行保留到 content 替换阶段处理。
-        """
-        # tail 保护区：最后 2 个 user
-        tail_boundary = 0
-        _user_count = 0
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "user":
-                _user_count += 1
-                if _user_count >= 2:
-                    tail_boundary = i
-                    break
-
-        drop_indices: set = set()
-        current_turn = -1
-        for i, msg in enumerate(messages):
-            role = msg.get("role", "")
-            if role == "system":
-                continue
-            if role == "user":
-                current_turn += 1
-            if i >= tail_boundary:
-                continue
-            # fin 行保留（A-stage 替换为 Hdl[:150]）
-            if role == "assistant" and msg.get("finish_reason") == "stop":
-                continue
-            if role not in ("assistant", "tool"):
-                continue
-            # FAR thought/tool → 删除
-            if self._topic_mgr:
-                grade = self._topic_mgr.get_turn_grade(current_turn + 1)
-                if grade == TopicGrade.FAR:
-                    drop_indices.add(i)
-
-        if not drop_indices:
-            return
-        messages[:] = [m for i, m in enumerate(messages) if i not in drop_indices]
-
-    # ═════════════════════════════════════════════════════
+    # ── Hooks ──
     # v5.0 — A-stage 替换 + E-stage final 写入
     # ═════════════════════════════════════════════════════
 
@@ -580,11 +537,7 @@ class CAContextAssemblerPlugin:
         if not isinstance(conversation_history, list) or not conversation_history:
             return None
 
-        # CE 路径：compress() 设置了 _full_backup → 先删 FAR thought/tool 行
-        if self._full_backup is not None:
-            self._delete_far_thought_tool_rows(conversation_history)
-
-        # 话题检测 + 切换定级
+        # ── 话题检测 + 切换定级 ──
         turn = self._engine._current_turn if self._engine else 0
         user_msg = kwargs.get("user_message", "")
         total_tokens = self._estimate_conv_tokens(conversation_history)
@@ -809,7 +762,10 @@ class CAContextAssemblerPlugin:
             mp_footer = f"\r\n--{boundary}--\r\n".encode("utf-8")
             mp_body = mp_header + file_data + mp_footer
 
-            conn = http.client.HTTPConnection(endpoint_host, endpoint_port, timeout=30)
+            # 根据 URL scheme 选择 HTTP/HTTPS
+            _use_https = Config.OV_ENDPOINT.lower().startswith("https")
+            _conn_cls = http.client.HTTPSConnection if _use_https else http.client.HTTPConnection
+            conn = _conn_cls(endpoint_host, endpoint_port, timeout=30)
             conn.request(
                 "POST", "/api/v1/resources/temp_upload",
                 body=mp_body,
@@ -874,10 +830,13 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
     try:
         from tools.skill_provenance import get_current_write_origin
         if get_current_write_origin() == "background_review":
+            plugin._bg_turn = True
             logger.info("[CA_v6] pre_llm_call: bg turn skipped (no turn increment, no write)")
             return None
     except ImportError:
         pass
+
+    plugin._bg_turn = False
 
     user_message = kwargs.get("user_message", "")
     conversation_history = kwargs.get("conversation_history", [])
@@ -962,11 +921,13 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
 
 
 def _on_post_api_request_v5(**kwargs: Any) -> None:
-    """v5: 写 thought 行 + tool 占位行。"""
+    """v6: 写 thought 行 + tool 占位行（bg 跳过）。"""
     session_id = kwargs.get("session_id", "")
     with _engines_lock:
         plugin = _engines.get(session_id)
     if not plugin or plugin._engine_errored:
+        return
+    if getattr(plugin, '_bg_turn', False):
         return
     try:
         plugin._engine._on_api_response_v5(
@@ -982,11 +943,13 @@ def _on_post_api_request_v5(**kwargs: Any) -> None:
 
 
 def _on_post_tool_call_v5(**kwargs: Any) -> None:
-    """v5: 回填 tool 行 + per-tool Fct。"""
+    """v6: 回填 tool 行 + per-tool Fct（bg 跳过）。"""
     session_id = kwargs.get("session_id", "")
     with _engines_lock:
         plugin = _engines.get(session_id)
     if not plugin or plugin._engine_errored:
+        return
+    if getattr(plugin, '_bg_turn', False):
         return
     try:
         plugin._engine._on_post_tool_call_v5(
@@ -1005,11 +968,14 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 
 
 def _on_post_llm_call_v5(**kwargs: Any) -> None:
-    """v5: 写 final assistant → snapshot 恢复 → C-stage。"""
+    """v6: 写 final assistant → F-stage（bg 跳过）。"""
     session_id = kwargs.get("session_id", "")
     with _engines_lock:
         plugin = _engines.get(session_id)
     if not plugin or plugin._engine_errored:
+        return
+    if getattr(plugin, '_bg_turn', False):
+        plugin._bg_turn = False  # 清除标记
         return
     try:
         plugin.post_llm_call_v5(**kwargs)

@@ -168,7 +168,7 @@ class FStageMixin:
             elapsed = time.monotonic() - start
             logger.info("[CA] _run_f_stage: FINISH turn %d fin_seq %d in %.1fs (dialogue_ok=%s)",
                        turn_index, fin_seq, elapsed, dialogue_ok)
-    def _call_llm_for_fct(self, prev_fct, elm_text, turn_index: int) -> Tuple[str, str]:
+    def _call_llm_for_fct(self, prev_fct: str, elm_text: str, turn_index: int) -> Tuple[str, str]:
         """返回 (response_text, finish_reason)。所有重试均失败时返回 ("", "error")。"""
         import urllib.request
         llm_start = time.monotonic()
@@ -202,6 +202,9 @@ class FStageMixin:
                     data = json.loads(resp.read())
                 response_text = data.get("response", "")
                 finish_reason = data.get("done_reason") or data.get("finish_reason", "stop")
+                # 空响应 → 视为错误，触发 fallback 路径
+                if not response_text.strip():
+                    finish_reason = "error"
                 break
             except Exception as e:
                 logger.warning("LLM attempt %d failed: %s", attempt + 1, e)
@@ -219,7 +222,7 @@ class FStageMixin:
 
         return (response_text, finish_reason)
 
-    def _extract_hdl(self, fct_dict, turn_index: int) -> str:
+    def _extract_hdl(self, fct_dict: dict, turn_index: int) -> str:
         """从 fct_dict 提取 Hdl 文本。"""
         from .post_process import _safe_truncate
         changes = fct_dict.get("changes", [])

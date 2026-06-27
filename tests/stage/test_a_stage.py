@@ -125,8 +125,8 @@ class TestSimpleMutationModeV5:
         plugin = _make_plugin(ca_engine)
         conv = [{"role": "user", "content": "hi"}]
         plugin._simple_mutation_mode_v5(conv)
-        assert plugin._saved_history_snapshot is not None
-        assert plugin._saved_history_snapshot[0]["content"] == "hi"
+        assert plugin._engine._saved_history_snapshot is not None
+        assert plugin._engine._saved_history_snapshot[0]["content"] == "hi"
 
     # ── GAP-B: tail protect 边界 ──
 
@@ -173,6 +173,7 @@ class TestSnapshotRestoreFullRoundtrip:
         mock.get_turn_grade.side_effect = lambda tn: turn_grades.get(tn, MagicMock())
         return mock
 
+    @pytest.mark.xfail(reason="v6.0 方向 B: compress 从 DB 重建 conv_history，不再需要快照恢复", strict=False)
     def test_mutation_restores_all_fields(self, ca_engine):
         """E1/E2: pre_llm_call(mutation) → post_llm_call(restore) 后 reasoning_content 和 tool_calls 被还原"""
         from ca.store import write_turn_v5
@@ -274,7 +275,7 @@ class TestIncrementalMutation:
         plugin._A_stable_cache = None
         result = plugin._incremental_mutation([{"role": "user", "content": "hi"}])
         assert result is None  # _full_mutation 返回 None
-        assert plugin._saved_history_snapshot is not None
+        assert plugin._engine._saved_history_snapshot is not None
 
     def test_cache_replaces_stable_area(self, ca_engine):
         """缓存命中 → 稳定区被替换"""
@@ -285,12 +286,12 @@ class TestIncrementalMutation:
 
         plugin = _make_plugin(ca_engine)
         # 手动设置缓存
-        plugin._A_stable_cache = [
+        plugin._engine._A_stable_cache = [
             {"role": "user", "content": "cached_Q"},
             {"role": "assistant", "content": "cached_A", "tool_calls": [{"id": "c1"}]},
             {"role": "tool", "content": "cached_T"},
         ]
-        plugin._A_cache_turns = 1
+        plugin._engine._A_cache_turns = 1
         conv = [
             {"role": "user", "content": "Q1"},
             {"role": "assistant", "content": "A1", "tool_calls": [{"id": "c1"}]},
@@ -310,37 +311,37 @@ class TestIncrementalMutation:
     def test_cache_mismatch_falls_back(self, ca_engine):
         """缓存角色不匹配 → 回退到全量，缓存被更新"""
         plugin = _make_plugin(ca_engine)
-        plugin._A_stable_cache = [
+        plugin._engine._A_stable_cache = [
             {"role": "user", "content": "cached"},
         ]
-        plugin._A_cache_turns = 1
+        plugin._engine._A_cache_turns = 1
         conv = [
             {"role": "user", "content": "Q1"},
             {"role": "tool", "tool_call_id": "c1", "content": "T"},
         ]
         result = plugin._incremental_mutation(conv)
         # 全量路径重新计算缓存：tail_boundary=0（不足2 user），缓存为空
-        assert plugin._A_cache_turns == 0
+        assert plugin._engine._A_cache_turns == 0
 
     def test_snapshot_saved_incremental(self, ca_engine):
         """增量路径也保存快照"""
         plugin = _make_plugin(ca_engine)
-        plugin._A_stable_cache = [
+        plugin._engine._A_stable_cache = [
             {"role": "user", "content": "cached"},
         ]
         conv = [{"role": "user", "content": "原始"}]
         plugin._incremental_mutation(conv)
-        assert plugin._saved_history_snapshot is not None
-        assert plugin._saved_history_snapshot[0]["content"] == "原始"
+        assert plugin._engine._saved_history_snapshot is not None
+        assert plugin._engine._saved_history_snapshot[0]["content"] == "原始"
 
     def test_stale_flag_triggers_full_mutation(self, ca_engine):
         """C1: _A_cache_is_stale=True -> pre_llm_call 走全量路径"""
         plugin = _make_plugin(ca_engine)
-        plugin._A_stable_cache = [
+        plugin._engine._A_stable_cache = [
             {"role": "user", "content": "cached"},
         ]
-        plugin._A_cache_turns = 1
-        plugin._A_cache_is_stale = True
+        plugin._engine._A_cache_turns = 1
+        plugin._engine._A_cache_is_stale = True
 
         conv = [
             {"role": "user", "content": "Q1"},
@@ -351,8 +352,8 @@ class TestIncrementalMutation:
             conversation_history=conv,
             context_length=50000,
         )
-        assert plugin._saved_history_snapshot is not None
-        assert not plugin._A_cache_is_stale, \
+        assert plugin._engine._saved_history_snapshot is not None
+        assert not plugin._engine._A_cache_is_stale, \
             "全量路径后 _A_cache_is_stale 应被重置为 False"
 
     def test_pending_stale_cycle(self, ca_engine):
@@ -362,12 +363,12 @@ class TestIncrementalMutation:
         plugin = _make_plugin(ca_engine)
 
         # 设置有效缓存
-        plugin._A_stable_cache = [
+        plugin._engine._A_stable_cache = [
             {"role": "user", "content": "cached_Q"},
             {"role": "assistant", "content": "cached_A"},
         ]
-        plugin._A_cache_turns = 1
-        plugin._A_cache_is_stale = False
+        plugin._engine._A_cache_turns = 1
+        plugin._engine._A_cache_is_stale = False
 
         # 为 delta turn (turn=2) 写入无 Fct 的 user 行 + thought + tool 行，模拟 pending
         # DB 是 1-indexed：cache 覆盖 turn=1，delta 是 turn=2
@@ -398,5 +399,5 @@ class TestIncrementalMutation:
         plugin._incremental_mutation(conv)
 
         # Fct pending 应标记缓存为 stale
-        assert plugin._A_cache_is_stale, \
+        assert plugin._engine._A_cache_is_stale, \
             "Fct pending 应设置 _A_cache_is_stale = True"

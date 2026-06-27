@@ -361,7 +361,8 @@ class TestPostLlmCall:
 class TestSnapshotRestore:
     """post_llm_call 快照恢复测试。"""
 
-    def test_restores_content_after_replace_v5(self):
+    @pytest.mark.xfail(reason="v6.0 方向 B: compress 从 DB 重建, 不再恢复快照", strict=False)
+    def test_restores_content_after_replace_v5(self, engine, ca_engine):
         """v5: snapshot 恢复替换内容。"""
         plugin = CAContextAssemblerPlugin()
         mock_engine = MagicMock()
@@ -490,6 +491,7 @@ class TestBgReview:
         plugin._engine = ca_engine
         plugin._engine_errored = False
         plugin._session_id = "test_bg"
+        plugin._current_turn = 0
         _ca_plugin._engines["test_bg"] = plugin
 
         # 注入 mock 模块 tools.skill_provenance（该模块在测试环境不存在）
@@ -507,30 +509,21 @@ class TestBgReview:
             )
 
             # 1. 返回 None（跳过 A-stage）
-            assert result is None, "bg_review 应返回 None 跳过 A-stage"
+            assert result is None, "bg_review 应返回 None"
 
-            # 2. Fct = user_message
-            from ca.store import read_fct_v5
-            fct = read_fct_v5(ca_engine.store, "test_bg", 0, 0)
-            assert fct is not None, "bg_review 应写入 Fct"
-            assert fct == "这是后台审查内容", f"Fct 应为 user_message, got {fct!r}"
+            # 2. _bg_turn 标记已设置
+            assert plugin._bg_turn is True, "bg_review 应设置 _bg_turn=True"
 
-            # 3. Hdl = user_message[:100]
-            cur = ca_engine.store.conn.execute(
-                "SELECT Hdl FROM turn_stream WHERE session_id=? AND turn=? AND seq=?",
-                ("test_bg", 0, 0),
-            )
-            row = cur.fetchone()
-            assert row is not None, "Hdl 应被写入"
-            assert row[0] == "这是后台审查内容", f"Hdl 应为 user_message[:100], got {row[0]!r}"
+            # 3. turn 计数器未增长
+            assert plugin._engine._current_turn == 0, f"bg 不增 turn"
 
-            # 4. biz_category = 'bg_review'
-            cur = ca_engine.store.conn.execute(
-                "SELECT biz_category FROM turn_stream WHERE session_id=? AND turn=? AND seq=?",
-                ("test_bg", 0, 0),
-            )
-            row = cur.fetchone()
-            assert row[0] == "bg_review", f"biz_category 应为 bg_review, got {row[0]!r}"
+            # 4. DB 无任何写入（方向 B：bg 不写 DB）
+            from ca.store import read_turn_stream_all
+            rows = read_turn_stream_all(ca_engine.store, "test_bg")
+            assert len(rows) == 0, f"bg 不应写 DB, got {len(rows)} rows"
+
+            # 清理 _bg_turn 标记
+            plugin._bg_turn = False
         finally:
             # 清理
             _ca_plugin._engines.pop("test_bg", None)

@@ -619,12 +619,14 @@ class TestApplyWaterPressure:
     def test_at_peak_full_penalty(self, mgr, monkeypatch):
         from ca.config import Config
         monkeypatch.setattr(Config, "TOPIC_PEAK_TOKEN", 1000)
+        monkeypatch.setattr(Config, "ACCUMULATED_SPLIT_START", 300)
         result = mgr._apply_water_pressure(0.10, 1000)
         assert abs(result - (0.10 - 0.30)) < 1e-10
 
     def test_partial_progression(self, mgr, monkeypatch):
         from ca.config import Config
         monkeypatch.setattr(Config, "TOPIC_PEAK_TOKEN", 1000)
+        monkeypatch.setattr(Config, "ACCUMULATED_SPLIT_START", 300)
         # 650 → 进度 50%
         result = mgr._apply_water_pressure(0.10, 650)
         expected = 0.10 - 0.50 * 0.30
@@ -633,6 +635,7 @@ class TestApplyWaterPressure:
     def test_beyond_peak_capped(self, mgr, monkeypatch):
         from ca.config import Config
         monkeypatch.setattr(Config, "TOPIC_PEAK_TOKEN", 1000)
+        monkeypatch.setattr(Config, "ACCUMULATED_SPLIT_START", 300)
         result = mgr._apply_water_pressure(0.10, 2000)
         assert abs(result - (0.10 - 0.30)) < 1e-10
 

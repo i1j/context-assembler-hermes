@@ -107,10 +107,10 @@ class TestDebugDumpGeneration:
         try:
             from tests.stage.test_a_stage import _make_plugin
             plugin = _make_plugin(ca_engine)
-            plugin._A_stable_cache = [
+            plugin._engine._A_stable_cache = [
                 {"role": "user", "content": "cached"},
             ]
-            plugin._A_cache_turns = 1
+            plugin._engine._A_cache_turns = 1
             conv = [
                 {"role": "user", "content": "Q1"},
                 {"role": "assistant", "content": "A1"},

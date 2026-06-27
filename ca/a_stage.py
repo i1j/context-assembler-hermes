@@ -100,6 +100,12 @@ class AStageMixin:
                 continue
 
             turn_rows.setdefault(current_turn, []).append((i, row_type))
+        # 边界保护：没有 user 时 current_turn 为 -1，
+        # 防止 Phase 2 中 turn_num < 0 的 skip 导致行泄漏（永远不会被替换）
+        if -1 in turn_rows:
+            logger.warning("[CA_v5] Phase 1: %d rows assigned to turn=-1 (no user msg before), removing from replace plan",
+                           len(turn_rows[-1]))
+            del turn_rows[-1]
 
         # Phase 1.5: 每轮只保留最后一个 "fin" 为真 fin
         for _t, _rows in turn_rows.items():
@@ -460,9 +466,12 @@ class AStageMixin:
         if not all_rows:
             return [system_message] if system_message else []
 
-        # 2. 按 turn 分组（过滤掉 bg 行——biz_category='bg_review' 不应存在因 bg 已跳过）
+        # 2. 按 turn 分组（过滤掉 bg 行——biz_category='bg_review' 不应存在因 bg 已跳过，
+        #    但作为保险防御，显式过滤以防 DB 污染或残留数据）
         turns: Dict[int, List[Dict]] = {}
         for row in all_rows:
+            if row.get("biz_category") == "bg_review":
+                continue
             t = row["turn"]
             turns.setdefault(t, []).append(row)
 
