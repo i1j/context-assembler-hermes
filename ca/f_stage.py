@@ -134,6 +134,18 @@ class FStageMixin:
                 with self.stats._lock:
                     self.stats.skipped_empty += 1
             cleaned = clean_increment(fct_dict)
+
+            # 兜底：LLM 返回了合法 XML 但判定"无新内容"→ 复制 user_elm
+            if not cleaned.get("changes") and cleaned.get("core_change", "") in ("本轮无新内容", "无"):
+                fallback_core = (user_elm or "本轮无新内容")[:200]
+                cleaned["changes"] = [{"stage_tag": "探讨", "core_change": fallback_core}]
+                cleaned["core_change"] = fallback_core
+                logger.info(
+                    "[CA] _run_f_stage turn %d fin_seq %d: LLM returned empty Fct, "
+                    "fallback to user_elm (%d chars)",
+                    turn_index, fin_seq, len(fallback_core),
+                )
+
             cleaned["_assemble_status"] = ASSEMBLE_OK
             dialogue_ok = True
 
