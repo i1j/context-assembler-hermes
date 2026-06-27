@@ -78,6 +78,25 @@ class FStageMixin:
         elm_text = "\n".join(parts)
         prev_fct = read_prev_fct(self.store, session_id, turn_index)
 
+        # 首轮特殊处理：无历史摘要时 LLM 无法做"增量对比"，直接复制 user_elm
+        if not prev_fct and user_elm and turn_index >= 1:
+            first_fct = json.dumps({
+                "changes": [{"stage_tag": "探讨", "core_change": user_elm[:200]}],
+                "core_change": user_elm[:200],
+                "new_materials": [], "objective_facts": [],
+                "consensus": [], "todo": [],
+                "_assemble_status": ASSEMBLE_OK,
+            }, ensure_ascii=False)
+            first_hdl = user_elm[:100]
+            self._update_fct_v5(session_id, turn_index, fin_seq, first_fct, first_hdl)
+            self.cache.add_turn(turn_index, first_hdl, first_fct, None, None)
+            logger.info(
+                "[CA] _run_f_stage turn %d fin_seq %d: first turn (no prev Fct), "
+                "skip LLM, use user_elm (%d chars)",
+                turn_index, fin_seq, len(user_elm),
+            )
+            return
+
         try:
             logger.info("[CA] _run_f_stage turn %d fin_seq %d: calling LLM", turn_index, fin_seq)
             try:
@@ -134,17 +153,6 @@ class FStageMixin:
                 with self.stats._lock:
                     self.stats.skipped_empty += 1
             cleaned = clean_increment(fct_dict)
-
-            # 兜底：LLM 返回了合法 XML 但判定"无新内容"→ 复制 user_elm
-            if not cleaned.get("changes") and cleaned.get("core_change", "") in ("本轮无新内容", "无"):
-                fallback_core = (user_elm or "本轮无新内容")[:200]
-                cleaned["changes"] = [{"stage_tag": "探讨", "core_change": fallback_core}]
-                cleaned["core_change"] = fallback_core
-                logger.info(
-                    "[CA] _run_f_stage turn %d fin_seq %d: LLM returned empty Fct, "
-                    "fallback to user_elm (%d chars)",
-                    turn_index, fin_seq, len(fallback_core),
-                )
 
             cleaned["_assemble_status"] = ASSEMBLE_OK
             dialogue_ok = True

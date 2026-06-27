@@ -53,8 +53,8 @@ class TestRunFStage:
         result = read_fct_v5(ca_engine.store, "test", 0, 1)
         assert result, "Fct 应被写入"
         data = json.loads(result)
-        assert data.get("core_change") == "你好", \
-            f"Fct core_change 应为 user_elm fallback, got {data.get('core_change')}"
+        assert data.get("core_change") == "本轮无新内容", \
+            f"Fct core_change 应为解析 fallback, got {data.get('core_change')}"
 
     def test_llm_path_updates_hdl(self, ca_engine):
         """验证 Hdl 也被写入"""
