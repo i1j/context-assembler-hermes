@@ -547,4 +547,7 @@ v4.2                  v4.3 → v4.3-s1 → v4.3-s2    v4.3.1 → v4.3.1 修订
 ||| 2026-06-12 | bg_review 内容清空 + 尾区保护 | mutation 循环内按位置边界保护尾区 bg_review | v5.1 |
 || 2026-06-09 | 工具组 L2：thought 原文 → 完整消息序列展开 | `_extend_with_l2` 替代只提 thought；covered 集加 `(turn_idx, "tool")` 防重复；L1 fallback 用 `_format_group_summary` 替代 raw JSON `l1_display` | v5.0-pr3 |
 
-|| **v5.5.0**            | 2026-06-16 | 命名统一        | ① `Fct`/`Hdl`/`Elm` 重命名 + 279 DB ALTER TABLE 迁移 ② Bug 修复 4 项：`@staticmethod` 错标、fallback 占位符、`fct_text` 残留、`generate_group_summary` 截断（详见 `docs/debug/`）③ 与 source project 分化差异全量归档 | 发布 |
+||| **v5.5.0**            | 2026-06-16 | 命名统一        | ① `Fct`/`Hdl`/`Elm` 重命名 + 279 DB ALTER TABLE 迁移 ② Bug 修复 4 项：`@staticmethod` 错标、fallback 占位符、`fct_text` 残留、`generate_group_summary` 截断（详见 `docs/debug/`）③ 与 source project 分化差异全量归档 | 发布 |
+||| **v6.0.1**            | 2026-06-28 | Fct=NULL 告警   | ① A-stage 新增 Fct=NULL 告警：`_simple_mutation_mode_v5`(4处) + `_incremental_mutation`(2处)，当 grade=FCT 但摘要为空时写 `logger.warning`，消除静默 Elm 回退 | **已实装** |
+|||                     |            | 冗余赋值清理    | ② 移除 `test_a_stage.py`/`test_a_stage_topic_aware.py` 中 `plugin._A_stable_cache = None`（v6.0 方向 B 重构后插件副本从未被读取） | 已清理 |
+|||                     |            | 测试 xfail→pass | ③ `test_rel_fct_null_falls_back_to_elm_with_warning` 移除 xfail 标记 | 已验证 |

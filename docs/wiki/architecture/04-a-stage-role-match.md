@@ -65,10 +65,21 @@ conv_history 结构（三区）：
 
 - 数据源：`turn_stream` 表的 Fct/Hdl 列，纯 DB 读取
 - 话题等级查询：`topic_mgr.get_turn_grade(turn)` 返回 `TopicGrade.{ACT,REL,FAR}`
-- 尾部边界：扫描 conv_history 找倒数第 2 个 user turn 之后的所有行
+- tail_boundary：扫描 conv_history 找倒数第 2 个 user turn 之后的所有行
 - 保护区外：按区域定级 + thought/tool 行降一级，FAR thought/tool 行删除
 - system_message：从 Hermes messages[0] 保留，拼接在 conv_history 头部
 - 返回的新列表只包含干净的 LLM 输入格式（role + content 为主），不含 Hermes 内部字段
+
+### Fct=NULL 告警（v6.0.1）
+
+当 topic_grade=REL（user/fin→Fct）或 ACT→Fct（thought/tool）时，若 `turn_stream` 中对应行的 Fct 列为 NULL 或空字符串，
+`_simple_mutation_mode_v5` 和 `_incremental_mutation` 两个 **fallback 路径**会写 `logger.warning`：
+
+```
+[CA_v5] Fct is empty/NULL for grade Fct, turn=N role=assistant, falling back to Elm
+```
+
+内容级行为不变（仍回退到 Elm 原文），但运维可见性显著提升——避免静默 token 浪费。
 
 ## 数据验证
 

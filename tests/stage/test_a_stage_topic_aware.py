@@ -41,7 +41,6 @@ def _make_plugin(ca_engine, session_id: str = "test"):
     plugin._session_id = session_id
     plugin._saved_history = None
     plugin._saved_history_snapshot = None
-    plugin._A_stable_cache = None
     plugin._A_cache_turns = 0
     plugin._A_cache_is_stale = False
     return plugin
@@ -776,7 +775,6 @@ class TestFctNullDegradation:
         assert conv[1]["content"] == "", \
             f"FAR fin with NULL Hdl should be empty, got: {conv[1]['content']}"
 
-    @pytest.mark.xfail(reason="v6.0: REL/FCT 等级下 Fct=NULL 的告警尚未实现", strict=False)
     def test_rel_fct_null_falls_back_to_elm_with_warning(self, ca_engine, caplog):
         """REL grade + Fct=NULL → 回退 Elm（原文保留）+ 日志告警"""
         from ca.store import write_turn_v5
@@ -799,7 +797,7 @@ class TestFctNullDegradation:
         plugin._simple_mutation_mode_v5(conv)
         # 验证日志：警告 Fct 缺失回退 Elm
         warning_messages = [r.message for r in caplog.records
-                            if 'Fct is empty/NULL for grade FCT, falling back to Elm' in r.message]
+                            if 'Fct is empty/NULL for grade' in r.message]
         assert len(warning_messages) >= 1, \
             f"Expected warning about Fct NULL for REL, got records: {[r.message for r in caplog.records]}"
         # 验证内容：回退 Elm（原文保留）

@@ -272,7 +272,6 @@ class TestIncrementalMutation:
     def test_no_cache_falls_back_to_full(self, ca_engine):
         """无 _A_stable_cache → 回退到 _full_mutation"""
         plugin = _make_plugin(ca_engine)
-        plugin._A_stable_cache = None
         result = plugin._incremental_mutation([{"role": "user", "content": "hi"}])
         assert result is None  # _full_mutation 返回 None
         assert plugin._engine._saved_history_snapshot is not None

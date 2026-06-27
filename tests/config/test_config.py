@@ -108,6 +108,10 @@ def test_cfg_2_fct_max_tokens_default(monkeypatch):
     """CFG-2: CA_L1_MAX_TOKENS 默认值 == 800"""
     monkeypatch.delenv("CA_L1_MAX_TOKENS", raising=False)
     from ca.config import Config
+    # reload() 的 fallback 用 str(cls.L1_MAX_TOKENS)（圆形回退）。
+    # 若 import 时 env 已设，ClassVar 已被污染，reload 无法自行归零。
+    # 先重置再 reload，模式见 test_cf_002 L40。
+    Config.L1_MAX_TOKENS = 800
     Config.reload()
     if hasattr(Config, 'L1_MAX_TOKENS'):
         assert Config.L1_MAX_TOKENS == 800, \

@@ -30,7 +30,8 @@ python -m pytest tests/unit/test_topic_manager.py -v
 # 集成测试（topic-aware A-stage）
 python -m pytest tests/stage/test_a_stage_topic_aware.py -v
 
-# 全部：444 passed, 1 skipped
+# 全部：488 passed, 1 skipped, 2 xfailed (2026-06-28)
+# v6.0.1: +1 test (test_rel_fct_null_falls_back_to_elm_with_warning: xfail→pass)
 ```
 
 ## 3. 分层

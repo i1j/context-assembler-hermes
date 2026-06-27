@@ -153,22 +153,33 @@ class AStageMixin:
                         ca_users.append(fct)
                     elif user_grade == Grade.HDL:
                         ca_users.append((hdl or "")[:150])
-                    # ELM: 原文在 conv 中，不填队列
+                    elif user_grade == Grade.FCT:
+                        logger.warning("[CA_v5] Fct is empty/NULL for grade %s, turn=%d role=%s, falling back to Elm",
+                                       user_grade.value, turn_num + 1, role)
                 elif role == "assistant" and finish_reason == "stop":
                     if user_grade == Grade.FCT and fct:
                         ca_fins.append(fct)
                     elif user_grade == Grade.HDL:
                         ca_fins.append((hdl or "")[:150])
+                    elif user_grade == Grade.FCT:
+                        logger.warning("[CA_v5] Fct is empty/NULL for grade %s, turn=%d role=%s, falling back to Elm",
+                                       user_grade.value, turn_num + 1, role)
                 elif role == "assistant":
                     if thought_grade == Grade.FCT and fct:
                         ca_thoughts.append(fct)
                     elif thought_grade == Grade.HDL:
                         ca_thoughts.append((hdl or "")[:150])
+                    elif thought_grade == Grade.FCT:
+                        logger.warning("[CA_v5] Fct is empty/NULL for grade %s, turn=%d role=%s, falling back to Elm",
+                                       thought_grade.value, turn_num + 1, role)
                 elif role == "tool":
                     if thought_grade == Grade.FCT and fct:
                         ca_tools.append(fct)
                     elif thought_grade == Grade.HDL:
                         ca_tools.append((hdl or "")[:150])
+                    elif thought_grade == Grade.FCT:
+                        logger.warning("[CA_v5] Fct is empty/NULL for grade %s, turn=%d role=%s, falling back to Elm",
+                                       thought_grade.value, turn_num + 1, role)
 
             # 5. 替换
             ui, fi, ti, tj = 0, 0, 0, 0
@@ -355,11 +366,17 @@ class AStageMixin:
                         ca_thoughts.append(fct)
                     elif thought_grade == Grade.HDL:
                         ca_thoughts.append((hdl or "")[:150]) if hdl else None
+                    elif thought_grade == Grade.FCT:
+                        logger.warning("[CA_v5] Fct is empty/NULL for grade %s, turn=%d role=%s, falling back to Elm",
+                                       thought_grade.value, turn_num + 1, role_)
                 elif role_ == "tool":
                     if thought_grade == Grade.FCT and fct:
                         ca_tools.append(fct)
                     elif thought_grade == Grade.HDL:
                         ca_tools.append((hdl or "")[:150]) if hdl else None
+                    elif thought_grade == Grade.FCT:
+                        logger.warning("[CA_v5] Fct is empty/NULL for grade %s, turn=%d role=%s, falling back to Elm",
+                                       thought_grade.value, turn_num + 1, role_)
 
             ti, tj = 0, 0
             for conv_idx, row_type in rows:
