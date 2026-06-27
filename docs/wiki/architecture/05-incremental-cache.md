@@ -1,96 +1,81 @@
 ---
-title: 增量缓存
+title: 增量缓存（⚠️ v6 方向 B 已废弃）
 slug: incremental-cache
 category: architecture
 version_introduced: v5.8
-status: 已实装
-decisions: ["incremental-cache", "topic-grade-manager"]
-depends_on: ["a-stage-role-match", "tail-protection", "storage-model"]
-updated: 2026-06-23
-source_files: ["ca/cache.py"]
+version_deprecated: v6.0
+status: 废弃
+decisions: []
+depends_on: ["storage-model", "a-stage-role-match"]
+updated: 2026-06-28
 ---
 
-## 问题
+## 废弃原因
 
-A-stage 每轮都从头组装所有历史 turn 的上下文。当会话很长（数百轮）时，全量重组导致：
-- 性能瓶颈：每轮对全部历史逐行判断 grade、提取 Fct
-- 重复工作：大部分历史上下文在上次装配后没有变化
+v6 方向 B 完全摒弃了 mutation 模式，改用 `_build_conv_history_v6` 从 turn_stream DB
+直接重建 conv_history。因此增量缓存不再需要。
 
-## 决策
+### 替代方案
 
-### 备选方案
+`_build_conv_history_v6` 每次从 turn_stream DB 读取完整的 turn→grade 映射和 Fct/Hdl 数据，
+通过 SQLite 查询构造 conv_history。由于 CA 的 turn 数一般 < 1000，全量重建性能可接受。
 
-1. **全量每轮重建** — 简单但性能差，O(n) 每轮
-2. **惰性缓存不过期** — 可能导致数据不一致
-3. **纯 delta 无全量基线** — 无法处理话题切换
-4. **delta + 全量双模 + Fct-pending 防护（选定）**
+### 迁移注意
 
-### 选定方案
+- `_A_stable_cache`、`_A_cache_turns`、`_A_cache_is_stale` 实例变量保留但不会被写入
+- Fct pending 防护不再需要 — `_build_conv_history_v6` 遇到 None Fct/Hdl 时自动回退到 Elm
+- 旧测试中依赖增量缓存的用例需要更新
 
-使用 `_A_stable_cache` 缓存上次 A-stage 输出（`list[dict]`，已替换 Fct 的 conv_hist 片段），分三种调度模式：
+---
+
+## 历史文档（v5.8 原始内容，仅保留供引用）
+
+### 实例变量
+
+| 变量 | 类型 | 语义 |
+|------|------|------|
+| `_A_stable_cache` | `list[dict] \| None` | 稳定区已替换 Fct 的 conv_hist 片段。None=冷启动或话题切换后 |
+| `_A_cache_turns` | int | cache 中的 user 消息数（用于增量 Step 3 的 turn 计数起点） |
+| `_A_cache_is_stale` | bool | Fct pending 标记。True→下轮不进增量，走全量修复 |
+
+### 调度逻辑
 
 ```
-                 ┌──────────────┐
-                 │ 新 turn 到达  │
-                 └──────┬───────┘
-                        │
-              ┌─────────┴─────────┐
-              ▼                   ▼
-      ┌──────────────┐    ┌──────────────┐
-      │ 话题切换了吗？ │    │ 缓存 stale?  │
-      └──────┬───────┘    └──────┬───────┘
-             │ YES                │ YES
-             ▼                    ▼
-     ┌──────────────┐    ┌──────────────┐
-     │ 全量重建      │    │ 全量重建      │
-     └──────┬───────┘    └──────┬───────┘
-             │ NO                 │ NO
-             ▼                    ▼
-     ┌────────────────────────────────┐
-     │ 增量替换：只拼接新 turn 的 Fct  │
-     └────────────────────────────────┘
+pre_llm_call_v5()
+  ├─ 话题检测 detect()
+  │    ├─ 切换 → _A_stable_cache = None → 全量
+  │    └─ 无切换 → 继续
+  ├─ cache 状态判断
+  │    ├─ cache is None → 全量
+  │    ├─ _A_cache_is_stale → cache=None → 全量
+  │    └─ cache 有效 → 增量
+  └─ 全量路径: _full_mutation() (alias of _simple_mutation_mode_v5)
+       ├─ 逐 turn 查 turn_stream + 角色队列匹配 + grade 驱动替换
+       ├─ 尾部保留 Elm (倒数 2 个 user)
+       └─ 写缓存: _A_stable_cache = conv_hist[0:tail_boundary]
+  └─ 增量路径: _incremental_mutation()
+       ├─ Step 1: 尾部边界（与全量一致）
+       ├─ Step 2: 并行扫描 cache → 覆盖稳定区 conv_hist 的 content
+       ├─ Step 3: Delta 区收集 — cache 后到 tail_boundary 之间的 thought/tool/fin
+       ├─ Step 4: Delta 替换 — 从 turn_stream 读 Fct，1:1 角色队列匹配
+       │          ⚠️ Fct pending 防护：fct=None → 不入队列 → _A_cache_is_stale=True
+       └─ Step 5: 写缓存 → 更新 _A_stable_cache/_A_cache_turns
 ```
 
-**三个实例变量**：
-- `_A_stable_cache: list[dict]` — 稳定区已替换 Fct 的 conv_hist 片段
-- `_A_cache_turns: int` — cache 中的 user 消息数（用于增量 Step 3 的 turn 计数起点）
-- `_A_cache_is_stale: bool` — Fct pending 标记，True→下轮不进增量，走全量修复
+### Fct pending 防护（P0）
 
-**增量流程**（5 步）：
-1. 判断缓存有效性（话题切换 → stale, stale → stale, 有效 → 有效）
-2. 有效时：从 `_A_stable_cache` 截取尾部边界后的稳定区
-3. 只对新 turn（`_A_cache_turns` 以后）逐行执行 grade 判定 + Fct 替换
-4. 将新 turn 的装配结果追加到截取的缓存尾部
-5. 更新 `_A_stable_cache` 和 `_A_cache_turns`
+增量 delta 替换中，若 `get_turn_ca_rows` 返回的 Fct 为 None（F-stage daemon 线程尚未写完），则：
+- 不将该 Fct 加入角色队列（避免 `""` 固化到缓存）
+- 标记 `_A_cache_is_stale = True`
+- 下次走全量路径修复
 
-**Fct-pending 防护**：如果增量范围内的某个 turn 的 Fct 尚未生成（`fct=None`），跳过该 turn 保留 Elm，并标记 `_A_cache_is_stale=True`。
+### 回退条件
 
-**回退条件**：
-| 条件 | 行为 |
+| 场景 | 处理 |
 |------|------|
-| 话题切换 | 全量重建 |
-| `_A_cache_is_stale=True` | 下轮全量重建 |
-| 缓存角色对齐失败 | 全量重建 |
+| 冷启动 (cache is None) | `_full_mutation` |
+| 话题切换 (detect==True) | cache=None → 全量 |
+| Fct pending (delta Fct=None) | `_A_cache_is_stale=True` → 保留 Elm → 下轮全量 |
+| 缓存角色对齐失败 | 回退 `_full_mutation` |
 | 不足 2 轮 | tail_boundary=len(conv_hist)，全部跳过 |
-
-## 数据验证
-
-```python
-# 观察缓存命中 vs 全量重建
-# 在日志中搜索 "A-stage cache" 或 "incremental"
-grep "incremental\|full rebuild\|cache hit" ca_assembler.log | tail -20
-```
-
-## 优点
-
-- 减少重复 LLM Fct 提取和 grade 判定
-- 话题切换时自动全量重建保证一致性
-- Fct-pending 防护避免未生成摘要的 turn 丢失
-
-## 约束 / 已知问题
-
-- 缓存仅覆盖 A-stage 输出文本，不缓存 grade 判定结果
-- 极端长会话（1000+ turn）仍可能因增量空间不足退化
-- 当前未持久化到磁盘，session 重启丢失缓存
-- **测试覆盖**：全量路径（`test_cache_replaces_stable_area`）、stale→rebuilt（`test_stale_flag_triggers_full_mutation`）、Fct-pending→stale（`test_pending_stale_cycle`）
-- **测试覆盖**：全量路径（`test_cache_replaces_stable_area`）、stale→rebuilt（`test_stale_flag_triggers_full_mutation`）、Fct-pending→stale（`test_pending_stale_cycle`）
+| session reset | 插件重建 → cache=None → 冷启动 |

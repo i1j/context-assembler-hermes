@@ -4,8 +4,8 @@
 
 | 项          | 值                                                                                |
 | ----------- | --------------------------------------------------------------------------------- |
-| 版本        | v5.10+ (命名统一 + TopicGradeManager + 增量缓存 + changes 列表格式)              |
-| 注入方式    | topic-aware 三级替换（`_simple_mutation_mode_v5` + `_incremental_mutation`） — turn_stream 查 Fct，按 grade(ACT/REL/FAR)替换 + 增量缓存 |
+| 版本        | v6.0（方向 B：turn_stream DB 重建 conv_history，替代 mutation）                  |
+| 注入方式    | `_build_conv_history_v6` — 从 turn_stream DB 按话题级别 + 行类型构造 conv_history，不再修改 Hermes 消息 |
 | plugin.yaml | v5.5.0                                                                    |
 | 部署方式    | 自包含独立副本                                                                    |
 | 插件路径    | `~/.hermes/profiles/tester/plugins/ca_assembler/`                               |
@@ -72,7 +72,7 @@ def _on_session_reset(**kwargs: Any) -> None:
 行为：
 1. 从 `_engines` 移除 → `engine.reset()` + 清除断路器状态
 
-### `_on_pre_llm_call_v5` — E-stage 写 user Elm + 话题检测 + A-stage 替换
+### `_on_pre_llm_call_v5` — E-stage 写 user Elm + 话题检测（v6 方向 B）
 
 ```python
 def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
@@ -80,39 +80,20 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
 
 **kwargs**: `session_id`, `user_message`, `conversation_history`, `context_length`
 
-**E-stage 行为**（数据积累）：
+**E-stage 行为**（数据积累，方向 B 不再做 mutation）：
 
 1. 计算当前 turn = `conversation_history` 中 role=user 的消息数
-2. 检测 bg_review：如是则**同步写入 Fct/Hdl 列**（代码生成摘要，无需 LLM），返回 None（跳过 A-stage 和 F-stage）
-3. 写入 `turn_stream (turn, seq=0)`：`role='user', content=user_message`
+2. 检测 bg_review：如是则**完全跳过**（不增 turn、不写 DB、不调话题检测），返回 None
+3. 写入 `turn_stream (turn, seq=0)`：`role='user', content=user_message` + Fct/Hdl 初始占位
 
-**话题检测 + A-stage 调度**（`plugin.pre_llm_call_v5()`）：
+**话题检测**（方向 B 中 compress 不再调 mutation）：
 
+```python
+话题检测（内置到 _on_pre_llm_call_v5，不再委托 pre_llm_call_v5）
+  ├─ TopicGradeManager.detect(turn, ca_rows, user_msg)
+  │    话题切换与否 → grade_on_switch → 打包旧话题 OV 提交
+  └─ 返回 None（conv_history 构造由 CE compress 中的 _build_conv_history_v6 完成）
 ```
-┌─ 话题检测（TopicGradeManager.detect）
-│    检测话题切换与否
-│    切换 → _A_stable_cache = None
-├─ 缓存调度
-│    cache is None → _full_mutation
-│    _A_cache_is_stale → _full_mutation
-│    有效 → _incremental_mutation
-└─ 执行
-     全量路径：逐 turn 查 turn_stream → 角色队列匹配 → grade 驱动替换 + 写缓存
-     增量路径：复用 cache → delta 替换 → Fct pending 防护 → 更新缓存
-```
-
-**A-stage 替换规则**（话题等级 → 行摘要等级）：
-
-| 话题等级 | user | fin | thought（降一级） | tool（降一级） |
-|---|---|---|---|---|
-| **ACT** | 原文保留（Elm） | 原文保留（Elm） | 替换为 **Fct**（完整摘要） | 替换为 per-tool **Fct** |
-| **REL** | 替换为 **Fct**（完整摘要） | 替换为 **Fct**（完整摘要） | 替换为 **Hdl[:150]**（截断摘要） | 替换为 per-tool **Hdl[:150]** |
-| **FAR** | 替换为 **Hdl[:150]**（截断摘要） | 替换为 **Hdl[:150]**（截断摘要） | 替换为 **略**（语义省略标记） | 替换为 **略**（语义省略标记） |
-
-**降一级规则**：thought/tool 输出行摘要等级 = 话题等级 - 1（ACT→Fct, REL→Hdl, FAR→略）。
-user/fin 不降级，直接取话题等级（ACT→Elm原文保留, REL→Fct完整摘要, FAR→Hdl[:150]截断摘要）。
-
-**尾部保护区**：倒数第 2 个 user 消息之后 → 原文保留（不受 grade 影响，所有 field 保持原样）。
 
 ### `_on_post_llm_call_v5` — E-stage 写 final assistant + F-stage 触发（fin 粒度）
 
@@ -125,8 +106,7 @@ def _on_post_llm_call_v5(**kwargs: Any) -> None:
 **E-stage 行为**：
 
 1. 写入 `turn_stream (turn, seq=N+1)`：`role='assistant', content=assistant_response`
-2. 从 `_saved_history_snapshot` 恢复 A-stage 替换前的原始 content
-3. 清空 `_saved_history_snapshot`
+2. （方向 B：不再需要从 `_saved_history_snapshot` 恢复 content，因 compress 不修改 Hermes 消息）
 
 **F-stage 触发**：
 
@@ -245,7 +225,7 @@ def _on_post_tool_call_v5(**kwargs: Any) -> None:
 | `CA_TOOL_TAIL_TURN_COUNT`   | 2                          | 工具轮尾区保留最近对话轮数                                                     |
 | `CA_SYSTEM_TAIL_TURN_COUNT` | 2                          | 系统尾区：最近 N 条系统消息原文透传                                            |
 | `CA_COMPRESSION_THRESHOLD`  | 0.50                       | 压缩警戒比值                                                                   |
-| `CA_HISTORY_INJECTION`      | `replace`                | 注入模式：`replace`(mutation)/`append`(annotation)/`off`(仅数据积累)     |
+|| `CA_HISTORY_INJECTION`      | `replace`                | (v6 方向 B 已弃用) 旧 mutation 模式的注入模式。v6 由 `_build_conv_history_v6` 统一构造，此变量不再控制行为。 |
 | `CA_HISTORY_MUTATE`         | (已弃用)                   | 2值开关，`1`→替换 `0`→追加。未设 `CA_HISTORY_INJECTION` 时兼容此旧变量 |
 | `CA_LLM_THINK`              | 未设置（等效 false）       | Fct LLM think 参数（1/0/true/false）。Fct 是结构化提取任务，默认关闭推理链以节省 token。CA_LLM_THINK=1 开启。 |
 
@@ -329,57 +309,13 @@ grade = mgr.get_turn_grade(turn_num)  # 返回 TopicGrade.ACT | .REL | .FAR
 mgr.reset()  # 清空所有状态：/new 或 /reset 时调用
 ```
 
-## 增量缓存（A-stage Cache）
+## 增量缓存（⚠️ v6 方向 B 已废弃）
 
-### 实例变量
+v6 的 `_build_conv_history_v6` 不再需要 A-stage 缓存（`_A_stable_cache` / `_A_cache_turns` / `_A_cache_is_stale`）。
+每次 compress 从 turn_stream DB 直接重建 conv_history，不保留中间缓存。
 
-| 变量 | 类型 | 语义 |
-|------|------|------|
-| `_A_stable_cache` | `list[dict] \| None` | 稳定区已替换 Fct 的 conv_hist 片段。None=冷启动或话题切换后 |
-| `_A_cache_turns` | int | cache 中的 user 消息数（用于增量 Step 3 的 turn 计数起点） |
-| `_A_cache_is_stale` | bool | Fct pending 标记。True→下轮不进增量，走全量修复 |
-
-### 调度逻辑
-
-```
-pre_llm_call_v5()
-  ├─ 话题检测 detect()
-  │    ├─ 切换 → _A_stable_cache = None → 全量
-  │    └─ 无切换 → 继续
-  ├─ cache 状态判断
-  │    ├─ cache is None → 全量
-  │    ├─ _A_cache_is_stale → cache=None → 全量
-  │    └─ cache 有效 → 增量
-  └─ 全量路径: _full_mutation() (alias of _simple_mutation_mode_v5)
-       ├─ 逐 turn 查 turn_stream + 角色队列匹配 + grade 驱动替换
-       ├─ 尾部保留 Elm (倒数 2 个 user)
-       └─ 写缓存: _A_stable_cache = conv_hist[0:tail_boundary]
-  └─ 增量路径: _incremental_mutation()
-       ├─ Step 1: 尾部边界（与全量一致）
-       ├─ Step 2: 并行扫描 cache → 覆盖稳定区 conv_hist 的 content
-       ├─ Step 3: Delta 区收集 — cache 后到 tail_boundary 之间的 thought/tool/fin
-       ├─ Step 4: Delta 替换 — 从 turn_stream 读 Fct，1:1 角色队列匹配
-       │          ⚠️ Fct pending 防护：fct=None → 不入队列 → _A_cache_is_stale=True
-       └─ Step 5: 写缓存 → 更新 _A_stable_cache/_A_cache_turns
-```
-
-### Fct pending 防护（P0）
-
-增量 delta 替换中，若 `get_turn_ca_rows` 返回的 Fct 为 None（F-stage daemon 线程尚未写完），则：
-- 不将该 Fct 加入角色队列（避免 `""` 固化到缓存）
-- 标记 `_A_cache_is_stale = True`
-- 下次走全量路径修复
-
-### 回退条件
-
-| 场景 | 处理 |
-|------|------|
-| 冷启动 (cache is None) | `_full_mutation` |
-| 话题切换 (detect==True) | cache=None → 全量 |
-| Fct pending (delta Fct=None) | `_A_cache_is_stale=True` → 保留 Elm → 下轮全量 |
-| 缓存角色对齐失败 | 回退 `_full_mutation` |
-| 不足 2 轮 | tail_boundary=len(conv_hist)，全部跳过 |
-| session reset | 插件重建 → cache=None → 冷启动 |
+旧 v5 增量缓存的调度逻辑、Fct pending 防护、回退条件均不再适用，仅保留缓存变量
+清空以防旧代码残留。
 
 ## Fct 摘要生成架构
 
@@ -462,9 +398,8 @@ python -m pytest tests/ --tb=short -q -p no:cacheprovider -o "addopts="
 | 问题 | 状态 |
 |------|------|
 | `topic_manager` 无专用测试文件 | ❌ missing |
-| `get_turn_grade()` 返回值类型已改为 `TopicGrade` 枚举（ACT/REL/FAR） | ✅ 已修复 |
-| `_simple_mutation_mode_v5` 中 `grade` 比较已改用 `Grade`/`TopicGrade` 枚举 | ✅ 已修复 |
-| `reasoning_content`（模型思考链）被 A-stage 完全忽略 — 只替换 `content`，但 assistant 行还携带 `reasoning_content`（5-8KB/条）和 `tool_calls`，叠加占保护区外总 token 的 69% | ⏳ 待优化 |
+| `_build_conv_history_v6` 测试覆盖不足（替换了 `_simple_mutation_mode_v5` 的测试） | ⏳ 待补充 |
+| `reasoning_content`（模型思考链）在 conv_history 重建中如何处理 | ⏳ 待定（当前同 mutation 模式未携带） |
 
 详见 [docs/changelog.md](docs/changelog.md) 和 [wiki 事故记录](docs/wiki/decisions/20-incidents-review.md)。
 
@@ -531,7 +466,7 @@ PYTHONPATH=.graphify_pylib .graphify_pylib/bin/graphify update .
 # → 见 graphify skill 的「Graph Cleanup Workflow」节
 ```
 
-## ContextEngine 壳（v6.0）
+## ContextEngine 壳（v6.0 方向 B）
 
 `CAContextEngine` 实现了 `agent.context_engine.ContextEngine` ABC，通过 `register()` 中的
 `ctx.register_context_engine("ca_assembler", _ce_engine)` 注册到 Hermes。
@@ -542,31 +477,34 @@ CE 路径与 Hook 路径的执行时序（由 Hermes `turn_context.py` 驱动）
 
 ```
                                     ← should_compress()=True（每轮）
-                                    ← compress() 原地删 FAR 行
-                                    ← _full_backup 保存删行前快照
- pre_llm_call                      ← A-stage 在缩短后的消息上替换 content
+ pre_llm_call                      ← 写 user 到 turn_stream + 话题检测（不 mutation）
  LLM 调用
- post_llm_call                     ← _full_backup 恢复 content → F-stage
+ post_llm_call                     ← 写 fin 到 turn_stream → F-stage
+                                    ← compress() 从 turn_stream DB 重建 conv_history（方向 B）
 ```
 
 
 | 路径         | 触发时机  | 后端                          |
 |-------------|----------|-------------------------------|
-| Hook 路径   | 每轮      | pre_llm_call → topic_grade → A-stage |
-| CE 路径     | 每轮自动  | should_compress()=True → compress() 删 FAR 行 |
+| Hook 路径   | 每轮      | pre_llm_call → 写 turn + 话题检测（v6 不 mutation） |
+| CE 路径     | post_llm_call 后 | should_compress()=True → compress() → `_build_conv_history_v6` |
 
-`should_compress()` 返回 `True`（每轮触发）。CE 壳复用 v5.10 的 turn_stream + topic_grade 数据管道，
-在 pre_llm_call 之前删除 FAR 级话题的全部消息行，缩短 LLM 上下文。被删行的原始 content
-通过 `_full_backup` 在 post_llm_call 中恢复，保证 state.db 不丢失数据。
+### compress() 行为（v6 方向 B）
 
-### compress() 行为（CE 路径）
+v6 compress() **不再修改 Hermes 消息**。而是调用 `_build_conv_history_v6(topic_mgr, system_message)`，
+从 turn_stream DB 直接构造优化后的 conv_history 列表并返回，供 CE 管线替换。
 
-- 复用 v5.10 的 turn_stream + topic_grade 数据管道
-- tail 保护区（最后 2 轮 user）不动
-- compress() 在 pre_llm_call 之前删除 FAR 级话题的 thought/tool 行对
-- REL/ACT 级行保留原有 content 替换逻辑
-- `_full_backup` 在 compress() 入口保存全量快照，post_llm_call 恢复已删行的 content（行本身不恢复）
-- `should_compress()` 设 `_last_compress_aborted=True` → Hermes `compress_context` 跳过 archive_and_compact 和 session rotation
+**核心规则**：
+
+| 位置（区域） | user/fin | thought/tool |
+|---|---|---|
+| 尾部保护区（最后 2 user 轮） | Elm（原文） | Elm（原文，不降级） |
+| ACT 区 | Elm | Fct（降一级） |
+| REL 区 | Fct | Hdl（降一级） |
+| FAR 区 | Hdl | 删除（不保留） |
+
+**尾部保护区**：最后 2 个 user 消息内的所有行（含 thought/tool）均保留为 Elm，
+不受话题等级影响。
 
 | `graph.html` | 可交互图谱（浏览器打开），可视化节点与边关系 |
 | `graph.json` | 完整图谱数据（节点+边），可被代码分析工具消费 |

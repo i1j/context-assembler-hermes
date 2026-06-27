@@ -313,12 +313,10 @@ class CAContextEngine(ContextEngine):
         focus_topic: str = None,
         force: bool = False,
     ) -> list:
-        """CE 管线入口：备份 + 交 A-stage 统一处理删行与替换。
+        """CE 管线入口（v6）：从 turn_stream DB 重建 conv_history（方向 B）。
 
-        设置 _full_backup 后委托 plugin.pre_llm_call_v5 处理，
-        A-stage 负责删除 FAR thought/tool 行对并替换剩余行 content。
-        配合 should_compress 预设的 abort 标志使 compress_context
-        跳过 archive_and_compact 和 session rotation。
+        不再修改 Hermes 传来的 messages；改用 _build_conv_history_v6
+        从 CA 自己的 turn_stream 数据库构造优化后的 conv_history。
         """
         plugin = self._get_plugin()
         if not plugin or plugin._engine_errored or not plugin._engine:
@@ -329,18 +327,19 @@ class CAContextEngine(ContextEngine):
         if not force and len(messages) <= last_len:
             return messages
 
-        # 全量备份，供 post_llm_call 恢复 content → state.db
-        plugin._full_backup = [{**m} for m in messages]
+        # 从 Hermes 第一条保留 system 消息（如有）
+        system_msg = messages[0] if (messages and messages[0].get("role") == "system") else None
 
-        # 交给 A-stage 统一处理（传入原始 messages 引用，可做删行+替换）
-        plugin.pre_llm_call_v5(conversation_history=messages)
-
-        # _full_backup 保留不动：post_llm_call_v5 直接用原表替换压缩后的 conv_hist，
-        # 天然解决索引错位（替代逐行 idx 拷贝 + 回退 _saved_history_snapshot 的方案）。
+        # v6：从 turn_stream DB 重建 conv_history
+        topic_mgr = plugin._topic_mgr
+        new_conv = plugin._engine._build_conv_history_v6(
+            topic_mgr,
+            system_message=system_msg,
+        )
 
         self._last_compress_msg_len = len(messages)
         self.compression_count += 1
-        return messages
+        return new_conv if new_conv else messages
 
     # -- ContextEngine: lifecycle -----------------------------------------
 
@@ -656,7 +655,7 @@ class CAContextAssemblerPlugin:
         return self._engine._incremental_mutation(self._topic_mgr, conversation_history)
 
     def post_llm_call_v5(self, **kwargs: Any) -> None:
-        """v5 E-stage final: 写 asst_fin → 快照恢复 → C-stage。"""
+        """v6 orientation B: 写 asst_fin → F-stage（不再恢复快照，因 compress 不修改消息）。"""
         if self._engine_errored or not self._engine:
             return
         user_message = kwargs.get("user_message", "")
@@ -678,33 +677,13 @@ class CAContextAssemblerPlugin:
             finish_reason='stop',
             written_at=time.time(),
         )
-        logger.info("[CA_v5] post_llm_call: wrote asst_fin turn=%d seq=%d", turn, seq)
+        logger.info("[CA_v6] post_llm_call: wrote asst_fin turn=%d seq=%d", turn, seq)
 
-        _backup = getattr(self, "_full_backup", None)
-        if _backup is not None:
-            # _full_backup 是 compress() 保存的完整快照（含 FAR 行），
-            # 直接替换 conv_hist 整表，避免索引错位 + 完整保留原始数据供 archive
-            conversation_history[:] = _backup
-            self._full_backup = None
-            logger.info("[CA_v5] post_llm_call: replaced conv_hist with full_backup (%d rows)",
-                        len(conversation_history))
-        else:
-            _snapshot = getattr(self._engine, "_saved_history_snapshot", None)
-            if _snapshot is not None:
-                for i, orig_dict in enumerate(_snapshot):
-                    if i >= len(conversation_history):
-                        break
-                    ch = conversation_history[i]
-                    # 还原所有被 mutation 修改的字段
-                    for _key in ("content", "reasoning_content", "tool_calls"):
-                        if _key in orig_dict:
-                            ch[_key] = orig_dict[_key]
-                        else:
-                            ch.pop(_key, None)
-                self._engine._saved_history_snapshot = None
+        # v6: 方向 B — compress 不修改 Hermes 消息，无需 _full_backup 或 _saved_history_snapshot 恢复
+        # _full_backup / _saved_history_snapshot 已废弃，略过备份恢复逻辑
 
         engine.process_turn_f_stage(turn, fin_seq=seq)
-        logger.info("[CA_v5] post_llm_call: process_turn_f_stage called for turn %d fin_seq %d", turn, seq)
+        logger.info("[CA_v6] post_llm_call: process_turn_f_stage called for turn %d fin_seq %d", turn, seq)
 
         # OV 话题摘要提交（fire-and-forget）
         if self._pending_ov_submit is not None and Config.OV_ENABLED:
@@ -879,12 +858,26 @@ class CAContextAssemblerPlugin:
 # ═══════════════════════════════════════════════════════════════
 
 def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
-    """v5: 写 seq 0 (user Elm) → A-stage 替换。"""
+    """v6: 写 seq 0 (user Elm) → 话题检测（mutation 由 compress 中的 _build_conv_history_v6 替代）。
+
+    方向 B（2026-06-28）：
+      - bg 轮：完全跳过，不增 turn、不写 DB、不调检测
+      - 非 bg 轮：写 DB seq 0 → 话题检测 → 返回（conv_history 由 compress 从 DB 重建）
+    """
     session_id = kwargs.get("session_id", "")
     with _engines_lock:
         plugin = _engines.get(session_id)
     if not plugin or plugin._engine_errored:
         return None
+
+    # ── bg 检测：完全跳过 ──
+    try:
+        from tools.skill_provenance import get_current_write_origin
+        if get_current_write_origin() == "background_review":
+            logger.info("[CA_v6] pre_llm_call: bg turn skipped (no turn increment, no write)")
+            return None
+    except ImportError:
+        pass
 
     user_message = kwargs.get("user_message", "")
     conversation_history = kwargs.get("conversation_history", [])
@@ -895,27 +888,7 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
     engine._seq_counter[turn] = 0
     engine._tool_seq_map.clear()
 
-    bg = False
-    try:
-        from tools.skill_provenance import get_current_write_origin
-        bg = (get_current_write_origin() == "background_review")
-    except ImportError:
-        pass
-
     from ca.store import write_turn_v5
-
-    if bg:
-        # 后台轮：user 行 Fct=Elm（Elm 拷贝），Hdl=Elm[:100]
-        write_turn_v5(
-            engine.store, session_id, turn, seq=0,
-            role='user', elm_text=user_message,
-            fct_text=user_message,
-            hdl_text=user_message[:100],
-            biz_category='bg_review',
-            written_at=time.time(),
-        )
-        logger.info("[CA_v5] pre_llm_call: wrote seq 0 (bg) turn=%d", turn)
-        return None
 
     write_turn_v5(
         engine.store, session_id, turn, seq=0,
@@ -925,9 +898,67 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
         biz_category=None,
         written_at=time.time(),
     )
-    logger.info("[CA_v5] pre_llm_call: wrote seq 0 turn=%d", turn)
+    logger.info("[CA_v6] pre_llm_call: wrote seq 0 turn=%d", turn)
 
-    return plugin.pre_llm_call_v5(**kwargs)
+    # ── v6：话题检测（mutation 已剥离，由 compress 中的 _build_conv_history_v6 替代）──
+    if plugin._topic_mgr and engine and turn > 0 and user_message:
+        from ca.store import get_turn_ca_rows
+        total_tokens = CAContextAssemblerPlugin._estimate_conv_tokens(conversation_history)
+        ca_rows = get_turn_ca_rows(engine.store, session_id, turn)
+        switched = plugin._topic_mgr.detect(turn, ca_rows, user_message, total_tokens=total_tokens)
+        if switched:
+            q_emb = engine.embed_client.embed(user_message)
+            plugin._topic_mgr.grade_on_switch(q_emb, user_message)
+            # 打包前一个话题数据 → OV 提交
+            old_topic_id = plugin._last_topic_id
+            plugin._last_topic_id = plugin._topic_mgr._current_topic_id
+            if old_topic_id is not None and Config.OV_ENABLED and engine:
+                old_turns = sorted([
+                    t for t, tid in plugin._topic_mgr._turn_to_topic.items()
+                    if tid == old_topic_id
+                ])
+                if old_turns:
+                    plugin._pending_ov_submit = {
+                        "topic_id": old_topic_id,
+                        "turns": old_turns,
+                        "switch_turn": turn,
+                    }
+                    logger.info("[CA_OV] Topic %d packaged for submit (turns %s, switch at turn %d)",
+                                old_topic_id, old_turns, turn)
+        elif plugin._topic_mgr._current_topic_id is not None:
+            # 首次话题：记录 current_topic_id
+            if plugin._last_topic_id is None:
+                plugin._last_topic_id = plugin._topic_mgr._current_topic_id
+
+        # 缓存调度：v6 compress 不再使用 _A_stable_cache，但保留清空以免残留影响
+        if switched:
+            if engine is not None:
+                engine._A_stable_cache = None
+                engine._A_cache_is_stale = False
+
+        # 【日志】话题定级后 dump
+        try:
+            tg = plugin._topic_mgr.get_topic_grades()
+            t1g = plugin._topic_mgr.get_turn_grade(1)
+            td = getattr(plugin._topic_mgr, "_topic_data", {})
+            logger.info("[CA_v6_grade] grades=%s turn1_grade=%s topic_data_has_centroid=%s",
+                       {str(k): str(v) for k, v in tg.items()}, t1g,
+                       {str(k): v.get("centroid") is not None for k, v in td.items()})
+            _dump = {
+                "turn": turn,
+                "topic_grades": {str(k): str(v) for k, v in tg.items()},
+                "turn_1_grade": str(t1g),
+                "topic_data": {str(k): {"turns": v.get("turns",[]), "has_centroid": v.get("centroid") is not None, "max_intra": v.get("max_intra")}
+                              for k, v in td.items()},
+                "topic_mgr_ok": plugin._topic_mgr is not None,
+                "engine_ok": engine is not None,
+            }
+            with open("/tmp/ca_topic_grades.jsonl", "a") as _f:
+                _f.write(json.dumps(_dump, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.warning("[CA_v6] topic grades dump failed: %s", exc)
+
+    return None
 
 
 def _on_post_api_request_v5(**kwargs: Any) -> None:
