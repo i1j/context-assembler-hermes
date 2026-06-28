@@ -26,7 +26,13 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import ASSEMBLE_OK, ASSEMBLE_PENDING_BACKFILL, Config
-from .post_process import clean_increment, parse_v1_markdown_xml
+from .post_process import (
+    PAIR_PATTERN,
+    VALID_STATES,
+    MEANINGLESS_CORE,
+    clean_increment,
+    parse_v1_markdown_xml,
+)
 from .prompts import FCT_GENERATION_PROMPT
 from .store import format_previous_summary_for_prompt, read_incremental_elm, read_prev_fct
 
@@ -78,24 +84,16 @@ class FStageMixin:
         elm_text = "\n".join(parts)
         prev_fct = read_prev_fct(self.store, session_id, turn_index)
 
-        # 首轮特殊处理：无历史摘要时 LLM 无法做"增量对比"，直接复制 user_elm
-        if not prev_fct and user_elm and turn_index >= 1:
-            first_fct = json.dumps({
-                "changes": [{"stage_tag": "探讨", "core_change": user_elm[:200]}],
-                "core_change": user_elm[:200],
-                "new_materials": [], "objective_facts": [],
-                "consensus": [], "todo": [],
-                "_assemble_status": ASSEMBLE_OK,
-            }, ensure_ascii=False)
-            first_hdl = user_elm[:100]
-            self._update_fct_v5(session_id, turn_index, fin_seq, first_fct, first_hdl)
-            self.cache.add_turn(turn_index, first_hdl, first_fct, None, None)
-            logger.info(
-                "[CA] _run_f_stage turn %d fin_seq %d: first turn (no prev Fct), "
-                "skip LLM, use user_elm (%d chars)",
-                turn_index, fin_seq, len(user_elm),
+        # prev_fct 为空时（首轮/无历史摘要），提供格式完整但内容为空的 Fct JSON，
+        # 使 format_previous_summary_for_prompt → _json_to_v1_markdown 正常走 JSON 解析路径，
+        # 给 LLM 一个「历史摘要为空」的明确信号，而非跳过 LLM 或塞"无历史回顾"文字
+        if not prev_fct:
+            prev_fct = json.dumps(
+                {"changes": [], "core_change": "",
+                 "new_materials": [], "objective_facts": [],
+                 "consensus": [], "todo": []},
+                ensure_ascii=False,
             )
-            return
 
         try:
             logger.info("[CA] _run_f_stage turn %d fin_seq %d: calling LLM", turn_index, fin_seq)
@@ -109,20 +107,46 @@ class FStageMixin:
             _has_stage_tag = "<stage_tag>" in response_text
             _ends_with_close = response_text.strip().endswith("</core_change>") or response_text.strip().endswith("}")
             if finish_reason == "length" or (_has_stage_tag and not _ends_with_close):
-                logger.warning("[CA-METRIC] ca.fct.truncated_fallback: turn=%d fin_seq=%d, finish_reason=%s, len=%d",
-                               turn_index, fin_seq, finish_reason, len(response_text))
+                logger.warning("[CA-METRIC] ca.fct.truncated_fallback: turn=%d fin_seq=%d, finish_reason=%s, len=%d, num_predict=%d",
+                               turn_index, fin_seq, finish_reason, len(response_text), Config.L1_MAX_TOKENS)
                 with self.stats._lock:
                     self.stats.truncated_fallback += 1
                 partial = (response_text or "").strip()
-                truncated_cleaned = {
-                    "changes": [],
-                    "core_change": (partial[:500] or f"阶段摘要生成中（L1_MAX_TOKENS={Config.L1_MAX_TOKENS}，未完成）"),
-                    "new_materials": [],
-                    "objective_facts": [],
-                    "consensus": [],
-                    "todo": [],
-                    "_assemble_status": ASSEMBLE_PENDING_BACKFILL,
-                }
+                # 截断时优先提取 partial 中已完成的 <stage_tag>/<core_change> 对
+                raw_pairs = PAIR_PATTERN.findall(partial)
+                valid_changes = []
+                for raw_state, raw_core in raw_pairs:
+                    state = raw_state.strip()
+                    core = raw_core.strip()
+                    if state in VALID_STATES and core and core not in MEANINGLESS_CORE:
+                        valid_changes.append({"stage_tag": state, "core_change": core})
+                if valid_changes:
+                    core_change = "；".join(c["core_change"] for c in valid_changes)
+                    truncated_cleaned = {
+                        "changes": valid_changes,
+                        "core_change": core_change,
+                        "_assemble_status": ASSEMBLE_PENDING_BACKFILL,
+                    }
+                else:
+                    # 无有效 XML 对时：尝试 parse_v1_markdown_xml 提取叙事段
+                    try:
+                        fct_dict, _, _ = parse_v1_markdown_xml(partial)
+                        cleaned = clean_increment(fct_dict)
+                        if cleaned.get("changes") or cleaned.get("core_change", "") not in ("本轮无新内容", ""):
+                            cleaned["_assemble_status"] = ASSEMBLE_PENDING_BACKFILL
+                            truncated_cleaned = cleaned
+                        else:
+                            raise ValueError("no content extracted")
+                    except Exception:
+                        truncated_cleaned = {
+                            "changes": [],
+                            "core_change": (partial[:500] or f"阶段摘要生成中（L1_MAX_TOKENS={Config.L1_MAX_TOKENS}，未完成）"),
+                            "new_materials": [],
+                            "objective_facts": [],
+                            "consensus": [],
+                            "todo": [],
+                            "_assemble_status": ASSEMBLE_PENDING_BACKFILL,
+                        }
                 fct_str = json.dumps(truncated_cleaned, ensure_ascii=False)
                 hdl_text = (user_elm or "")[:150]
                 self._update_fct_v5(session_id, turn_index, fin_seq, fct_str, hdl_text)
@@ -225,9 +249,14 @@ class FStageMixin:
                 # 空响应 → 视为错误，触发 fallback 路径
                 if not response_text.strip():
                     finish_reason = "error"
+                if attempt > 0:
+                    logger.info("[CA] LLM retry %d/%d succeeded turn=%d (len=%d, reason=%s)",
+                                attempt + 1, Config.LLM_MAX_RETRIES, turn_index,
+                                len(response_text), finish_reason)
                 break
             except Exception as e:
-                logger.warning("LLM attempt %d failed: %s", attempt + 1, e)
+                logger.warning("[CA] LLM attempt %d/%d failed turn=%d: %s",
+                               attempt + 1, Config.LLM_MAX_RETRIES, turn_index, e)
                 time.sleep(2 ** attempt)
 
         elapsed_ms = int((time.monotonic() - llm_start) * 1000)

@@ -81,6 +81,22 @@ conv_history 结构（三区）：
 
 内容级行为不变（仍回退到 Elm 原文），但运维可见性显著提升——避免静默 token 浪费。
 
+### Tool Fct 空字段过滤（v6.0.3）
+
+`_select_content` 中当 `target_grade=Grade.FCT` 且 `row["role"]="tool"` 时，对工具行的 Fct JSON
+做空字段(null/[]/""/0)剔除：
+
+```python
+cleaned = {k: v for k, v in fct_dict.items()
+           if v is not None and v != [] and v != "" and v != 0}
+```
+
+**动机**：单位 Token 互信息最大化。工具 Fct 中 ~84%~100% 行的 `error/implicit_knowledge/next_action_hint/_assemble_status`
+为默认空值，共占 Tool Fct 总体积的 25%（约 650 tok/会话）。LLM 不因这些空字段获得额外信息。
+
+**实现位置**：`_select_content`（`a_stage.py`），仅影响 ACT 区 tool 行进入 LLM 上下文时的序列化输出，
+不影响 DB 存储（F-stage/E-stage 写入不变）。
+
 ## 数据验证
 
 ```bash

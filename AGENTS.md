@@ -513,3 +513,26 @@ v6 compress() **不再修改 Hermes 消息**。而是调用 `_build_conv_history
 | `.graphify_labels.json` | 社区标签映射 |
 
 **何时使用**：代码重构前、跨模块数据流追踪、定位 God Nodes（高耦合中心如 `ContextAssembler` 100 度、`SQLiteStore` 62 度）。
+
+---
+
+## 工具摘要清理（tool_args）
+
+`ca/tool_summarizer.py` 中 `_clean_tool_args` 负责在 Tool Fct 写入 turn_stream 前清洗 `tool_args` 中的负载型字段，遵循「单位 Token 互信息最大化」原则。
+
+### 规则（`HEAVY_FIELDS`）
+
+| 工具 | 清洗字段 | 保留字段 | 设计理由 |
+|------|---------|---------|---------|
+| `execute_code` | `code` | —（全部清除） | 身份在 `thought`，code 体是纯实现噪音 |
+| `terminal` | —（改为截断） | `command[:100]` | command 是身份标识，保留前 100 字截断路径噪音 |
+| `write_file` | `content`, `file_content` | `path` | 路径足够，内容在 LLM 响应流中 |
+| `patch` | `old_string`, `new_string` | `path`, `mode`, `replace_all` | 替换体在 LLM 响应中 |
+| `skill_manage` | `old_string`, `new_string`, `content`, `file_content` | `action`, `name`, `file_path`, `category` | 操作标识足够 |
+| `memory` | `content`, `old_text`, `old_string` | `action`, `target` | `result_summary` 已有预览 |
+
+### 兜底
+
+- 通用 `_clean_tool_args` 为所有无专用 handler 的工具提供 `code` 字段自动移除（保护 MCP 变体）
+- 所有 14 个 `tool_args` 构造点均已接入 `_clean_tool_args` 或直接构造清理后的值
+- 不在 `HEAVY_FIELDS` 中的工具名 → `drop=set()` → 返回原 args（无损通传）

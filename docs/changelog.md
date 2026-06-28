@@ -548,6 +548,17 @@ v4.2                  v4.3 → v4.3-s1 → v4.3-s2    v4.3.1 → v4.3.1 修订
 || 2026-06-09 | 工具组 L2：thought 原文 → 完整消息序列展开 | `_extend_with_l2` 替代只提 thought；covered 集加 `(turn_idx, "tool")` 防重复；L1 fallback 用 `_format_group_summary` 替代 raw JSON `l1_display` | v5.0-pr3 |
 
 ||| **v5.5.0**            | 2026-06-16 | 命名统一        | ① `Fct`/`Hdl`/`Elm` 重命名 + 279 DB ALTER TABLE 迁移 ② Bug 修复 4 项：`@staticmethod` 错标、fallback 占位符、`fct_text` 残留、`generate_group_summary` 截断（详见 `docs/debug/`）③ 与 source project 分化差异全量归档 | 发布 |
-||| **v6.0.1**            | 2026-06-28 | Fct=NULL 告警   | ① A-stage 新增 Fct=NULL 告警：`_simple_mutation_mode_v5`(4处) + `_incremental_mutation`(2处)，当 grade=FCT 但摘要为空时写 `logger.warning`，消除静默 Elm 回退 | **已实装** |
+|||| **v6.0.1**            | 2026-06-28 | Fct=NULL 告警   | ① A-stage 新增 Fct=NULL 告警：`_simple_mutation_mode_v5`(4处) + `_incremental_mutation`(2处)，当 grade=FCT 但摘要为空时写 `logger.warning`，消除静默 Elm 回退 | **已实装** |
 |||                     |            | 冗余赋值清理    | ② 移除 `test_a_stage.py`/`test_a_stage_topic_aware.py` 中 `plugin._A_stable_cache = None`（v6.0 方向 B 重构后插件副本从未被读取） | 已清理 |
 |||                     |            | 测试 xfail→pass | ③ `test_rel_fct_null_falls_back_to_elm_with_warning` 移除 xfail 标记 | 已验证 |
+||||| **v6.0.2**            | 2026-06-28 | 首轮 Fct band-aid 移除 | ① 删除 f_stage.py 首轮跳过 LLM 分支，改为空 Fct JSON 归一化；首轮 LLM 收到完整格式的空历史摘要，正常走生成路径 | **已实装** |
+||||                     |            | 截断 fallback 改进 | ② 截断路径优先 PAIR_PATTERN.findall 提取已完成 XML 对，次优 parse_v1_markdown_xml 提取叙事段，末位 partial[:500] 兜底 | |
+||||                     |            | Tool Fct 代码体剥离 | ③ `_clean_tool_args` 新增 `terminal`→`command` + 通用 `code` 兜底（覆盖 MCP 变体），消除 4.5K-8.5K 的 tool Fct 膨胀 | |
+||||                     |            | L1_MAX_TOKENS 800→2048 | ④ 减少 F-stage LLM 截断频率，覆盖成功 Fct 的 P90 大小 | |
+||||| **v6.0.3**            | 2026-06-28 | Tool Fct 空字段过滤 | ① `_select_content` 对 tool Fct 做空字段(null/[]/""/0)剔除 — 单位 Token 互信息最大化。ACT 轮 32 工具行节省 ~650 tok/会话 | **已实装** |
+|||||                     |            | result_summary 去命令 | ② terminal `_summarize_terminal` 有 key_lines 时不附带 `[cmd_short]` — 命令已隐含在 thought 中，互信息为零 | |
+|| **v6.0.4**            | 2026-06-28 | HEAVY_FIELDS 审计修复 | ① `skill_manage` HEAVY_FIELDS 补 `old_string/new_string/content` — 修复 2962B tool Fct outlier | **已实装** |
+|||||                     |            | `memory` HEAVY_FIELDS 新增 | ② 新增 `memory` 条目 + handler 接线，清除 `content/old_text/old_string` | |
+|||||                     |            | 5 handler 漏接 `_clean_tool_args` | ③ `search_files/skills_list/skill_view/todo` 补 `_clean_tool_args` 调用 — 0 处裸 `tool_args: args` 残留 | |
+|||||                     |            | terminal `command[:100]` 替代全删 | ④ `_summarize_terminal` 改为 `{"command": cmd_short}` — 命令是身份标识，100 字截断路径噪音，**单位 Token 互信息最大化** | |
+|

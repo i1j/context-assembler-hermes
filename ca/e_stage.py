@@ -203,8 +203,12 @@ class EStageMixin:
             fct_str = json.dumps(fct_dict, ensure_ascii=False) if fct_dict else ""
         except Exception as e:
             logger.warning("[CA_v5] tool summarize failed: %s", e)
-        if not fct_str.strip() and not hdl_text.strip():
+        if not fct_str.strip():
+            fct_str = "空"
+        if not hdl_text.strip():
             hdl_text = "空"
+        if "空" in (fct_str, hdl_text):
+            logger.debug("[CA_v5] _on_post_tool_call: empty Fct/Hdl, using '空' fallback turn=%d seq=%d", turn, seq)
 
         write_turn_v5(
             self.store, self._session_id, turn, seq,

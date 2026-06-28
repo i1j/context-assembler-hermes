@@ -626,6 +626,19 @@ class AStageMixin:
 
         if target_grade == Grade.FCT:
             fct = row.get("Fct", "") or ""
+            if fct and row.get("role") == "tool":
+                # P0: 过滤 Tool Fct 的空字段（null/[]/""/0）— 单位 Token 互信息最大化
+                try:
+                    fct_dict = json.loads(fct)
+                    cleaned = {k: v for k, v in fct_dict.items()
+                               if v is not None and v != [] and v != "" and v != 0}
+                    if len(cleaned) < len(fct_dict):
+                        logger.debug("[CA_build]  trimmed %d empty fields from tool Fct turn=%d seq=%d",
+                                      len(fct_dict) - len(cleaned),
+                                      row.get("turn"), row.get("seq"))
+                        fct = json.dumps(cleaned, ensure_ascii=False)
+                except (json.JSONDecodeError, TypeError):
+                    pass  # fallback: 保持原样
             return fct if fct else (row.get("Elm", "") or "")
 
         if target_grade == Grade.HDL:

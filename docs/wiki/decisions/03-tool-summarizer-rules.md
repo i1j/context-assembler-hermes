@@ -207,6 +207,25 @@ source_files: ["ca/tool_summarizer.py"]
 | 有意义输出 | `一、测试文件存在性验证`（无前缀） | `exc: 一、测试文件存在性验证`（有前缀） |
 | 数据量 | 376KB 总量 | 42KB 总量（89% 压缩） |
 
+### Terminal result_summary 去命令（v6.0.3）
+
+`_summarize_terminal` 构建 `result_summary` 时，当 `key_lines` 为非空（有输出摘要），
+不再追加 `[cmd_short]` 后缀：
+
+```python
+# v6.0.2 及之前（有 key_lines 时）:
+result_summary = "2026-06-28 02:03:07 | ... [ls -la ~/.hermes/profiles/...]"
+# v6.0.3（有 key_lines 时）:
+result_summary = "2026-06-28 02:03:07 | ..."
+```
+
+**动机**：单位 Token 互信息最大化。key_lines 已包含足够的语义信息描述工具输出，
+cmd_short 中的命令原文已隐含在上一轮 assistant thought 的 tool_calls 中，
+在 LLM 输入上下文中不提供额外互信息。
+
+**边界保护**：当 `key_lines` 为空（无输出行）时，`[cmd_short]` 仍保留作为唯一信号，
+保证零输出时不丢失上下文。
+
 ### 代码结构
 
 ```python
@@ -240,4 +259,52 @@ def _summarize_execute_code(self, tool_call_msg, tool_responses):
 | `test_no_tool_calls_no_suffix` | 无 tool_calls 不追加 |
 | `test_non_json_response_fallback` | JSON 解析失败回退 |
 | `test_multiple_tool_responses` | 多 response 行 |
-| `test_handler_dispatch` | dispatch 路由正确
+|| `test_handler_dispatch` | dispatch 路由正确
+
+---
+
+## Tool Args 字段清洗（HEAVY_FIELDS）
+
+### 背景
+
+每个工具 Handler 构造 Fct 时，`tool_args` 默认携带完整的 LLM tool call arguments。部分工具的参数包含负载型字段——完整代码体（`execute_code`）、文件内容（`write_file`）、替换文本段（`patch`/`skill_manage`）、记忆文本（`memory`）。这些字段在写入 turn_stream 后，A-stage 替换时会被 LLM 重新读取，产生巨量上下文浪费。
+
+### 设计原则：单位 Token 互信息最大化
+
+对于每个工具，`tool_args` 中留存的每个字节都应为 LLM 提供不可替代的信息：
+
+| 工具 | `tool_args` 方案 | 互信息评价 |
+|------|:---------------:|:---------:|
+| `terminal` | `{"command": cmd_short[:100]}` | 命令是 terminal 的身份标识，100 字捕获二进制+核心参数，路径噪音被自然截断 |
+| `execute_code` | `{}`（`code` 全清） | 身份在 `thought`，不在 code 体 |
+| `write_file` | `{"path": "..."}` | 路径足够，文件内容在 LLM 响应中 |
+| `patch` | `{"path": "...", "mode": ...}` | 目标+模式足够 |
+| `skill_manage` | `{"action": "...", "name": "..."}` | 操作标识足够 |
+| `memory` | `{"action": "...", "target": "..."}` | `result_summary` 已有预览 |
+| 其它 | 原样保留 | args 通常很小，无影响 |
+
+### 实现
+
+`_clean_tool_args` 静态方法维护一个 `HEAVY_FIELDS` 字典：
+
+```python
+HEAVY_FIELDS = {
+    "execute_code": {"code"},
+    "terminal": {"command"},            # 仅通用 fallback 用；专用 handler 改为 cmd_short[:100]
+    "write_file": {"content", "file_content"},
+    "patch": {"old_string", "new_string"},
+    "skill_manage": {"old_string", "new_string", "content", "file_content"},
+    "memory": {"content", "old_text", "old_string"},
+}
+# 兜底：任何工具只要有 code 字段就去掉（覆盖 MCP 变体）
+if "code" in args:
+    drop.add("code")
+```
+
+所有 14 个 tool_args 构造点均已接入 `_clean_tool_args` 或值构造。不在 HEAVY_FIELDS 的工具名 → `drop=set()` → 原样返回。
+
+### 边界保护
+
+- `terminal` 专用 handler 改为 `{"command": cmd_short[:100]}`（截断而非删除），通用 fallback 中 `terminal→command` 仍为全删（异常逃逸保护）
+- `cmd_short` 为空时构造 `{}`（零输出信号场景）
+- `_clean_tool_args` 不修改调用者——Handler 可选择性覆盖

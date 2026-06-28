@@ -182,7 +182,7 @@ class ToolSummarizer:
             result_summary = f"pytest: {', '.join(parts)} — {el}s"
             l1 = {
                 "tool_name": "terminal",
-                "tool_args": self._clean_tool_args("terminal", args),
+                "tool_args": {"command": cmd_short} if cmd_short else {},
                 "result_summary": result_summary,
                 "error": None,
                 "implicit_knowledge": [],
@@ -235,9 +235,8 @@ class ToolSummarizer:
         # 无 key_lines 时展示 cmd（有输出才有信息价值）
         if key_lines:
             error_symbol = f"exit={exit_code} " if has_error else ""
+            # P1: 有 key_lines 时不附带 cmd_short — 命令已隐含在 thought 中，单位 Token 互信息最大化为零
             result_summary = f"{error_symbol}{body}"
-            if cmd_short:
-                result_summary += f" [{cmd_short}]"
         elif cmd_short:
             error_symbol = f"exit={exit_code} " if has_error else ""
             result_summary = f"{error_symbol}({total_effective} lines) [{cmd_short}]"
@@ -248,7 +247,7 @@ class ToolSummarizer:
 
         l1 = {
             "tool_name": "terminal",
-            "tool_args": self._clean_tool_args("terminal", args),
+            "tool_args": {"command": cmd_short} if cmd_short else {},
             "result_summary": result_summary,
             "error": f"exit_code={exit_code}" if has_error else None,
             "implicit_knowledge": [],
@@ -603,7 +602,7 @@ class ToolSummarizer:
 
         l1 = {
             "tool_name": "search_files",
-            "tool_args": args,
+            "tool_args": self._clean_tool_args("search_files", args),
             "result_summary": result_summary,
             "error": None,
             "implicit_knowledge": [],
@@ -642,7 +641,7 @@ class ToolSummarizer:
 
         l1 = {
             "tool_name": "skills_list",
-            "tool_args": args,
+            "tool_args": self._clean_tool_args("skills_list", args),
             "result_summary": result_summary,
             "error": None,
             "implicit_knowledge": [],
@@ -685,7 +684,7 @@ class ToolSummarizer:
             l0 = _safe_truncate(f"skill_view: {skill_name} — {desc_short}", 100)
             l1 = {
                 "tool_name": "skill_view",
-                "tool_args": args,
+                "tool_args": self._clean_tool_args("skill_view", args),
                 "result_summary": description or "[空]",
                 "error": None,
                 "implicit_knowledge": [],
@@ -787,7 +786,7 @@ class ToolSummarizer:
 
         l1 = {
             "tool_name": "skill_view",
-            "tool_args": args,
+            "tool_args": self._clean_tool_args("skill_view", args),
             "result_summary": result_summary,
             "error": None,
             "implicit_knowledge": [],
@@ -888,7 +887,7 @@ class ToolSummarizer:
 
         l1 = {
             "tool_name": "memory",
-            "tool_args": args,
+            "tool_args": self._clean_tool_args("memory", args),
             "result_summary": result_summary,
             "error": error,
             "implicit_knowledge": [],
@@ -962,7 +961,7 @@ class ToolSummarizer:
 
         l1 = {
             "tool_name": "todo",
-            "tool_args": args,
+            "tool_args": self._clean_tool_args("todo", args),
             "result_summary": result_summary,
             "error": None,
             "implicit_knowledge": [],
@@ -1220,18 +1219,25 @@ class ToolSummarizer:
     def _clean_tool_args(tool_name: str, args: dict) -> dict:
         """去除 tool_args 中负载型字段（完整代码体、文件内容体），保留语义关键字段。
 
+        terminal     → 去 command
         execute_code → 去 code
         write_file   → 去 content
         patch        → 去 old_string, new_string
+        MCP 变体     → 只要有 code 就去掉
         其他工具     → 原样保留（args 体积极小，如 read_file 的 path）
         """
         HEAVY_FIELDS = {
             "execute_code": {"code"},
+            "terminal": {"command"},
             "write_file": {"content", "file_content"},
             "patch": {"old_string", "new_string"},
-            "skill_manage": {"file_content"},
+            "skill_manage": {"old_string", "new_string", "content", "file_content"},
+            "memory": {"content", "old_text", "old_string"},
         }
-        drop = HEAVY_FIELDS.get(tool_name, set())
+        drop = set(HEAVY_FIELDS.get(tool_name, []))
+        # 兜底：任何工具只要有 code 字段就去掉（覆盖 MCP 变体等）
+        if "code" in args:
+            drop.add("code")
         if not drop:
             return args
         return {k: v for k, v in args.items() if k not in drop}
