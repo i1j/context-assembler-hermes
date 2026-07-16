@@ -8,6 +8,7 @@ alternatives: ["直接替换（覆盖旧数据）", "追加（上下文膨胀）
 chosen: "Replace/Append/Off 三模式 + 行类型表 + bypass_turns + 工具行清空"
 affects: ["04-a-stage-role-match"]
 status: 已实装
+source_files: ["ca/a_stage.py"]
 ---
 
 ## 触发条件

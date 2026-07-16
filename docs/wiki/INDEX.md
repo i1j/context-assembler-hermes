@@ -21,6 +21,7 @@ flowchart LR
   NC[12-命名统一]
   TE[13-测试策略]
   RA[14-已拒绝方案]
+  MO[15-多OODA分治摘要]
 
   %% decisions 节点（旧）
   DP[01-设计哲学]:::decision
@@ -55,6 +56,9 @@ flowchart LR
   INCC[28-增量缓存]:::decision
   COV[29-CA-OV提交]:::decision
   REJ[30-已拒绝方案]:::decision
+  CES[31-CE-壳注册]:::decision
+  CDD[32-state-db-user-dedup]:::decision
+  MTP[33-多话题OODA]:::decision
 
   %% architecture → architecture 依赖
   SM --> EP
@@ -96,12 +100,17 @@ flowchart LR
   TP46 --> TS
   TP46 --> TG
 
+  %% decisions → architecture 影响（续）
+  MTP --> MO
+  MTP --> FS
+  MTP --> FE
+
   classDef decision fill:#e1f5fe,stroke:#0288d1
 ```
 
 ## 索引
 
-### architecture（14 页 — 空间维度：当前系统组件）
+### architecture（空间维度：当前系统组件）
 
 | # | 文件 | 版本引入 | 决策关联 |
 |---|------|----------|----------|
@@ -119,8 +128,9 @@ flowchart LR
 | 12 | [命名统一](architecture/12-naming-convention.md) | v5.5 | stage-terminology-unification |
 | 13 | [测试策略](architecture/13-test-strategy.md) | v5.0 | — |
 | 14 | [已拒绝方案](architecture/14-rejected-approaches.md) | v5.0 | rejected-approaches |
+| 15 | [多 OODA 分治摘要](architecture/15-multi-ooda-arch.md) | v6.2 | multi-ooda-per-topic-summary |
 
-### decisions（31 页 — 时间维度：决策树）
+### decisions（时间维度：决策树）
 
 | # | 文件 | 版本 | 类型 | 影响组件 |
 |---|------|------|------|----------|
@@ -155,6 +165,8 @@ flowchart LR
 | 29 | **CA-OV 提交** | v5.5 | 持久化 | ca-ov-topic-submit |
 | 30 | [已拒绝方案](decisions/30-rejected-approaches.md) | v5.0~5.8 | meta | rejected-approaches |
 | 31 | **[CE 壳注册](decisions/31-ce-shell-registration.md)** | v6.0 | 插件 | plugin-responsibility, naming-convention |
+| 32 | **[state.db user 双写清理](decisions/32-state-db-user-dedup.md)** | v6.1 | 存储 | plugin-responsibility |
+| 33 | **[多话题 OODA 分治摘要](decisions/33-multi-ooda-per-topic-summary.md)** | v6.2 | 摘要 | multi-ooda-arch, f-stage-async-summary, fct-format-evolution, fct-changes-format |
 
 **粗体** = v5.x 新决策（旧决策树中无对应节点）
 

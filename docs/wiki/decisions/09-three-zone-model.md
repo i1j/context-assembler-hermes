@@ -8,6 +8,7 @@ alternatives: ["全部保留（超出 context length）", "全部截断（丢失
 chosen: "active（尾部保留）/ retrieval（检索区）/ fallback（降级区）"
 affects: ["04-a-stage-role-match"]
 status: 已实装（v5.5 后被 topic-aware 角色队列匹配取代）
+source_files: []  # 已被 TopicGrade 取代，历史参考
 ---
 
 ## 触发条件

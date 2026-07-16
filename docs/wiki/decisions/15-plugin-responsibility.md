@@ -8,6 +8,7 @@ alternatives: ["所有逻辑写在 __init__.py（不可维护）", "逻辑外迁
 chosen: "8 Hook 插件 + 断路器 + bg_review 跳过 + ToolBuffer"
 affects: ["07-bg-review-sync-write"]
 status: 已实装
+source_files: ["ca/__init__.py", "ca/e_stage.py", "ca/lstage.py"]
 ---
 
 ## 触发条件

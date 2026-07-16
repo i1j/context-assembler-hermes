@@ -8,6 +8,7 @@ alternatives: ["无限制（cost 失控）", "固定轮数（不灵活）"]
 chosen: "可配置预算上限：max_llm_calls / max_tokens / max_iterations"
 affects: []
 status: 已实装
+source_files: []  # 已从 CA 移除，历史参考
 ---
 
 ## 触发条件

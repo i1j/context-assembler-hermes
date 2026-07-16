@@ -8,6 +8,7 @@ alternatives: ["硬编码（无法热配置）", "JSON 配置（无 schema 校�
 chosen: "Config 类 + YAML + 三段回退 + protect_tail 唯一源"
 affects: ["06-tail-protection"]
 status: 已实装
+source_files: ["ca/config.py"]
 ---
 
 ## 触发条件

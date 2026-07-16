@@ -1,5 +1,5 @@
 ---
-title: L-stage 守护线程异步摘要
+title: F-stage 守护线程异步摘要
 slug: l-stage-daemon
 category: decision
 date: "2026-05"
@@ -8,6 +8,7 @@ alternatives: ["同步摘要（阻塞用户路径）", "post_llm_call 同步写�
 chosen: "双独立 daemon 线程 + 限速 + 3 次失败降级 + 自动拆工具轮"
 affects: ["03-f-stage-async-summary"]
 status: 已替换为 process_turn_f_stage 触发模型（v5.10）（v5.2 后重命名为 F-stage）
+source_files: ["ca/f_stage.py"]
 ---
 
 ## 触发条件

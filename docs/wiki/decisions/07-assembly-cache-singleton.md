@@ -8,6 +8,7 @@ alternatives: ["无缓存每轮重建（性能差）", "多实例缓存（一致
 chosen: "单例 AssemblyCache + 冷却/索引/快照/安全副本/防竞态"
 affects: []
 status: 已实装
+source_files: []  # 已被增量缓存取代，历史参考
 ---
 
 ## 触发条件

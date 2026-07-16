@@ -232,6 +232,47 @@ class TestGradeFAR:
         assert result[2] == {"role": "user", "content": "Q2"}
         assert result[3] == {"role": "assistant", "content": "A2"}
 
+    def test_far_tool_in_tail_preserved(self, ca_engine):
+        """FAR tool 行在尾巴保护区内的应保留（不删除）"""
+        _write_rows(ca_engine.store, "test", [
+            # turn 1 — FAR, 保护区外：tool 应删除
+            {"turn": 1, "seq": 0, "role": "user", "Elm": "U1", "Fct": "UF1", "Hdl": "UH1"},
+            {"turn": 1, "seq": 1, "role": "assistant", "finish_reason": "tool_calls",
+             "Elm": "T1", "Fct": "TF1", "Hdl": "TH1"},
+            {"turn": 1, "seq": 2, "role": "tool", "Elm": "R1", "Fct": "RF1", "Hdl": "RH1",
+             "tool_name": "exec", "tool_call_id": "e1"},
+            {"turn": 1, "seq": 3, "role": "assistant", "finish_reason": "stop",
+             "Elm": "F1", "Fct": "FF1", "Hdl": "FH1"},
+            # turn 2 — FAR, tail 内：tool 应保留
+            {"turn": 2, "seq": 0, "role": "user", "Elm": "U2"},
+            {"turn": 2, "seq": 1, "role": "assistant", "finish_reason": "tool_calls",
+             "Elm": "T2"},
+            {"turn": 2, "seq": 2, "role": "tool", "Elm": "R2",
+             "tool_name": "exec", "tool_call_id": "e2"},
+            {"turn": 2, "seq": 3, "role": "assistant", "finish_reason": "stop",
+             "Elm": "F2"},
+            # turn 3 — FAR, tail 内：tool 应保留
+            {"turn": 3, "seq": 0, "role": "user", "Elm": "U3"},
+            {"turn": 3, "seq": 1, "role": "tool", "Elm": "R3",
+             "tool_name": "search", "tool_call_id": "s1"},
+            {"turn": 3, "seq": 2, "role": "assistant", "finish_reason": "stop",
+             "Elm": "F3"},
+        ])
+        mgr = _make_mock_topic_mgr({1: TopicGrade.FAR, 2: TopicGrade.FAR, 3: TopicGrade.FAR})
+        result = _build(ca_engine, mgr)
+        # turn 1 保护区外（3 user turn，tail 保护 2-3）：user/fin=Hdl, thought/tool=删除
+        assert result[0] == {"role": "user", "content": "UH1"}           # FAR user=Hdl
+        assert result[1] == {"role": "assistant", "content": "FH1"}      # FAR fin=Hdl
+        # thought(seq=1) 和 tool(seq=2) 应在保护区外被删除
+        # turn 2-3 tail 内：全 Elm 保留（含 tool 行）
+        assert result[2] == {"role": "user", "content": "U2"}
+        assert result[3]["role"] == "assistant" and result[3]["content"] == "T2"  # thought=Elm
+        assert result[4]["role"] == "tool" and result[4]["content"] == "R2"      # tool=Elm ← 尾区保护
+        assert result[5] == {"role": "assistant", "content": "F2"}
+        assert result[6] == {"role": "user", "content": "U3"}
+        assert result[7]["role"] == "tool" and result[7]["content"] == "R3"      # tool=Elm ← 尾区保护
+        assert result[8] == {"role": "assistant", "content": "F3"}
+
 
 # ============================================================================
 # Mixed grades

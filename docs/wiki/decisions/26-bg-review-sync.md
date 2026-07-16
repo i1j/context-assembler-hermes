@@ -8,6 +8,7 @@ alternatives: ["走 LLM 摘要（浪费）", "不写 Fct（数据空洞）"]
 chosen: "检测 skill_provenance 来源，跳过 A-stage，同步写 Fct"
 affects: ["07-bg-review-sync-write"]
 status: 已实装
+source_files: ["ca/lstage.py", "ca/e_stage.py"]
 ---
 
 ## 触发条件

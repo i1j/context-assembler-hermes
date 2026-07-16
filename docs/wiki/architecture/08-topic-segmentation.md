@@ -79,9 +79,13 @@ ORDER BY turn;
 - 增量分割：只扫描新 turn，不重建旧话题，性能好
 - 两路检测互补：CJK 重叠处理同话题渐进变化，强制短语处理显式话题切换
 
+## 测试覆盖
+
+- 话题分割测试 — `tests/unit/test_topic_manager.py`（`TestDetect`、`TestAssignTopic`、`TestGradeTopicsByRadius`）
+
 ## 约束 / 已知问题
 
-- CJK 重叠在中文单字场景下准确率有限（单个字的重叠可能误判为话题延续）
+- Jaccard 阈值依赖局部语义：同一话题内不同子话题可能被误判为切换
 - 强制短语依赖预定义列表，无法覆盖所有话题切换语言
 - 话题分割的边界可能不等于 LLM 感知的话题边界
 - `TopicGradeManager` 现有 99 个单元测试覆盖（v5.10 补齐）

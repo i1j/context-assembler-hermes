@@ -8,6 +8,7 @@ alternatives: ["content 全文比较（O(n²)）", "不处理去重（重复内�
 chosen: "全指纹 MD5 + 规范化 + Fail-Safe + role 字段"
 affects: []
 status: 已实装
+source_files: []  # 已从 CA 移除，历史参考
 ---
 
 ## 触发条件

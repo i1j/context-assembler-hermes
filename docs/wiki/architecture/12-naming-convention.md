@@ -60,6 +60,11 @@ grep -rn 'ca\.l[012]\.\\|\bL[012]\b' ca/ --include='*.py' | grep -v '.pyc' || ec
 - 层级清晰：Elm→Fct→Hdl 对应 raw→turn→epoch
 - 与旧文档完全切割：不再有 L2/L1/L0 混淆
 
+## 测试覆盖
+
+- 术语一致性审计测试 — `tests/audit/`（审计 `ca.{fct|hdl}.{metric}` 日志键名格式）
+- 残留旧术语检查 — 全局 grep 测试（`ca/` 中无 L2/L1/L0 残留）
+
 ## 约束 / 已知问题
 
 - 旧数据中仍使用旧列名（`l0`/`l1`/`elp`），查询时需额外映射

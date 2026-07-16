@@ -8,6 +8,7 @@ alternatives: ["同步提交（阻塞用户路径）", "不持久化（重启丢
 chosen: "fire-and-forget 异步提交 + 话题切换时触发"
 affects: ["10-ca-ov-topic-submit"]
 status: 已移除（v5.10）
+source_files: ["plugins/ca_assembler/__init__.py", "topic_manager.py"]
 ---
 
 ## 触发条件

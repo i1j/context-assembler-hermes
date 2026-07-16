@@ -8,6 +8,7 @@ alternatives: ["保留 turn_cache 四主键（复杂度不降）", "原地加列
 chosen: "新 turn_stream 表 + (turn, seq) PK + 3 钩子采集 + 惰性迁移"
 affects: ["01-storage-model", "02-e-stage-write-protocol"]
 status: 已实装
+source_files: ["ca/store.py", "ca/e_stage.py"]
 ---
 
 ## 触发条件

@@ -8,6 +8,7 @@ alternatives: ["纯 JSON 块（非列表，难扩展）", "旧标签格式（单
 chosen: "changes 列表 + PAIR_PATTERN 正则 + VALID_STATES + 旧数据回退"
 affects: ["11-fct-format-evolution"]
 status: 已实装
+source_files: ["ca/post_process.py", "ca/prompts.py"]
 ---
 
 ## 触发条件

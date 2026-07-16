@@ -8,6 +8,7 @@ alternatives: ["保留 C/A/L（三阶段架构继承）", "自创新术语（无
 chosen: "E-stage（写入）/ F-stage（异步摘要）/ A-stage（装配）+ Elm/Fct/Hdl"
 affects: ["12-naming-convention"]
 status: 已实装
+source_files: ["ca/grade.py"]
 ---
 
 ## 触发条件

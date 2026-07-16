@@ -8,6 +8,7 @@ alternatives: ["ToolBuffer 缓冲写入（已拒绝）", "on_session_end 批量�
 chosen: "turn_stream (turn, seq) PK，写即落盘，无 buffer"
 affects: ["01-storage-model", "02-e-stage-write-protocol"]
 status: 已实装
+source_files: ["ca/store.py", "ca/e_stage.py"]
 ---
 
 ## 触发条件

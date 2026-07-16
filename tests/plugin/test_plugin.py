@@ -40,6 +40,9 @@ _record_success = _ca_plugin._record_success
 _read_state = _ca_plugin._read_state
 _state_file_path = _ca_plugin._state_file_path
 register = _ca_plugin.register
+_on_pre_llm_call_v5 = _ca_plugin._on_pre_llm_call_v5
+_engines = _ca_plugin._engines
+_engines_lock = _ca_plugin._engines_lock
 
 # ============================================================================
 # REQ-FUNC-CIRCUIT: 断路器 / is_available
@@ -228,9 +231,11 @@ class TestLifecycle:
         assert plugin._engine_errored or plugin._engine is not None
     
     def test_pre_llm_call_without_engine(self):
-        """引擎不可用时 pre_llm_call 返回 None。"""
+        """引擎不可用时 _on_pre_llm_call_v5 返回 None。"""
         plugin = CAContextAssemblerPlugin()
-        result = plugin.pre_llm_call_v5(user_message="hello")
+        with _engines_lock:
+            _engines["test_noeng"] = plugin
+        result = _on_pre_llm_call_v5(session_id="test_noeng")
         assert result is None
 
     def test_post_llm_call_without_engine(self):
@@ -266,53 +271,52 @@ class TestLifecycle:
 
 
 class TestPreLlmCall:
-    """pre_llm_call 钩子。"""
+    """_on_pre_llm_call_v5 钩子（方向 B 独立函数）。"""
 
-    def test_returns_none_when_errored(self):
+    def test_returns_none_when_no_session(self):
+        """无 session 时返回 None。"""
+        result = _on_pre_llm_call_v5(session_id="")
+        assert result is None
+
+    def test_returns_none_when_engine_errored(self):
         """引擎错误时返回 None。"""
         plugin = CAContextAssemblerPlugin()
         plugin._engine_errored = True
-        result = plugin.pre_llm_call_v5(user_message="hello", context_length=32000)
+        with _engines_lock:
+            _engines["test_sid"] = plugin
+        result = _on_pre_llm_call_v5(session_id="test_sid")
         assert result is None
+
+    def test_skips_turn_on_bg(self):
+        """bg 轮跳过。"""
+        with patch.object(_ca_plugin, 'get_current_write_origin', return_value="background_review"):
+            plugin = CAContextAssemblerPlugin()
+            plugin._engine_errored = False
+            with _engines_lock:
+                _engines["test_bg"] = plugin
+            result = _on_pre_llm_call_v5(session_id="test_bg")
+            assert result is None
+            assert plugin._bg_turn is True
 
     def test_returns_none_without_user_message(self):
-        """无 user_message 时返回 None。"""
-        plugin = CAContextAssemblerPlugin()
-        result = plugin.pre_llm_call_v5(user_message="", context_length=32000)
-        assert result is None
-
-    def test_extracts_ca_markers_from_assemble(self):
-        """v5 _simple_mutation_mode_v5 正常替换。"""
-        plugin = CAContextAssemblerPlugin()
-        mock_engine = MagicMock()
-        plugin._engine = mock_engine
-        plugin._engine_errored = False
-        plugin._session_id = "test_sid"
-        # MagicMock 的 _A_cache_is_stale/_A_stable_cache 默认真值，需显式设
-        mock_engine._A_cache_is_stale = False
-        mock_engine._A_stable_cache = None
-        mock_engine._full_mutation.return_value = None
-
-        from ca.store import read_fct_v5
-        with patch('ca.store.read_fct_v5', return_value="替换摘要"):
-            history = [
-                {"role": "user", "content": "查询"},
-                {"role": "assistant", "content": "结果", "tool_calls": []},
-            ]
-            result = plugin.pre_llm_call_v5(
-                user_message="查询", context_length=32000,
-                conversation_history=history,
+        """空 user_message 时返回 None。"""
+        with patch('ca_assembler_plugin.get_current_write_origin', return_value=""):
+            plugin = CAContextAssemblerPlugin()
+            plugin._engine_errored = False
+            plugin._bg_turn = False
+            mock_engine = MagicMock()
+            mock_engine._current_turn = 0
+            mock_engine._seq_counter = {}
+            mock_engine.store = MagicMock()
+            plugin._engine = mock_engine
+            with _engines_lock:
+                _engines["test_nomsg"] = plugin
+            result = _on_pre_llm_call_v5(
+                session_id="test_nomsg",
+                user_message="",
+                conversation_history=[],
             )
-        # v5 mutation mode 返回 None（history 已原地替换）
-        assert result is None
-
-    def test_assemble_failure_returns_none(self):
-        """pre_llm_call_v5 在异常时返回 None。"""
-        plugin = CAContextAssemblerPlugin()
-        plugin._engine_errored = True
-
-        result = plugin.pre_llm_call_v5(user_message="查询", context_length=32000)
-        assert result is None
+            assert result is None
 
 
 class TestPostLlmCall:
@@ -403,11 +407,11 @@ class TestRegister:
     """register() 注册 8 个钩子。"""
 
     def test_registers_eight_hooks(self):
-        """register 注册 5 个生命周期 + 3 个工具轮数据采集钩子。"""
+        """register 注册 5 个生命周期 + 3 个工具轮 + 1 个 finalize 数据采集钩子。"""
         ctx = MagicMock()
         register(ctx)
 
-        assert ctx.register_hook.call_count == 8
+        assert ctx.register_hook.call_count == 9
         hook_names = [call[0][0] for call in ctx.register_hook.call_args_list]
         assert "on_session_start" in hook_names
         assert "on_session_end" in hook_names
@@ -483,8 +487,7 @@ class TestBgReview:
 
     def test_bg_review_writes_fct_equals_content(self, engine, ca_engine, monkeypatch):
         """bg_review 轮：Fct = user_message, Hdl = user_message[:100], A-stage 跳过"""
-        import sys
-        from unittest.mock import MagicMock
+        from unittest.mock import patch
 
         # 将 ca_engine 注册到 _engines，使 _on_pre_llm_call_v5 能找到 plugin
         plugin = CAContextAssemblerPlugin()
@@ -494,19 +497,15 @@ class TestBgReview:
         plugin._current_turn = 0
         _ca_plugin._engines["test_bg"] = plugin
 
-        # 注入 mock 模块 tools.skill_provenance（该模块在测试环境不存在）
-        mock_sp = MagicMock()
-        mock_sp.get_current_write_origin = lambda: "background_review"
-        sys.modules["tools.skill_provenance"] = mock_sp
-
         try:
-            # 调用模块级 hook
-            result = _ca_plugin._on_pre_llm_call_v5(
-                session_id="test_bg",
-                user_message="这是后台审查内容",
-                conversation_history=[],
-                context_length=50000,
-            )
+            with patch.object(_ca_plugin, 'get_current_write_origin', return_value="background_review"):
+                # 调用模块级 hook
+                result = _ca_plugin._on_pre_llm_call_v5(
+                    session_id="test_bg",
+                    user_message="这是后台审查内容",
+                    conversation_history=[],
+                    context_length=50000,
+                )
 
             # 1. 返回 None（跳过 A-stage）
             assert result is None, "bg_review 应返回 None"
@@ -527,5 +526,70 @@ class TestBgReview:
         finally:
             # 清理
             _ca_plugin._engines.pop("test_bg", None)
-            sys.modules.pop("tools.skill_provenance", None)
+
+
+class TestRetryFailedOvSubmits:
+    """_retry_failed_ov_submits 测试"""
+
+    def test_empty_queue_noop(self):
+        """空队列不触发 _fire_ov_submit"""
+        plugin = CAContextAssemblerPlugin()
+        plugin._session_id = "test_retry"
+        plugin._failed_ov_queue = []
+        plugin._engine = MagicMock()
+
+        with patch.object(plugin, '_fire_ov_submit') as mock_fire:
+            plugin._retry_failed_ov_submits()
+        mock_fire.assert_not_called()
+
+    def test_no_session_id_noop(self):
+        """无 session_id 时跳过"""
+        plugin = CAContextAssemblerPlugin()
+        plugin._session_id = None
+        plugin._failed_ov_queue = [{"topic_id": 1, "turns": [1, 2], "switch_turn": 1}]
+        plugin._engine = MagicMock()
+
+        with patch.object(plugin, '_fire_ov_submit') as mock_fire:
+            plugin._retry_failed_ov_submits()
+        mock_fire.assert_not_called()
+
+    def test_retries_all_pending_topics(self):
+        """队列中的 topic 全部重试一次，队列清空"""
+        import threading as _real_threading
+
+        class _SyncThread:
+            """同步执行 Thread，避免 daemon thread 时序竞争。"""
+            def __init__(self, target=None, args=(), kwargs=None, **kw):
+                self._target = target
+                self._args = args
+                self._kwargs = kwargs or {}
+
+            def start(self):
+                if self._target:
+                    self._target(*self._args, **self._kwargs)
+
+        from ca.config import Config
+        backup = Config.OV_ENABLED
+        Config.OV_ENABLED = True
+        try:
+            plugin = CAContextAssemblerPlugin()
+            plugin._session_id = "test_retry"
+            plugin._failed_ov_queue = [
+                {"topic_id": 1, "turns": [1, 3], "switch_turn": 2},
+                {"topic_id": 2, "turns": [4, 6], "switch_turn": 5},
+            ]
+            plugin._engine = MagicMock()
+
+            with patch.object(plugin, '_fire_ov_submit') as mock_fire:
+                with patch.object(_real_threading, 'Thread', _SyncThread):
+                    plugin._retry_failed_ov_submits()
+
+            assert len(plugin._failed_ov_queue) == 0, "队列应清空"
+            assert mock_fire.call_count == 2, "应重试 2 个 topic"
+            # 验证传递的参数
+            tid1 = mock_fire.call_args_list[0][0][1]["topic_id"]
+            tid2 = mock_fire.call_args_list[1][0][1]["topic_id"]
+            assert {tid1, tid2} == {1, 2}, f"应重试 topic 1 和 2, got {tid1}, {tid2}"
+        finally:
+            Config.OV_ENABLED = backup
 

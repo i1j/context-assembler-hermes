@@ -52,6 +52,8 @@ def get_turn_grade(self, turn_num: int) -> TopicGrade:
 
 **降一级规则**：thought/tool 输出行摘要等级 = 话题等级 - 1（ACT→Fct, REL→Hdl, FAR→略）。user/fin 不降级。
 
+**等级枚举转换**：`TopicGrade` → `Grade` 映射由 `ca/grade.py` 的 `Grade.from_topic_grade()` 完成，供 A-stage 组装时选择对应列（`Fct` 或 `Hdl`）。
+
 **尾巴保护覆盖**：倒数第 2 个 user 消息之后的所有行强制原文保留，不受 topic_grade 影响。
 
 ## 数据验证
@@ -71,6 +73,10 @@ for turn in range(1, 50):
 - 连续空间量化：半径公式输出连续值，边界平滑
 - 三级阈值基于形心距离，语义相关
 - 尾巴保护覆盖确保尾部安全
+
+## 测试覆盖
+
+- 话题定级测试 — `tests/unit/test_topic_manager.py`（`TestGradeOnSwitch`、`TestGradeTopicsByRadius`）
 
 ## 约束 / 已知问题
 

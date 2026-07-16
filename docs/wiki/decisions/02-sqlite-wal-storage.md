@@ -8,6 +8,7 @@ alternatives: ["PostgreSQL（太重）", "Redis（内存不够）", "sqlite-vec�
 chosen: "SQLite + WAL + busy_timeout + 后台 checkpoint"
 affects: ["01-storage-model"]
 status: 已实装
+source_files: ["ca/store.py"]
 ---
 
 ## 触发条件

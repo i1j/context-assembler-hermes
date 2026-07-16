@@ -8,6 +8,7 @@ alternatives: ["仅 BM25（召回不足）", "仅向量（冷启动问题）"]
 chosen: "BM25 + 向量双路 + RRF(K=60) 融合"
 affects: []
 status: 已实装（v5.x 后逐渐降级）
+source_files: []  # 已从 CA 移除，历史参考
 ---
 
 ## 触发条件

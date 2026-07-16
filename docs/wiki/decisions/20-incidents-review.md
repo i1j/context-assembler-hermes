@@ -8,6 +8,7 @@ alternatives: []
 chosen: "系统化事故记录 + 审查流程 + GAP 追踪"
 affects: []
 status: 已实装
+source_files: []  # 事故回顾，跨模块 meta 文档
 ---
 
 ## 触发条件

@@ -6,7 +6,7 @@ version_introduced: v5.2
 status: 已实装
 decisions: ["fct-changes-format"]
 depends_on: ["storage-model", "f-stage-async-summary"]
-updated: 2026-06-18
+updated: 2026-06-29
 source_files: ["ca/post_process.py", "ca/prompts.py"]
 ---
 
@@ -78,6 +78,10 @@ ORDER BY turn;
 - 正则解析简单可靠
 - 旧数据向前兼容
 - 零对输出有明确检测手段
+
+## 测试覆盖
+
+- Fct 格式解析测试 — `tests/parse/test_parse_v1.py`（`TestPairPattern`、`TestCleanIncrement`、`TestTruncationDetection`、`TestValidStates`）
 
 ## 约束 / 已知问题
 

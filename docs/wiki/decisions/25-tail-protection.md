@@ -8,6 +8,7 @@ alternatives: ["protect_tail=0（尾部被替换）", "按 token 计算边界（
 chosen: "固定最后 N user 轮保留 Elm，与 grade 判定独立"
 affects: ["06-tail-protection"]
 status: 已实装
+source_files: ["ca/config.py", "ca/a_stage.py"]
 ---
 
 ## 触发条件

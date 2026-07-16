@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS turn_stream (
 - `Hdl` 列从 Fct 的 `core_change` 提取（首行摘要），非跨轮历元
 - 旧 `turn_cache` 表已于 v5.10 清理，不再写入双表
 
-详见 `ca/store.py` 的 `turn_stream` 表 schema（`_SCHEMA_SQL_V50`）。
+详见 `ca/store.py` 的 `turn_stream` 表 schema（`_SCHEMA_SQL_V50`）。读取操作通过 `read_fct_v5()`、`read_turn_elm_rows()`、`read_turn_stream_all()` 完成（见 `ca/store.py`）。
 
 ## 数据验证
 
@@ -96,6 +96,11 @@ FROM turn_stream;
 - 无编码层：内容直接存明文字段，可读可查
 - E-stage 写即落盘，无 buffer，写入路径最短
 - 术语统一：Elm/Fct/Hdl 贯穿代码和 DB
+
+## 测试覆盖
+
+- 存储层列契约测试 — `tests/store/test_store_v5.py`（`TestStoreV5`）
+- 会话隔离测试 — `tests/store/test_store_v5.py`（`TestSessionIsolation`）
 
 ## 约束 / 已知问题
 

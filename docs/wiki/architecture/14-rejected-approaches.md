@@ -6,7 +6,7 @@ version_introduced: v5.0
 status: 已拒绝
 decisions: ["rejected-approaches"]
 depends_on: []
-updated: 2026-06-18
+updated: 2026-06-29
 ---
 
 ## 问题

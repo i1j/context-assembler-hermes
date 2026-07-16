@@ -49,6 +49,7 @@ def _topic_submit_worker(self, topic_data: dict):
 - 独立的 daemon 线程
 - fire-and-forget 不等待结果
 - 失败日志记录，不重试
+- 启动时 `_retry_failed_ov_submits()` 自动重试 session 中断残留的未提交话题
 
 ## 数据验证
 
@@ -65,17 +66,16 @@ viking_list("viking://resources/hermes/ca/topics/<session_id>/")
 - 持久化：session 重启后话题信息可恢复
 - 失败安全：提交失败不影响主流程
 
+## 测试覆盖
+
+- 话题提交占位测试 — `tests/unit/test_topic_manager.py`（`pytest.skip` 标记，因 OV 依赖）
+- 话题提交功能在 `plugins/ca_assembler/__init__.py` 中
+
 ## 约束 / 已知问题
 
 - OV 不可用时话题信息丢失（不降级，主流程继续）
 - 提交频率控制依赖话题切换频率，不会过于频繁
 - 当前无重试机制，临时网络抖动可能导致丢失
-
-
-### 变更记录
-
-- **v5.10** (2026-06-23)：`_fire_ov_submit` 和相关代码已从 `lstage.py` 删除
-- 对应的占位测试已在 `test_topic_manager.py` 中添加（`pytest.skip` 标记）
 
 
 ### 变更记录

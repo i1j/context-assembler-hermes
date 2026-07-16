@@ -3,7 +3,7 @@ title: F-stage 异步摘要（fin 粒度）
 slug: f-stage-async-summary
 category: architecture
 version_introduced: v5.2
-status: 已实装（v5.10 重构 → fin 粒度 v5.11）
+status: 已实装（v5.10 重构）（v5.10 重构 → fin 粒度 v5.11）
 decisions: ["l-stage-daemon", "fct-changes-format"]
 depends_on: ["storage-model", "e-stage-write-protocol"]
 updated: 2026-06-25
@@ -83,9 +83,14 @@ ORDER BY turn, seq;
 - **增量摘要**：每条 fin 的 LLM 输入仅包含自上次 fin 以来的增量内容，避免重复处理
 - 失败重试机制保证最终一致性
 
+## 测试覆盖
+
+- F-stage 摘要测试 — `tests/stage/test_f_stage.py`（`TestFStageSummary`、`TestFStageTruncation`、`TestFStageIsolation`）
+- Fct 解析测试 — `tests/parse/test_parse_v1.py`（`TestCleanIncrement`、`TestValidStates`）
+
 ## 约束 / 已知问题
 
-- 异步延迟：新 fin 行的摘要可能在下次 A-stage 前来不及生成
+- F-stage daemon 线程需确保 `turn_stream` 行不可变：
 - `_assemble_status=1` 标记未完成的摘要，A-stage 忽略该 fin 行的 Fct
 - session 结束时可能尚有未完成的 LLM 调用（`wait_for_pending` 保障等待）
 - 多条 fin 行并发 F-stage 可能增加 LLM 调用压力（但同一 turn 的 fin 行数量极少）

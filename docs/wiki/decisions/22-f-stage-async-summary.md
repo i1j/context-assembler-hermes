@@ -8,6 +8,7 @@ alternatives: ["同步摘要（阻塞用户路径）", "pre_llm_call 内同步�
 chosen: "post_llm_call 触发 + fin 粒度 daemon 线程"
 affects: ["03-f-stage-async-summary", "11-fct-format-evolution"]
 status: 已实装（v5.11 fin 粒度重构）
+source_files: ["ca/f_stage.py"]
 ---
 
 ## 触发条件

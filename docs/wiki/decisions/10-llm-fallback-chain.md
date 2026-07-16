@@ -8,6 +8,7 @@ alternatives: ["单 LLM 崩了就崩了（高错误率）", "固定降级配置�
 chosen: "三级回退 + OODAParser 别名匹配"
 affects: []
 status: 已实装
+source_files: []  # 全局配置，非 CA 特有
 ---
 
 ## 触发条件

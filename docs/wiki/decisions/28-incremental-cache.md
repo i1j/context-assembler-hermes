@@ -8,6 +8,7 @@ alternatives: ["全量每轮重建（O(n) 每轮）", "惰性缓存不过期（�
 chosen: "delta + 全量双模 + Fct-pending 防护"
 affects: ["05-incremental-cache"]
 status: 已实装
+source_files: ["ca/a_stage.py"]
 ---
 
 ## 触发条件

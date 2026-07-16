@@ -57,6 +57,11 @@ LIMIT 3;
 - 配置简单，默认可用
 - 与 grade 系统的交互明确（尾巴优先）
 
+## 测试覆盖
+
+- 尾巴保护测试 — `tests/stage/test_a_stage_topic_aware.py`（`TestTailProtection`）
+- 尾巴保护内 tool 行保留 — `tests/stage/test_build_conv_history_v6.py::TestGradeFAR::test_far_tool_in_tail_preserved`
+
 ## 约束 / 已知问题
 
 - 固定轮数不灵活：短轮对话可能浪费保护 slot，长轮对话可能保护不够

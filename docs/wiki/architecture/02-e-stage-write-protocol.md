@@ -29,9 +29,9 @@ Hermes 对话系统的 Hook 生命周期包含 `pre_llm_call`、`post_api_reques
 | Hook | 写入行 | 写入字段 | 时机 |
 |------|--------|----------|------|
 | `pre_llm_call` | `(turn=n, seq=0)` | `role='user'`, `content` | LLM 调用前，写 user 消息 |
-| `post_api_request` | `(turn=n, seq=1)` | `role='assistant'`, `content`(thought), `tool_calls_json`, `finish_reason`, thought 代码摘要 | API 返回后，写 thought 行 + tool 占位行 |
+| `post_api_request` | `(turn=n, seq=1)` | `role='assistant'`, `content`(thought), `tool_calls_json`, `finish_reason`, thought 代码摘要 | API 返回后，写 thought 行 + tool 占位行（通过 `_on_post_api_request_v5()` 委托 `ca/e_stage._on_api_response_v5()`） |
 | `pre_tool_call` | **no-op** | — | 占位行已在 `post_api_request` 写入 |
-| `post_tool_call` | `(turn=n, seq=m)` | `role='tool'`, `content`, per-tool Fct | 工具执行后，写入结果 |
+| `post_tool_call` | `(turn=n, seq=m)` | `role='tool'`, `content`, per-tool Fct | 工具执行后，通过 `_on_post_tool_call_v5()` 委托 `ca/e_stage._on_post_tool_call_v5()` 写入 |
 | `post_llm_call` | `(turn=n, seq=_seq_counter[n]+1)` | `role='assistant'`, `Elm`, `finish_reason='stop'` | LLM 最终回复，写 fin 行 |
 | `process_turn_f_stage`(触发) | 指定 fin 行 `(turn, fin_seq)` | `Fct`, `Hdl` | post_llm_call 末尾按 fin 行粒度触发异步线程 |
 
@@ -42,7 +42,7 @@ Hermes 对话系统的 Hook 生命周期包含 `pre_llm_call`、`post_api_reques
 - `post_api_request` 纯文本回复（无 tool_calls）跳过写入；有 tool_calls 时写入 thought 行 (seq=1) + tool 占位行 (seq=2+)
 - `post_api_request` 顺便计算 thought 代码摘要（无需 LLM）写入 Fct/Hdl
 - `post_tool_call` 顺便计算 per-tool 代码摘要写入 Fct/Hdl
-- `pre_tool_call` 是 no-op：占位行已在 `_on_api_response_v5` 中写入，`_tool_seq_map` 映射已建立
+- `pre_tool_call` 是 no-op：占位行已在 `_on_api_response_v5()` 中写入，`_tool_seq_map` 映射已建立
 - F-stage LLM 摘要通过 `process_turn_f_stage` 在 `post_llm_call` 末尾触发
 
 ## 数据验证
@@ -62,7 +62,11 @@ GROUP BY role, seq;
 - 每个 Hook 职责明确，不重复不遗漏
 - 无需 buffer/queue，路径最短
 
+## 测试覆盖
+
+- E-stage 写契约测试 — `tests/stage/test_e_stage.py`（`TestEWriteContract`、`TestEStageIdempotency`）
+
 ## 约束 / 已知问题
 
-- `pre_llm_call` 注入 A-stage 上下文时，如果上下文过长可能触发 truncation
+- 部分 Hook 的事件时序依赖 Hermes 内部调用顺序
 - 纯文本对话（无 tool_calls 的 assistant 回复）不走 `post_api_request` 写入——只在 `post_llm_call` 写 fin 行

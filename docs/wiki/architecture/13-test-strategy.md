@@ -62,6 +62,5 @@ python -m pytest tests/ -q --tb=short --collect-only 2>&1 | tail -3
 
 ## 约束 / 已知问题
 
-- `TopicGradeManager` 无独立单元测试
 - 测试运行依赖 Hermes 环境，不能在孤立环境下执行
 - 部分测试使用 `conftest.py` 的 fixture，修改 fixture 可能影响大量测试

@@ -8,6 +8,7 @@ alternatives: ["纯文本拼接（丢失结构）", "带标签 JSON（v4.4 方�
 chosen: "带标签 JSON（v4.4）→ 纯文本替换或带标签追加（v4.5+）"
 affects: []
 status: 已实装
+source_files: ["ca/prompts.py"]
 ---
 
 ## 触发条件

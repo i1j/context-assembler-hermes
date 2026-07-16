@@ -67,9 +67,12 @@ ORDER BY turn;
 - 消除数据空洞：Fct 列始终有值
 - 逻辑简单：跳过装配路径，Fct 直接等值填充
 
+## 测试覆盖
+
+- bg_review 同步写入测试 — `tests/plugin/test_plugin.py::TestBgReview::test_bg_review_writes_fct_equals_content`
+
 ## 约束 / 已知问题
 
 - bg_review 检测依赖 Hermes 的 `get_current_write_origin()`，该函数在不同版本中可能不稳定
-- bg_review 路径现在有独立测试覆盖（`TestBgReview.test_bg_review_writes_fct_equals_content`）
-- bg_review 路径现在有独立测试覆盖（`TestBgReview.test_bg_review_writes_fct_equals_content`）
+- bg_review 路径有独立测试覆盖（`tests/plugin/test_plugin.py::TestBgReview::test_bg_review_writes_fct_equals_content`）
 - bg_review 的 Fct 值实际是原文摘要——消费方需知晓此语义差异

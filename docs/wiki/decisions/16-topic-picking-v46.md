@@ -8,6 +8,7 @@ alternatives: ["无话题分割（全局上下文处理）", "纯 LLM 判断话�
 chosen: "话题分割 → 三级定级 → TopicRetriever → topic_boost → 移除预选"
 affects: ["08-topic-segmentation", "09-topic-grade-switch"]
 status: 已实装（v5.5 后被 TopicGradeManager 取代）
+source_files: ["topic_manager.py"]
 ---
 
 ## 触发条件

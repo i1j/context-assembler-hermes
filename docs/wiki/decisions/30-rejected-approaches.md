@@ -8,6 +8,7 @@ alternatives: []
 chosen: "16 个已拒绝方案归档"
 affects: ["14-rejected-approaches"]
 status: 已拒绝
+source_files: []  # 已拒绝方案汇总，跨模块 meta 文档
 ---
 
 ## 触发条件

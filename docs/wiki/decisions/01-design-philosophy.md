@@ -6,6 +6,7 @@ date: "2026-05"
 version_introduced: v0.x
 affects: ["整个系统架构"]
 status: 已实装（基线）
+source_files: ["ca/__init__.py", "ca/e_stage.py", "ca/a_stage.py", "ca/f_stage.py", "ca/store.py"]
 ---
 
 ## 触发条件

@@ -8,6 +8,7 @@ alternatives: ["单后端绑定（vendor lock-in）", "纯本地（性能差）"
 chosen: "多后端（Ollama 本地 + API 远程）+ LRU 缓存 + 降级"
 affects: []
 status: 已实装（v5.x 后逐渐降级）
+source_files: []  # 已从 CA 移除，历史参考
 ---
 
 ## 触发条件
