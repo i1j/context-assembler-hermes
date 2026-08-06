@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from ca.grade import TopicGrade
+
 
 # ============================================================================
 # CA-METRIC 命名审计
@@ -46,107 +48,67 @@ def _find_ca_metric_lines(root_dir: str) -> list[dict]:
 
 
 class TestDebugDumpGeneration:
-    """验证 debug dump 文件在设置 CA_DEBUG_DUMP 后正确生成"""
+    """验证 debug dump 文件在 DEBUG_MODE 下由 _build_conv_history_v6 生成（v6.2）"""
 
-    def test_mutation_dump_writes_valid_json(self, ca_engine, monkeypatch):
-        """简单 mutation 触发后，dump 文件生成且内容为合法 JSON"""
+    def _write_turns(self, store, sid="test"):
+        """写 3 个 turn（2 尾部保护区）触发 _build_conv_history_v6。"""
         from ca.store import write_turn_v5
+        for t in range(1, 4):
+            write_turn_v5(store, sid, t, 0, role="user", elm_text=f"Q{t}")
+            write_turn_v5(store, sid, t, 1, role="assistant", elm_text="",
+                          finish_reason="stop",
+                          fct_text='{"core_change":"F%d"}' % t)
 
-        # 准备 DB 数据
-        write_turn_v5(ca_engine.store, "test", 2, 1,
-                      role="assistant", elm_text="orig",
-                      fct_text="工具组：测试")
-        write_turn_v5(ca_engine.store, "test", 2, 2,
-                      role="tool", elm_text="result",
-                      fct_text="成功")
-
-        # 启用 debug dump
-        tmp = tempfile.mkdtemp()
-        monkeypatch.setenv("CA_DEBUG_DUMP", tmp)
+    def test_build_dump_writes_valid_json(self, ca_engine, monkeypatch):
+        """_build_conv_history_v6 + DEBUG_MODE → dump 文件生成且内容为合法 JSON。"""
+        import time as _time
+        from unittest.mock import MagicMock
         from ca.config import Config
+
+        sid = f"dump_on_{int(_time.time() * 1000)}"
+        self._write_turns(ca_engine.store, sid=sid)
+        ca_engine._session_id = sid
         Config.DEBUG_MODE = True
-
         try:
-            from tests.stage.test_a_stage import _make_plugin
-            plugin = _make_plugin(ca_engine)
-            conv = [
-                {"role": "user", "content": "Q"},
-                {"role": "assistant", "content": "a1"},
-                {"role": "user", "content": "Q2"},
-                {"role": "assistant", "content": "orig", "tool_calls": [{"id": "c2"}]},
-                {"role": "tool", "tool_call_id": "c2", "content": "result"},
-            ]
-            plugin._simple_mutation_mode_v5(conv)
+            mgr = MagicMock()
+            mgr.get_turn_grade.return_value = TopicGrade.ACT
+            ca_engine._build_conv_history_v6(mgr)
 
-            # 验证 dump 文件生成
-            dump_files = list(Path(tmp).glob("ca_mutation_*.json"))
-            assert len(dump_files) >= 1, f"应生成 mutation dump, 列出: {list(Path(tmp).iterdir())}"
+            dump_files = list(Path("/tmp").glob(f"ca_conv_hist_{sid}_*.json"))
+            assert len(dump_files) >= 1, \
+                f"应生成 build dump, 列出: {[p.name for p in dump_files]}"
 
-            # 验证 dump 内容为合法 JSON
-            for df in dump_files:
-                with open(df) as f:
-                    data = json.load(f)
-                assert isinstance(data, list), "dump 应为 list"
-                assert len(data) > 0, "dump 不应为空"
-                assert "role" in data[0], "dump 条目应含 role"
-        finally:
-            Config.DEBUG_MODE = False
-
-    def test_incremental_dump_writes_valid_json(self, ca_engine, monkeypatch):
-        """增量 mutation 后，dump 文件生成且内容为合法 JSON"""
-        from ca.store import write_turn_v5
-
-        write_turn_v5(ca_engine.store, "test", 1, 2,
-                      role="tool", elm_text="old", fct_text="cached_fct")
-
-        tmp = tempfile.mkdtemp()
-        monkeypatch.setenv("CA_DEBUG_DUMP", tmp)
-        from ca.config import Config
-        Config.DEBUG_MODE = True
-
-        try:
-            from tests.stage.test_a_stage import _make_plugin
-            plugin = _make_plugin(ca_engine)
-            plugin._engine._A_stable_cache = [
-                {"role": "user", "content": "cached"},
-            ]
-            plugin._engine._A_cache_turns = 1
-            conv = [
-                {"role": "user", "content": "Q1"},
-                {"role": "assistant", "content": "A1"},
-                {"role": "user", "content": "Q2"},
-                {"role": "assistant", "content": "A2"},
-            ]
-            plugin._incremental_mutation(conv)
-
-            dump_files = list(Path(tmp).glob("ca_incr_mutation_*.json"))
-            assert len(dump_files) >= 1, f"应生成 incr mutation dump, 列出: {list(Path(tmp).iterdir())}"
-
-            for df in dump_files:
-                with open(df) as f:
-                    data = json.load(f)
-                assert isinstance(data, list), "dump 应为 list"
+            # 验证 dump 内容为合法 JSON（v6 dump 是 dict）
+            latest = max(dump_files, key=lambda p: p.stat().st_mtime)
+            with open(latest) as f:
+                data = json.load(f)
+            assert isinstance(data, dict), "v6 dump 应为 dict"
+            assert data.get("session_id") == sid
+            assert isinstance(data.get("messages"), list)
+            assert len(data["messages"]) > 0, "dump 不应为空"
         finally:
             Config.DEBUG_MODE = False
 
     def test_dump_not_written_when_disabled(self, ca_engine):
-        """CA_DEBUG_DUMP 未设置时，不生成 dump 文件"""
+        """DEBUG_MODE=False（默认）→ 不生成 dump 文件。"""
+        import time as _time
+        from unittest.mock import MagicMock
         from ca.config import Config
-        Config.DEBUG_MODE = True
 
-        tmp = tempfile.mkdtemp()
-        # 明确不设 CA_DEBUG_DUMP
-
-        from tests.stage.test_a_stage import _make_plugin
-        plugin = _make_plugin(ca_engine)
-        conv = [{"role": "user", "content": "Q"}, {"role": "assistant", "content": "A"}]
-        plugin._simple_mutation_mode_v5(conv)
-
-        # 无 dump 文件生成
-        dump_files = list(Path(tmp).glob("ca_mutation_*.json"))
-        assert len(dump_files) == 0, f"不应生成 dump, 但找到: {dump_files}"
-
+        sid = f"dump_off_{int(_time.time() * 1000)}"
+        self._write_turns(ca_engine.store, sid=sid)
+        ca_engine._session_id = sid
         Config.DEBUG_MODE = False
+        try:
+            mgr = MagicMock()
+            mgr.get_turn_grade.return_value = TopicGrade.ACT
+            ca_engine._build_conv_history_v6(mgr)
+
+            dump_files = list(Path("/tmp").glob(f"ca_conv_hist_{sid}_*.json"))
+            assert len(dump_files) == 0, \
+                f"不应生成 dump, 但找到: {[p.name for p in dump_files]}"
+        finally:
+            Config.DEBUG_MODE = False
 
 
 class TestCAMetricNamingAudit:

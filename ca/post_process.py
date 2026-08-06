@@ -58,7 +58,28 @@ def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
     )
     if _has_real_changes:
         for field in ["new_materials", "objective_facts", "consensus", "todo"]:
-            cleaned.pop(field, None)
+            items = cleaned.pop(field, None)
+            if items and isinstance(items, list):
+                ooda_map = {
+                    "new_materials": "现象与问题",
+                    "objective_facts": "背景与约束",
+                    "consensus": "决策与方案",
+                    "todo": "后续行动",
+                }
+                ooda_label = ooda_map.get(field, "")
+                for item in items:
+                    if isinstance(item, str) and item.strip():
+                        # 如果 changes 中已有相同 core_change，标 ooda；否则追加入 changes
+                        matched = False
+                        for c in cleaned.get("changes", []):
+                            if c.get("core_change", "") == item.strip():
+                                c["ooda"] = ooda_label
+                                matched = True
+                                break
+                        if not matched:
+                            cleaned.setdefault("changes", []).append(
+                                {"stage_tag": "待分类", "core_change": item.strip(), "ooda": ooda_label}
+                            )
     if not cleaned:
         cleaned["changes"] = []
         cleaned["core_change"] = "本轮无新内容"

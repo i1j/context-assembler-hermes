@@ -1,9 +1,21 @@
 """plugin/ 测试 conftest：autouse mock 防止 embed/LLM 真实调用。
 
 plugin 测试使用真实 ca_engine 并触发 A-stage/F-stage 管线。
+
 """
+import sys
+from pathlib import Path
+
 import pytest
 
+# Hermes 运行时 tools 包（skill_provenance 等）——独立 pytest 环境缺该路径
+try:
+    from hermes_constants import get_hermes_home
+    _agent_root = Path(get_hermes_home()) / "hermes-agent"
+except ImportError:
+    _agent_root = Path.home() / ".hermes" / "hermes-agent"
+if _agent_root.exists() and str(_agent_root) not in sys.path:
+    sys.path.insert(0, str(_agent_root))
 
 @pytest.fixture(autouse=True)
 def _plugin_mock_embed():

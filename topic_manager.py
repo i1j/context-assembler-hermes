@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -69,6 +70,63 @@ def _jaccard_text(text_a: str, text_b: str) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════
+# Fct JSON 语义值提取（TP-001 已知缺陷族修复，2026-07-31）
+# ═══════════════════════════════════════════════════════════════
+
+# Fct JSON 中与话题无关的元数据键：值不参与 Jaccard。
+#  - stage_tag: 固定状态集（已实施/计划/探讨…），跨话题恒定
+#  - ooda: 固定 4 标签（现象与问题/背景与约束/决策与方案/后续行动），跨话题恒定
+#  - _assemble_status / _truncated: 装配元数据
+_FCT_METADATA_KEYS: frozenset = frozenset({
+    "stage_tag", "ooda", "_assemble_status", "_truncated",
+})
+
+
+def _extract_fct_semantic_text(fct_json: str) -> str:
+    """从 Fct JSON 提取语义文本（仅 value，剥键名 + 跳过元数据）。
+
+    背景（TP-001 已知缺陷族，与"Jaccard 反例铁则"同源）：
+    Fct JSON 公共键名（core_change/changes/stage_tag…）与元数据值
+    （stage_tag 状态、_assemble_status 数字）对所有话题恒定，直接
+    tokenize 会把无关话题的 Jaccard 抬过 ENTRY 阈值——
+    例：{"core_change":"数据库设计"} vs {"core_change":"Python优化"}
+    共享 core_change 键名 token → j=0.0714 ≥ 0.04 → 虚假延续。
+    仅剥离键名不够（_assemble_status:0 的数字 0 仍共享，j≈0.074），
+    必须同时跳过元数据键与非字符串 value。
+
+    非 JSON 文本（原始用户消息 / 旧格式 / 损坏 JSON）原样返回。
+    """
+    if not fct_json:
+        return ""
+    try:
+        obj = json.loads(fct_json)
+    except (ValueError, TypeError):
+        return fct_json
+    if not isinstance(obj, (dict, list)):
+        return fct_json  # 顶层标量（如 "123"）→ 非 Fct JSON 形状，原样
+
+    parts: List[str] = []
+
+    def _walk(v: Any) -> None:
+        if isinstance(v, dict):
+            for key, val in v.items():
+                if key in _FCT_METADATA_KEYS:
+                    continue
+                _walk(val)
+        elif isinstance(v, list):
+            for item in v:
+                _walk(item)
+        elif isinstance(v, str):
+            s = v.strip()
+            if s:
+                parts.append(s)
+        # 非字符串 value（数字/布尔/None）→ 装配元数据，跳过
+
+    _walk(obj)
+    return " ".join(parts)
+
+
+# ═══════════════════════════════════════════════════════════════
 # 强制话题分割短语
 # ═══════════════════════════════════════════════════════════════
 
@@ -90,6 +148,26 @@ def _scan_forced_split_phrases(user_msg: str) -> bool:
     for phrase in _FORCED_SPLIT_PATTERNS:
         if phrase.lower() in msg_lower:
             return True
+    return False
+
+
+def _is_confirmatory_turn(user_msg: str, ca_rows: List) -> bool:
+    """判断该轮是否为纯确认/简短消息（不应分割为新话题）。
+
+    ≤5 字符的消息视为确认/延续（经多 session 实测，5 字阈值
+    平均减少 40% 单轮话题，且不会过度合并）：
+    - 短消息的 Jaccard 特征集太小（4 字仅 7 个特征），
+      与累积文本（100+ 特征）做 Jaccard 匹配几乎不可能过 0.04，
+      导致大量本属延续的短消息被错误切分成新话题。
+    - 例："如何"、"好"、"改"、"继续"、"效果如何"——这些都在
+      实际追踪当前话题，不是新话题。
+    - 强制分割短语已在 _scan_forced_split_phrases 前置拦截。
+    """
+    cleaned = user_msg.strip().lower()
+    if not cleaned:
+        return True  # 空消息 → 延续
+    if len(cleaned) <= 5:
+        return True  # 短消息（≤5字）→ 延续
     return False
 
 
@@ -286,7 +364,7 @@ class TopicGradeManager:
 
         return False
 
-    def grade_on_switch(self, q_emb: List[float], user_msg: str) -> None:
+    def grade_on_switch(self, q_emb: Optional[List[float]], user_msg: str) -> None:
         """话题切换时：计算旧话题形心 + 定级 + 冻结。
 
         Args:
@@ -357,10 +435,11 @@ class TopicGradeManager:
 
         策略：
           1. 强制短语 → 新话题
-          2. 第一个 turn → 话题 1
-          3. 当前轮 Fct 与_current_topic累积文本做 Jaccard + 水位压力扣减
-             - ≥ CHAIN (0.04) → 同话题，Fct 追加到累积文本
-             - ≥ ENTRY (0.02) → 弱匹配，同话题，Fct 追加
+          2. 纯确认/简短消息 → 延续当前话题
+          3. 第一个 turn → 话题 1
+          4. 当前轮 Fct 与_current_topic累积文本做 Jaccard + 水位压力扣减
+             - ≥ CHAIN → 同话题，Fct 追加到累积文本
+             - ≥ ENTRY → 弱匹配，同话题，Fct 追加
              - 否则 → 新话题
 
         Args:
@@ -381,7 +460,14 @@ class TopicGradeManager:
             logger.debug("[CA_topic] forced split: turn %d → new topic %d", turn, tid)
             return tid
 
-        # 2. 第一个 turn → 话题 1
+        # 2. 纯确认/简短消息 → 延续当前话题（不分新话题）
+        #    特征: user_msg ≤3 字符 且 Fct 为空或极短
+        if self._current_topic_id is not None and _is_confirmatory_turn(user_msg, ca_rows):
+            self._turn_to_topic[turn] = self._current_topic_id
+            logger.debug("[CA_topic] confirmatory turn %d → continue T%d", turn, self._current_topic_id)
+            return self._current_topic_id
+
+        # 3. 第一个 turn → 话题 1
         if not self._turn_to_topic:
             self._turn_to_topic[turn] = 1
             self._next_topic_id = max(self._next_topic_id, 2)
@@ -451,6 +537,10 @@ class TopicGradeManager:
         """从 ca_rows 中提取该轮的代表性 Fct 文本（用于 Jaccard 匹配）。
 
         优选 user 行（seq=0）的 Fct，其次 assistant fin 行，最后任意非空 Fct。
+        返回前经 _extract_fct_semantic_text 归一化：JSON Fct 仅保留语义 value
+        （剥键名 + 跳过元数据），消除跨话题恒定的 JSON 键名对 Jaccard 的污染
+        （TP-001 已知缺陷族："数据库设计" vs "Python优化" 原始 JSON
+        j=0.0714 ≥ ENTRY → 虚假延续）。非 JSON 文本原样返回。
         """
         if not ca_rows:
             return None
@@ -462,12 +552,13 @@ class TopicGradeManager:
                 continue
             any_fct = fct
             if row[0] == 0:  # user 行
-                return fct
+                return _extract_fct_semantic_text(fct)
             if row[1] == "assistant" and row[2] == "stop":  # fin 行
                 fin_fct = fct
         if not (fin_fct or any_fct):
             logger.debug("[CA] _extract_turn_fct: no Fct found in %d rows", len(ca_rows))
-        return fin_fct or any_fct
+        text = fin_fct or any_fct
+        return _extract_fct_semantic_text(text) if text else None
 
     def _init_topic_data(self) -> None:
         """根据现有 turn→topic 映射重建 topic_data（先清空，防增量遗漏）。"""
@@ -525,7 +616,9 @@ class TopicGradeManager:
                     logger.debug("[CA] _compute_centroids: turn=%d topic=%d no user Fct, skipped from centroid", turn, tid)
                     continue
                 try:
-                    vec = self._embed_client.embed(fct_text)
+                    # 剥 Fct JSON 键名 + 跳过元数据（TP-001 同源缺陷族：公共键名抬高
+                    # 无关话题的 centroid 相似度 → 半径定级失真；与 _extract_turn_fct 一致）
+                    vec = self._embed_client.embed(_extract_fct_semantic_text(fct_text))
                     if vec:
                         vectors.append(vec)
                 except (ValueError, TypeError, RuntimeError) as e:

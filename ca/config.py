@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any, ClassVar, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ class Config:
     OODA_DEDUP_THRESHOLD: ClassVar[float] = float(os.getenv("CA_OODA_DEDUP_THRESHOLD", "0.88"))
     RETRIEVAL_RRF_K: ClassVar[int] = int(os.getenv("CA_RETRIEVAL_RRF_K", "60"))
 
-    LLM_MODEL: ClassVar[str] = os.getenv("CA_LLM_MODEL", "qwen3.5:hermes-32k")
+    LLM_MODEL: ClassVar[str] = os.getenv("CA_LLM_MODEL", "qwen3-4b-instruct:latest")
     LLM_ENDPOINT: ClassVar[str] = os.getenv("CA_LLM_ENDPOINT", "http://localhost:11435")
     LLM_TIMEOUT: ClassVar[float] = float(os.getenv("CA_LLM_TIMEOUT", "120"))
     LLM_MAX_RETRIES: ClassVar[int] = int(os.getenv("CA_LLM_MAX_RETRIES", "2"))
@@ -94,6 +95,18 @@ class Config:
     LLM_THINK: ClassVar[Optional[bool]] = None
     L1_TEMPERATURE: ClassVar[float] = float(os.getenv("CA_L1_TEMPERATURE", "0.3"))
     L1_MAX_TOKENS: ClassVar[int] = int(os.getenv("CA_L1_MAX_TOKENS", "2048"))
+    # v6.4.1: 话题摘要独立 num_predict——L1_MAX_TOKENS=2048 是 F-stage 参数，
+    # 多 strand 输出实测 ~2538 字符（num_predict=4096 才完整），2048 被截断
+    # → JSON parse 失败 → 46% 话题走代码 fallback。摘要链路独立配置。
+    TOPIC_SUMMARY_MAX_TOKENS: ClassVar[int] = int(os.getenv("CA_TOPIC_SUMMARY_MAX_TOKENS", "4096"))
+
+    # v7 (决策 38): S 匹配分参数（merge 候选生成）
+    #   alpha = 注入锚权重（语义来源，先验低）
+    #   beta  = 融合锚权重（行为事实，先验高）
+    #   s_r   = 排除门槛（S > R 剔除；0.5 ≈ 一跳 w≥1）
+    S_ALPHA: ClassVar[float] = float(os.getenv("CA_S_ALPHA", "0.4"))
+    S_BETA: ClassVar[float] = float(os.getenv("CA_S_BETA", "0.8"))
+    S_R_THRESHOLD: ClassVar[float] = float(os.getenv("CA_S_R", "0.5"))
 
     @classmethod
     def _parse_llm_think(cls) -> Optional[bool]:
@@ -150,15 +163,45 @@ class Config:
     # ── 话题拣选（v4.6.0）──
 
     # 话题分割 Jaccard 阈值：首次合并入口（双实义轮）
-    TOPIC_JACCARD_ENTRY: ClassVar[float] = float(os.getenv("CA_TOPIC_JACCARD_ENTRY", "0.02"))
+    TOPIC_JACCARD_ENTRY: ClassVar[float] = float(os.getenv(
+        "CA_TOPIC_JACCARD_ENTRY",
+        str(_YAML_DEFAULTS.get("topic_jaccard_entry", "0.04")),
+    ))
     # 话题分割 Jaccard 阈值：链内扩展
-    TOPIC_JACCARD_CHAIN: ClassVar[float] = float(os.getenv("CA_TOPIC_JACCARD_CHAIN", "0.04"))
+    TOPIC_JACCARD_CHAIN: ClassVar[float] = float(os.getenv(
+        "CA_TOPIC_JACCARD_CHAIN",
+        str(_YAML_DEFAULTS.get("topic_jaccard_chain", "0.08")),
+    ))
     # 话题半径公式：最近邻形心距离的权重系数（r = min(max_intra, nearest/weight)）
     TOPIC_RADIUS_WEIGHT: ClassVar[float] = float(os.getenv("CA_TOPIC_RADIUS_WEIGHT", "2.0"))
     # 话题检索升级最大数
     TOPIC_MAX_UPGRADE: ClassVar[int] = int(os.getenv("CA_TOPIC_MAX_UPGRADE", "10"))
     # BG 类话题固定级别
     TOPIC_BG_LEVEL: ClassVar[str] = os.getenv("CA_TOPIC_BG_LEVEL", "Far")
+
+    # ── L4 空闲精炼（v5.14）──
+    # v6.5 (2026-08): schema 重构（topic_wiki → themes）后精炼轮尚未适配，
+    # 默认整体停用（M2: 精炼轮本会话不深挖，留待下次会话适配+深挖）。
+    # REFINEMENT_INTERNAL_REFINE 亦默认 false（M5a: internal_refine 职责已由
+    # theme merge 语义融合吸收）。
+
+    REFINEMENT_ENABLED: ClassVar[bool] = os.getenv("CA_REFINEMENT_ENABLED", "0") == "1"
+    REFINEMENT_CHECK_INTERVAL: ClassVar[int] = int(
+        os.getenv("CA_REFINEMENT_CHECK_INTERVAL", "120"))
+    REFINEMENT_MIN_NEW_TURNS: ClassVar[int] = int(
+        os.getenv("CA_REFINEMENT_MIN_NEW_TURNS", "50"))
+    REFINEMENT_MAX_DURATION: ClassVar[float] = float(
+        os.getenv("CA_REFINEMENT_MAX_DURATION", "300"))
+    REFINEMENT_INTERNAL_REFINE: ClassVar[bool] = os.getenv(
+        "CA_REFINEMENT_INTERNAL_REFINE", "0") == "1"
+    REFINEMENT_CROSS_VALIDATE: ClassVar[bool] = os.getenv(
+        "CA_REFINEMENT_CROSS_VALIDATE", "1") == "1"
+    REFINEMENT_HEALTH_SCORE: ClassVar[bool] = os.getenv(
+        "CA_REFINEMENT_HEALTH_SCORE", "1") == "1"
+    REFINEMENT_GRAPHIFY_SYNC: ClassVar[bool] = os.getenv(
+        "CA_REFINEMENT_GRAPHIFY_SYNC", "1") == "1"
+    REFINEMENT_MAX_ENTRIES_PER_CYCLE: ClassVar[int] = int(
+        os.getenv("CA_REFINEMENT_MAX_ENTRIES_PER_CYCLE", "5"))
 
     # 累积切割水位（Token 阈值）
     ACCUMULATED_SPLIT_START: ClassVar[int] = int(os.getenv("CA_ACCUMULATED_SPLIT_START", "5000"))
@@ -235,12 +278,32 @@ class Config:
     SHUTDOWN_TIMEOUT: ClassVar[int] = int(os.getenv("CA_SHUTDOWN_TIMEOUT", "5"))
     BM25_HIT_THRESHOLD: ClassVar[int] = int(os.getenv("CA_BM25_HIT_THRESHOLD", "5"))
 
-    # OpenViking 话题摘要提交
-    OV_ENABLED: ClassVar[bool] = os.getenv("CA_OV_ENABLED", "1") == "1"
-    OV_ENDPOINT: ClassVar[str] = os.getenv("CA_OV_ENDPOINT", "http://localhost:1933")
-    OV_USER: ClassVar[str] = os.getenv("CA_OV_USER", "tester")
-    OV_TOPIC_DIR_PREFIX: ClassVar[str] = os.getenv("CA_OV_TOPIC_DIR_PREFIX",
-                                                    "viking://resources/{ov_user}/ca_topics/{ov_session}")
+    # OpenViking 话题摘要（已删除，见上方 TOPIC_SUMMARIZE_ENABLED）
+
+    # Hermes profile 名称（用于话题摘要的 profile 隔离）
+    # v6.5.2: 运行时 gateway 只注入 HERMES_HOME 不注入 CA_HERMES_PROFILE →
+    # 旧实现恒为 'default' → 所有运行时 strand/theme 标错 profile（跨 profile 混入）。
+    # 推导链：CA_HERMES_PROFILE env → HERMES_HOME basename → 'default'。
+    @staticmethod
+    def _detect_profile() -> str:
+        env_p = os.getenv("CA_HERMES_PROFILE", "").strip()
+        if env_p:
+            return env_p
+        home = os.getenv("HERMES_HOME", "").strip()
+        if home:
+            return Path(home).name or "default"
+        return "default"
+
+    HERMES_PROFILE: ClassVar[str] = _detect_profile()
+
+    # CA 话题摘要管线（取代 OV Memory Provider）
+    TOPIC_SUMMARIZE_ENABLED: ClassVar[bool] = os.getenv("CA_TOPIC_SUMMARIZE_ENABLED", "1") == "1"
+    TOPIC_SUMMARY_RECALL_LIMIT: ClassVar[int] = int(os.getenv("CA_TOPIC_SUMMARY_RECALL_LIMIT", "3"))
+    # v8: 注入预算（字符）——话题摘要 4B 输出上限 + 迭代提炼触发阈值
+    # v6.4: 2000 → 4000（多 strand 输出体积 ~3174 实测，2000 会触发 Bug 2 误杀）
+    TOPIC_SUMMARY_MAX_CHARS: ClassVar[int] = int(os.getenv("CA_TOPIC_SUMMARY_MAX_CHARS", "4000"))
+    # v8: 输入分批预算（字符）——Fct 输入超限时切分批提炼（记账 remaining）
+    TOPIC_SUMMARY_INPUT_BUDGET: ClassVar[int] = int(os.getenv("CA_TOPIC_SUMMARY_INPUT_BUDGET", "12000"))
 
     @staticmethod
     def _parse_bool_env(key: str, default: bool = True) -> bool:
@@ -307,6 +370,11 @@ class Config:
         if cls.TOPIC_BG_LEVEL not in ("Act", "Rel", "Far"):
             errors.append(f"TOPIC_BG_LEVEL must be Act/Rel/Far (got {cls.TOPIC_BG_LEVEL})")
 
+        pos_int("REFINEMENT_CHECK_INTERVAL", cls.REFINEMENT_CHECK_INTERVAL, min_v=10, max_v=3600)
+        pos_int("REFINEMENT_MIN_NEW_TURNS", cls.REFINEMENT_MIN_NEW_TURNS, min_v=1, max_v=1000)
+        pos_float("REFINEMENT_MAX_DURATION", cls.REFINEMENT_MAX_DURATION, min_v=10)
+        pos_int("REFINEMENT_MAX_ENTRIES_PER_CYCLE", cls.REFINEMENT_MAX_ENTRIES_PER_CYCLE, min_v=1, max_v=20)
+
         if errors:
             raise ValueError("Configuration validation failed:\n" + "\n".join(errors))
 
@@ -333,6 +401,9 @@ class Config:
             cls.LLM_TIMEOUT = float(os.getenv("CA_LLM_TIMEOUT", str(cls.LLM_TIMEOUT)))
             cls.LLM_MAX_RETRIES = int(os.getenv("CA_LLM_MAX_RETRIES", str(cls.LLM_MAX_RETRIES)))
             cls.LLM_NUM_PREDICT = int(os.getenv("CA_LLM_NUM_PREDICT", str(cls.LLM_NUM_PREDICT)))
+            cls.S_ALPHA = float(os.getenv("CA_S_ALPHA", str(cls.S_ALPHA)))
+            cls.S_BETA = float(os.getenv("CA_S_BETA", str(cls.S_BETA)))
+            cls.S_R_THRESHOLD = float(os.getenv("CA_S_R", str(cls.S_R_THRESHOLD)))
             cls.LLM_THINK = cls._parse_llm_think()
             cls.L1_TEMPERATURE = float(os.getenv("CA_L1_TEMPERATURE", str(cls.L1_TEMPERATURE)))
             cls.L1_MAX_TOKENS = int(os.getenv("CA_L1_MAX_TOKENS", str(cls.L1_MAX_TOKENS)))
@@ -356,18 +427,36 @@ class Config:
             cls.TOOL_FIELD_PRIORITY_PROFILE = os.getenv("CA_TOOL_FIELD_PRIORITY_PROFILE", cls.TOOL_FIELD_PRIORITY_PROFILE)
             cls.SHUTDOWN_TIMEOUT = int(os.getenv("CA_SHUTDOWN_TIMEOUT", str(cls.SHUTDOWN_TIMEOUT)))
             cls.BM25_HIT_THRESHOLD = int(os.getenv("CA_BM25_HIT_THRESHOLD", str(cls.BM25_HIT_THRESHOLD)))
-            cls.OV_ENABLED = os.getenv("CA_OV_ENABLED", "1") == "1"
-            cls.OV_ENDPOINT = os.getenv("CA_OV_ENDPOINT", cls.OV_ENDPOINT)
-            cls.OV_USER = os.getenv("CA_OV_USER", cls.OV_USER)
-            cls.OV_TOPIC_DIR_PREFIX = os.getenv("CA_OV_TOPIC_DIR_PREFIX", cls.OV_TOPIC_DIR_PREFIX)
-            cls.TOPIC_JACCARD_ENTRY = float(os.getenv("CA_TOPIC_JACCARD_ENTRY", str(cls.TOPIC_JACCARD_ENTRY)))
-            cls.TOPIC_JACCARD_CHAIN = float(os.getenv("CA_TOPIC_JACCARD_CHAIN", str(cls.TOPIC_JACCARD_CHAIN)))
+            cls.HERMES_PROFILE = cls._detect_profile()
+            cls.TOPIC_SUMMARIZE_ENABLED = os.getenv("CA_TOPIC_SUMMARIZE_ENABLED", "1") == "1"
+            cls.TOPIC_SUMMARY_RECALL_LIMIT = int(os.getenv("CA_TOPIC_SUMMARY_RECALL_LIMIT", str(cls.TOPIC_SUMMARY_RECALL_LIMIT)))
+            cls.TOPIC_SUMMARY_MAX_CHARS = int(os.getenv("CA_TOPIC_SUMMARY_MAX_CHARS", str(cls.TOPIC_SUMMARY_MAX_CHARS)))
+            cls.TOPIC_SUMMARY_MAX_TOKENS = int(os.getenv("CA_TOPIC_SUMMARY_MAX_TOKENS", str(cls.TOPIC_SUMMARY_MAX_TOKENS)))
+            cls.TOPIC_SUMMARY_INPUT_BUDGET = int(os.getenv("CA_TOPIC_SUMMARY_INPUT_BUDGET", str(cls.TOPIC_SUMMARY_INPUT_BUDGET)))
+            cls.TOPIC_JACCARD_ENTRY = float(os.getenv(
+                "CA_TOPIC_JACCARD_ENTRY",
+                str(cls.TOPIC_JACCARD_ENTRY),
+            ))
+            cls.TOPIC_JACCARD_CHAIN = float(os.getenv(
+                "CA_TOPIC_JACCARD_CHAIN",
+                str(cls.TOPIC_JACCARD_CHAIN),
+            ))
             cls.TOPIC_RADIUS_WEIGHT = float(os.getenv("CA_TOPIC_RADIUS_WEIGHT", str(cls.TOPIC_RADIUS_WEIGHT)))
             cls.TOPIC_MAX_UPGRADE = int(os.getenv("CA_TOPIC_MAX_UPGRADE", str(cls.TOPIC_MAX_UPGRADE)))
             cls.TOPIC_BG_LEVEL = os.getenv("CA_TOPIC_BG_LEVEL", cls.TOPIC_BG_LEVEL)
             cls.ACCUMULATED_SPLIT_START = int(os.getenv("CA_ACCUMULATED_SPLIT_START", str(cls.ACCUMULATED_SPLIT_START)))
             cls.ACCUMULATED_SPLIT_END = int(os.getenv("CA_ACCUMULATED_SPLIT_END", str(cls.ACCUMULATED_SPLIT_END)))
             cls.JACCARD_PENALTY_MAX = float(os.getenv("CA_JACCARD_PENALTY_MAX", str(cls.JACCARD_PENALTY_MAX)))
+
+            cls.REFINEMENT_ENABLED = os.getenv("CA_REFINEMENT_ENABLED", "0") == "1"
+            cls.REFINEMENT_CHECK_INTERVAL = int(os.getenv("CA_REFINEMENT_CHECK_INTERVAL", str(cls.REFINEMENT_CHECK_INTERVAL)))
+            cls.REFINEMENT_MIN_NEW_TURNS = int(os.getenv("CA_REFINEMENT_MIN_NEW_TURNS", str(cls.REFINEMENT_MIN_NEW_TURNS)))
+            cls.REFINEMENT_MAX_DURATION = float(os.getenv("CA_REFINEMENT_MAX_DURATION", str(cls.REFINEMENT_MAX_DURATION)))
+            cls.REFINEMENT_INTERNAL_REFINE = os.getenv("CA_REFINEMENT_INTERNAL_REFINE", "0") == "1"
+            cls.REFINEMENT_CROSS_VALIDATE = os.getenv("CA_REFINEMENT_CROSS_VALIDATE", "1") == "1"
+            cls.REFINEMENT_HEALTH_SCORE = os.getenv("CA_REFINEMENT_HEALTH_SCORE", "1") == "1"
+            cls.REFINEMENT_GRAPHIFY_SYNC = os.getenv("CA_REFINEMENT_GRAPHIFY_SYNC", "1") == "1"
+            cls.REFINEMENT_MAX_ENTRIES_PER_CYCLE = int(os.getenv("CA_REFINEMENT_MAX_ENTRIES_PER_CYCLE", str(cls.REFINEMENT_MAX_ENTRIES_PER_CYCLE)))
 
             cls.validate()
             logger.info("Configuration reloaded and validated.")

@@ -42,7 +42,7 @@ WIKI_CROSS_REF = {
         ("tests.unit.test_grade", "TestFromTopicGrade.test_far_maps_to_none"),
     ],
     "TP-004": [
-        ("tests.stage.test_a_stage_topic_aware", "TestACTGrade.test_thought_replaced_with_full_fct"),
+        ("tests.stage.test_build_conv_history_v6", "TestGradeACT.test_user_fin_elm_thought_tool_fct"),
     ],
     "TP-006": [
         ("tests.unit.test_topic_manager", "TestApplyWaterPressure.test_below_start_unchanged"),
@@ -51,13 +51,13 @@ WIKI_CROSS_REF = {
         ("tests.unit.test_topic_manager", "TestApplyWaterPressure.test_beyond_peak_capped"),
     ],
     "TP-007": [
-        ("tests.stage.test_a_stage_topic_aware", "TestTopicMgrNoneGuard.test_no_topic_mgr_all_act"),
-        ("tests.stage.test_a_stage_topic_aware", "TestEmbedFailurePipeline.test_embed_failure_rel_then_mutation"),
-        ("tests.stage.test_a_stage_topic_aware", "TestEmbedFailurePipeline.test_plugin_mgr_none_safe"),
+        ("tests.stage.test_build_conv_history_v6", "TestEmptyDB.test_no_topic_mgr_all_act"),
+        ("tests.stage.test_a_stage_topic_aware", "TestEmbedFailurePipeline.test_embed_failure_falls_back_to_rel"),
+        ("tests.stage.test_a_stage_topic_aware", "TestEmbedFailurePipeline.test_no_topic_mgr_all_act"),
     ],
     "CR-004": [
-        ("tests.stage.test_a_stage_topic_aware", "TestFARGrade.test_thought_tool_cleared_fin_hdl"),
-        ("tests.stage.test_a_stage_topic_aware", "TestRELGrade.test_thought_tool_hdl_fin_fct"),
+        ("tests.stage.test_build_conv_history_v6", "TestGradeFAR.test_user_fin_hdl_thought_tool_deleted"),
+        ("tests.stage.test_build_conv_history_v6", "TestGradeREL.test_user_fin_fct_thought_tool_hdl"),
     ],
     "CR-005": [
         ("tests.store.test_store_contract", "TestSQLiteStoreContract.test_session_id_equals_db_stem"),
@@ -65,7 +65,7 @@ WIKI_CROSS_REF = {
         ("tests.stage.test_a_stage_topic_aware", "TestFullPipelineRealTopicMgr.test_two_topics_produce_different_grades"),
     ],
     "CR-006": [
-        ("tests.stage.test_a_stage_topic_aware", "TestFARGrade.test_thought_tool_cleared_fin_hdl"),
+        ("tests.stage.test_build_conv_history_v6", "TestGradeFAR.test_user_fin_hdl_thought_tool_deleted"),
     ],
     "CR-007": [
         ("tests.plugin.test_plugin", "TestIsAvailable.test_initial_state"),
@@ -116,25 +116,32 @@ class TestCrossRefAudit:
         assert not missing, f"设计决策无测试覆盖: {missing}"
 
     def test_runtime_test_counts_match_audit(self):
-        """审计清单中的 test 计数与模块实际计数一致"""
+        """模块测试计数与审计基线一致"""
         from tests.unit import test_topic_manager as tm
         from tests.stage import test_a_stage_topic_aware as tsa
+        from tests.stage import test_build_conv_history_v6 as tbv6
         from tests.store import test_store_v5 as ts5
         from tests.unit import test_grade as tg
 
         counts = {
             "test_topic_manager": sum(1 for _, m in inspect.getmembers(tm)
-                                       if inspect.isclass(m) and m.__name__.startswith("Test")),
+                                      if inspect.isclass(m) and m.__name__.startswith("Test")),
             "test_a_stage_topic_aware": sum(1 for _, m in inspect.getmembers(tsa)
-                                             if inspect.isclass(m) and m.__name__.startswith("Test")),
+                                            if inspect.isclass(m) and m.__name__.startswith("Test")),
+            "test_build_conv_history_v6": sum(1 for _, m in inspect.getmembers(tbv6)
+                                              if inspect.isclass(m) and m.__name__.startswith("Test")),
             "test_store_v5": sum(1 for _, m in inspect.getmembers(ts5)
-                                  if inspect.isclass(m) and m.__name__.startswith("Test")),
+                                 if inspect.isclass(m) and m.__name__.startswith("Test")),
         }
 
         # Verifiable baseline: we know these numbers from the wiki
         assert counts["test_topic_manager"] >= 10, \
             f"test_topic_manager has {counts['test_topic_manager']} test classes"
-        assert counts["test_a_stage_topic_aware"] >= 8, \
+        # v6.2: v5 mutation 测试已清理，topic_aware 仅保留真实 mgr 集成（2 类）；
+        # 映射/尾部/降级覆盖由 test_build_conv_history_v6 承担
+        assert counts["test_a_stage_topic_aware"] >= 2, \
             f"test_a_stage_topic_aware has {counts['test_a_stage_topic_aware']} test classes"
+        assert counts["test_build_conv_history_v6"] >= 8, \
+            f"test_build_conv_history_v6 has {counts['test_build_conv_history_v6']} test classes"
         assert counts["test_store_v5"] >= 1, \
             "test_store_v5 has no test classes"

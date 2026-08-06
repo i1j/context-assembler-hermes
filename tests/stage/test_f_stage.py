@@ -566,14 +566,19 @@ class TestCleanIncrementFallback:
         assert result["core_change"] == "本轮无新内容"
 
     def test_normal_input_not_affected(self):
-        """已有正常 changes → 不覆盖，保持原路径"""
+        """已有正常 changes → 保留；consensus 按 v6 语义合并进 changes（带 ooda）。"""
         from ca.post_process import clean_increment
         result = clean_increment({
             "changes": [{"stage_tag": "已实施", "core_change": "修复连接池"}],
             "core_change": "修复连接池",
             "consensus": ["应该被忽略"],
         })
-        assert len(result["changes"]) == 1
+        # v6：changes 有真实内容时 consensus 合并进 changes（避免新旧格式并存）
+        assert len(result["changes"]) == 2
         assert result["changes"][0]["core_change"] == "修复连接池"
-        # consensus 不应被派生
+        assert result["changes"][0]["stage_tag"] == "已实施"
+        assert result["changes"][1]["core_change"] == "应该被忽略"
+        assert result["changes"][1]["stage_tag"] == "待分类"
+        assert result["changes"][1]["ooda"] == "决策与方案"
+        # core_change 保持首个有效 change
         assert result["core_change"] == "修复连接池"

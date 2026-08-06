@@ -180,12 +180,6 @@ class ContextAssembler(EStageMixin, FStageMixin, LStageMixin, AStageMixin):
         self.stats = AssembleStats()
         self._original_messages: Optional[List[Dict]] = None
 
-        # v5.10 A-stage 缓存状态
-        self._A_stable_cache: Optional[List[Dict]] = None
-        self._A_cache_turns: int = 0
-        self._A_cache_is_stale: bool = False
-        self._saved_history_snapshot: Optional[List[Dict]] = None
-
         # v5.0 E-stage 属性
         self._current_turn: int = 0
         self._seq_counter: Dict[int, int] = {}            # turn → max_seq

@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_EMBED_DIM = 768
+_EMBED_DIM = int(os.getenv("CA_EMBED_DIM", "1024"))  # qwen3-embedding:0.6b 固定 1024 维
 
 try:
     import urllib3
@@ -224,3 +224,8 @@ class EmbeddingClient:
             self._dim = len(emb)
             self._dim_detected = True
             logger.info("Embedding dimension detected: %d", self._dim)
+        elif self._dim_detected and emb and len(emb) != self._dim:
+            raise ValueError(
+                f"Embedding dimension mismatch: expected {self._dim}, got {len(emb)}. "
+                "Model or backend changed mid-process. Restart required."
+            )

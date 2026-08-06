@@ -68,6 +68,7 @@ python -m pytest tests/stage/test_a_stage_topic_aware.py -v
 | `tests/config/test_config.py` | Config 体系 | 配置 |
 | `tests/config/test_health.py` | Config 体系 | 配置 |
 | `tests/audit/test_cross_ref_wiki_audit.py` | TP-001, TP-002, TP-006, TP-007, CR-007 | 交叉验证审计 |
+| `tests/unit/test_reality_prompts.py` (32) | 决策 37（reality 重构：§4.1 模型 / §4.3 OV L1 映射 / §5.1 衔接判定 / §9-9 宁分不并显式） | reality prompt 三件套 |
 
 ### 按决策类型反向查找
 

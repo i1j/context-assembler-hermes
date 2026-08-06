@@ -581,7 +581,8 @@ class TestAssignTopic:
         mgr._current_topic_id = 1
         mgr._next_topic_id = 2  # topic 1 已分配
         mgr._topic_text_profiles[1] = "聊Python"
-        tid = mgr._assign_topic(2, [(0, "user", None, None, "原始消息", "今天是几号", "")], "今天是几号")
+        # 消息 > 10 字确认阈值，Jaccard vs "聊Python" 必然 miss → 新话题
+        tid = mgr._assign_topic(2, [(0, "user", None, None, "原始消息", "今天是几号几点几分星期几", "")], "今天是几号几点几分星期几")
         assert tid == 2
         assert mgr._turn_to_topic[2] == 2
 
@@ -597,9 +598,39 @@ class TestAssignTopic:
         mgr._current_topic_id = 1
         mgr._next_topic_id = 2
         mgr._topic_text_profiles[1] = "旧话题"
-        tid = mgr._assign_topic(2, [], "全新的内容没有交集")
-        # ca_rows 空 → 用 user_msg 做 Jaccard → 应该 miss → 新 topic
+        # 消息 > 10 字，ca_rows 空 → 用 user_msg 做 Jaccard → 应该 miss → 新 topic
+        tid = mgr._assign_topic(2, [], "全新的内容没有任何交集且不相关")
         assert tid == 2
+
+    # ── JSON 键名污染回归（TP-001 已知缺陷族，2026-07-31）──
+    # 修复前：{"core_change":"数据库设计"} vs {"core_change":"Python优化"}
+    # 共享 core_change 键名 token → j=0.0714 ≥ ENTRY(0.04) → 虚假延续。
+    # 修复后：归一化为语义值 "数据库设计" vs "Python优化" → j=0.0 → 新话题。
+
+    def test_json_key_no_false_continuation(self, mgr):
+        """Fct JSON 公共键名不得造成跨话题虚假延续"""
+        mgr._turn_to_topic[1] = 1
+        mgr._current_topic_id = 1
+        mgr._next_topic_id = 2
+        mgr._topic_text_profiles[1] = mgr._extract_turn_fct(
+            [(0, "user", None, None, "原始消息", '{"core_change":"数据库设计"}', "")]
+        )
+        rows2 = [(0, "user", None, None, "原始消息", '{"core_change":"Python优化"}', "")]
+        tid = mgr._assign_topic(2, rows2, "Python优化怎么做才好")
+        assert tid == 2  # 新话题：不因 JSON 键名虚假延续
+        assert mgr._turn_to_topic[2] == 2
+
+    def test_json_same_topic_still_continues(self, mgr):
+        """同话题的 JSON Fct 归一化后仍应延续（防过度分割）"""
+        mgr._turn_to_topic[1] = 1
+        mgr._current_topic_id = 1
+        mgr._topic_text_profiles[1] = mgr._extract_turn_fct(
+            [(0, "user", None, None, "原始消息", '{"core_change":"Python优化建议"}', "")]
+        )
+        rows2 = [(0, "user", None, None, "原始消息", '{"core_change":"Python优化讨论"}', "")]
+        tid = mgr._assign_topic(2, rows2, "Python优化再讨论一下细节")
+        assert tid == 1  # 语义重叠 → 延续
+        assert mgr._turn_to_topic[2] == 1
 
 
 # ============================================================================
@@ -685,6 +716,56 @@ class TestExtractTurnFct:
         """行长度不足 6 时跳过"""
         rows = [(0, "user")]
         assert mgr._extract_turn_fct(rows) is None
+
+    # ── JSON 键名污染归一化（TP-001 已知缺陷族，2026-07-31）──
+    # Fct JSON 公共键名（core_change/changes/stage_tag…）与元数据值
+    # （stage_tag 状态、_assemble_status 数字）对所有话题恒定，
+    # 会把无关话题的 Jaccard 抬过 ENTRY 阈值（"数据库设计" vs
+    # "Python优化" 原始 JSON j=0.0714 ≥ 0.04 → 虚假延续）。
+    # 提取时必须归一化为语义值文本（剥键名 + 跳过元数据）。
+
+    def test_json_fct_strips_keys_and_metadata(self, mgr):
+        """完整 Fct JSON → 仅返回语义 value，键名与元数据全部剥离"""
+        rows = [(0, "user", None, None, "原始消息",
+                 '{"changes": [{"stage_tag": "已实施", "core_change": "数据库设计完成"}], '
+                 '"core_change": "数据库设计推进中", "_assemble_status": 0}', "")]
+        out = mgr._extract_turn_fct(rows)
+        assert "数据库设计完成" in out
+        assert "数据库设计推进中" in out
+        # 键名不得残留
+        assert "core_change" not in out
+        assert "changes" not in out
+        assert "stage_tag" not in out
+        assert "_assemble_status" not in out
+        # 元数据值不得残留（stage_tag 状态 + 数字 0）
+        assert "已实施" not in out
+        assert "0" not in out
+
+    def test_json_fct_skips_ooda_metadata(self, mgr):
+        """ooda 标签（固定 4 枚举，话题无关）应跳过，core_change 保留"""
+        rows = [(0, "user", None, None, "原始消息",
+                 '{"changes": [{"stage_tag": "已实施", "ooda": "决策与方案", '
+                 '"core_change": "采用异步方案提升并发"}]}', "")]
+        out = mgr._extract_turn_fct(rows)
+        assert "采用异步方案提升并发" in out
+        assert "ooda" not in out
+        assert "决策与方案" not in out
+
+    def test_json_malformed_passthrough(self, mgr):
+        """损坏的 JSON 原样返回（不吞内容）"""
+        rows = [(0, "user", None, None, "原始消息", '{"core_change": broken', "")]
+        assert mgr._extract_turn_fct(rows) == '{"core_change": broken'
+
+    def test_json_non_string_values_skipped(self, mgr):
+        """非字符串 value（数字/布尔）是装配元数据，跳过"""
+        rows = [(0, "user", None, None, "原始消息",
+                 '{"core_change": "内容", "count": 5, "flag": true}', "")]
+        assert mgr._extract_turn_fct(rows) == "内容"
+
+    def test_plain_text_passthrough(self, mgr):
+        """非 JSON 文本（原始用户消息/旧格式）原样返回"""
+        rows = [(0, "user", None, None, "原始消息", "数据库设计讨论中", "")]
+        assert mgr._extract_turn_fct(rows) == "数据库设计讨论中"
 
 
 # ============================================================================
@@ -820,6 +901,49 @@ class TestComputeCentroids:
         # 两个 topic 相同 embed → centroid 相同 → nearest=0
         assert mgr._topic_data[1]["nearest_centroid_dist"] == 0.0
         assert abs(mgr._topic_data[2]["nearest_centroid_dist"]) < 1e-10
+
+    def test_embed_input_strips_json_keys(self, mgr, mock_store):
+        """centroid embed 输入必须剥离 Fct JSON 键名与元数据（TP-001 同源缺陷族）。
+
+        原始 Fct JSON（core_change/changes/stage_tag/_assemble_status）对所有话题恒定，
+        直接 embed 会把无关话题的 centroid 向量抬高相似度 → 半径定级失真。
+        输入应为 _extract_fct_semantic_text 后的纯语义文本。
+        """
+        from ca.store import write_turn_v5
+        # 两个不同话题的 Fct，共享 JSON 键名但语义不同
+        write_turn_v5(mock_store, "test", 1, 0,
+                      role="user", elm_text="数据库设计",
+                      fct_text='{"core_change":"数据库设计", "stage_tag":"已实施", "_assemble_status":0}')
+        write_turn_v5(mock_store, "test", 2, 0,
+                      role="user", elm_text="Python优化",
+                      fct_text='{"core_change":"Python优化", "stage_tag":"已实施", "_assemble_status":0}')
+        mgr._store = mock_store
+        mock_store.session_id = "test"
+
+        # 捕获 embed 实际收到的文本
+        embed_calls: list = []
+        def _capture(text, **kw):
+            embed_calls.append(text)
+            return [0.5] * 768
+        mgr._embed_client = SimpleNamespace(embed=_capture)
+
+        mgr._topic_data = {
+            1: {"centroid": None, "is_bg": False, "turns": [1],
+                "max_intra": 0.05, "nearest_centroid_dist": 0.0, "embeddings": []},
+            2: {"centroid": None, "is_bg": False, "turns": [2],
+                "max_intra": 0.05, "nearest_centroid_dist": 0.0, "embeddings": []},
+        }
+        mgr._compute_centroids()
+
+        assert len(embed_calls) == 2, f"期望 2 次 embed 调用，实际 {len(embed_calls)}"
+        # 输入必须是剥离键名后的纯语义文本：不含 JSON 键名 / 花括号 / 元数据
+        for call_text in embed_calls:
+            assert "core_change" not in call_text, f"embed 输入含 JSON 键名: {call_text!r}"
+            assert "stage_tag" not in call_text, f"embed 输入含元数据键名: {call_text!r}"
+            assert "{" not in call_text and "}" not in call_text, f"embed 输入含 JSON 括号: {call_text!r}"
+            assert "_assemble_status" not in call_text, f"embed 输入含元数据值: {call_text!r}"
+        assert "数据库设计" in embed_calls[0], f"丢失语义内容: {embed_calls[0]!r}"
+        assert "Python优化" in embed_calls[1], f"丢失语义内容: {embed_calls[1]!r}"
 
 
 # ============================================================================

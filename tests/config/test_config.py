@@ -188,3 +188,28 @@ def test_cfg_5_validate_boundary(monkeypatch):
     # 恢复
     monkeypatch.setenv("CA_L1_TEMPERATURE", str(orig_temp))
     Config.reload()
+
+
+@pytest.mark.medium
+def test_cfg_6_profile_detection_from_hermes_home(monkeypatch):
+    """CFG-6: HERMES_PROFILE 优先 CA_HERMES_PROFILE，其次 HERMES_HOME basename，兜底 default。"""
+    from ca.config import Config
+    monkeypatch.delenv("CA_HERMES_PROFILE", raising=False)
+    monkeypatch.setenv("HERMES_HOME", "/home/i1j/.hermes/profiles/tester")
+    Config.reload()
+    assert Config.HERMES_PROFILE == "tester", \
+        f"Expected tester from HERMES_HOME, got {Config.HERMES_PROFILE}"
+
+    monkeypatch.setenv("CA_HERMES_PROFILE", "winker")
+    Config.reload()
+    assert Config.HERMES_PROFILE == "winker", \
+        f"Expected winker from CA_HERMES_PROFILE, got {Config.HERMES_PROFILE}"
+
+    monkeypatch.delenv("CA_HERMES_PROFILE", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    Config.reload()
+    assert Config.HERMES_PROFILE == "default", \
+        f"Expected default fallback, got {Config.HERMES_PROFILE}"
+    # 恢复当前环境
+    monkeypatch.setenv("HERMES_HOME", "/home/i1j/.hermes/profiles/tester")
+    Config.reload()

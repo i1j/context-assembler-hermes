@@ -1,175 +1,113 @@
 # CA 技术方案 Wiki
 
-> 双维度文档体系：`architecture/`（空间/组件维度）+ `decisions/`（时间/决策维度）
+> 双维度文档体系：`architecture/`（空间/当前组件）+ `decisions/`（时间/决策演进）
+> **适用版本：v6.0** | 源项目：`~/projects/context-assembler/`
 
 ## 关系图
 
 ```mermaid
 flowchart LR
-  %% architecture 节点
-  SM[01-存储模型]
-  EP[02-E-stage-写入协议]
-  FS[03-F-stage-异步摘要]
-  AR[04-A-stage-角色队列匹配]
-  IC[05-增量缓存]
-  TP[06-尾巴保护]
-  BS[07-bg-review-同步写入]
-  TS[08-话题分割]
-  TG[09-话题切换定级]
-  CO[10-CA-OV-话题提交]
-  FE[11-Fct-格式演变]
-  NC[12-命名统一]
-  TE[13-测试策略]
-  RA[14-已拒绝方案]
-  MO[15-多OODA分治摘要]
+  %% ── components (14 architecture pages) ──
+  ST[02-store]:::store
+  ES[03-e-stage]:::core
+  FS[04-f-stage]:::core
+  AS[05-a-stage]:::core
+  TM[06-topic-mgmt]:::core
+  RT[07-retrieval]:::aux
+  AC[08-cache]:::aux
+  TS[09-tool-summarizer]:::aux
+  EM[10-embedding]:::aux
+  LS[11-l-stage]:::aux
+  CF[12-config]:::aux
+  RF[14-idle-refinement]:::aux
 
-  %% decisions 节点（旧）
-  DP[01-设计哲学]:::decision
-  SW[02-SQLite-WAL]:::decision
-  TR[03-工具轮规则引擎]:::decision
-  TGF[04-工具组格式]:::decision
-  DR[05-双路检索-RRF]:::decision
-  EM[06-嵌入服务]:::decision
-  AC[07-AssemblyCache]:::decision
-  FD[08-指纹去重]:::decision
-  TZM[09-三区模型]:::decision
-  LFC[10-LLM降级链]:::decision
-  BG[11-预算闸门]:::decision
-  CS[12-配置体系]:::decision
-  CA[13-C-stage异步]:::decision
-  LD[14-L-stage守护]:::decision
-  PR[15-插件职责]:::decision
-  TP46[16-话题拣选-v46]:::decision
-  L1P[17-L1摘要-PDD]:::decision
-  SV5[18-Schema-v5]:::decision
-  IR[19-注入重构]:::decision
-  INC[20-事故回顾]:::decision
+  %% ── data flow ──
+  ES -->|write-on-receive| ST
+  FS -->|write Fct/Hdl| ST
+  AS -->|read| ST
+  AS --> TM
+  TM -->|grade| AS
+  RT -->|retrieve| AS
+  AC -->|cache| AS
+  TS -->|summarize tools| ES
+  LS -->|manage lifecycle| FS
+  CF -->|configures| ES
+  CF -->|configures| FS
+  CF -->|configures| AS
+  CF -->|configures| RT
+  RF -->|refine on idle| ST
+  RF -->|sync| LS
 
-  %% decisions 节点（v5.x 新）
-  EW[21-E-stage写即落盘]:::decision
-  FSA[22-F-stage异步]:::decision
-  STU[23-术语统一]:::decision
-  FCF[24-Fct-changes格式]:::decision
-  TLP[25-尾巴保护]:::decision
-  BRS[26-bg-review同步]:::decision
-  TGM[27-TopicGradeManager]:::decision
-  INCC[28-增量缓存]:::decision
-  COV[29-CA-OV提交]:::decision
-  REJ[30-已拒绝方案]:::decision
-  CES[31-CE-壳注册]:::decision
-  CDD[32-state-db-user-dedup]:::decision
-  MTP[33-多话题OODA]:::decision
-
-  %% architecture → architecture 依赖
-  SM --> EP
-  SM --> FS
-  SM --> AR
-  SM --> TP
-  SM --> TS
-  EP --> AR
-  EP --> BS
-  FS --> FE
-  FS --> BS
-  AR --> IC
-  AR --> TP
-  AR --> TG
-  TS --> TG
-  TS --> CO
-  TG --> CO
-
-  %% decisions → architecture 影响
-  EW --> SM
-  EW --> EP
-  FSA --> FS
-  FSA --> FE
-  STU --> NC
-  FCF --> FE
-  TLP --> TP
-  BRS --> BS
-  TGM --> TS
-  TGM --> TG
-  TGM --> AR
-  INCC --> IC
-  COV --> CO
-  SV5 --> SM
-  SV5 --> EP
-  IR --> AR
-  CA --> EP
-  LD --> FS
-  PR --> BS
-  TP46 --> TS
-  TP46 --> TG
-
-  %% decisions → architecture 影响（续）
-  MTP --> MO
-  MTP --> FS
-  MTP --> FE
-
-  classDef decision fill:#e1f5fe,stroke:#0288d1
+  %% ── styling ──
+  classDef store fill:#1a1a2e,stroke:#e94560,color:#eee
+  classDef core fill:#16213e,stroke:#0f3460,color:#eee
+  classDef aux fill:#0f3460,stroke:#533483,color:#eee
 ```
 
-## 索引
+> **注：tail-protection 内嵌于 05-a-stage，OV 话题提交内嵌于 06-topic-management，plugin-arch（Hook 注册 + CE shell）内嵌于 `plugins/ca_assembler/__init__.py`，无独立架构页。**
 
-### architecture（空间维度：当前系统组件）
+## 架构组件（architecture/）
 
-| # | 文件 | 版本引入 | 决策关联 |
-|---|------|----------|----------|
-| 01 | [存储模型](architecture/01-storage-model.md) | v5.0 | e-stage-write-on-receive, schema-v5-rewrite |
-| 02 | [E-stage 写入协议](architecture/02-e-stage-write-protocol.md) | v5.0 | e-stage-write-on-receive, schema-v5-rewrite |
-| 03 | [F-stage 异步摘要](architecture/03-f-stage-async-summary.md) | v5.2 | l-stage-daemon, fct-changes-format |
-| 04 | [A-stage 角色队列匹配](architecture/04-a-stage-role-match.md) | v5.5 | topic-grade-manager, tail-protection, bg-review-sync, incremental-cache |
-| 05 | [增量缓存](architecture/05-incremental-cache.md) | v5.8 | incremental-cache, topic-grade-manager |
-| 06 | [尾巴保护](architecture/06-tail-protection.md) | v5.3 | tail-protection |
-| 07 | [bg_review 同步写入](architecture/07-bg-review-sync-write.md) | v5.5 | bg-review-sync, plugin-responsibility |
-| 08 | [话题分割](architecture/08-topic-segmentation.md) | v5.5 | topic-grade-manager, topic-picking-v46 |
-| 09 | [话题切换定级](architecture/09-topic-grade-switch.md) | v5.5 | topic-grade-manager, tail-protection |
-| 10 | [CA-OV 话题提交](architecture/10-ca-ov-topic-submit.md) | v5.5 | ca-ov-topic-submit, topic-grade-manager |
-| 11 | [Fct 格式演变](architecture/11-fct-format-evolution.md) | v5.2 | fct-changes-format |
-| 12 | [命名统一](architecture/12-naming-convention.md) | v5.5 | stage-terminology-unification |
-| 13 | [测试策略](architecture/13-test-strategy.md) | v5.0 | — |
-| 14 | [已拒绝方案](architecture/14-rejected-approaches.md) | v5.0 | rejected-approaches |
-| 15 | [多 OODA 分治摘要](architecture/15-multi-ooda-arch.md) | v6.2 | multi-ooda-per-topic-summary |
+| # | 文件 | 版本引入 | 源文件 | 说明 |
+|---|------|----------|--------|------|
+| 01 | [概览](architecture/01-overview.md) | v6.0 | — | 系统架构、模块依赖、术语 |
+| 02 | [存储模型](architecture/02-store.md) | v5.10 | `ca/store.py` | turn_stream 表结构、WAL |
+| 03 | [E-stage 写入](architecture/03-e-stage.md) | v5.0 | `ca/e_stage.py` | 5 Hook 写即落盘协议 |
+| 04 | [F-stage 摘要](architecture/04-f-stage.md) | v5.2 | `ca/f_stage.py` | 异步 LLM 摘要（fin 粒度） |
+| 05 | [A-stage 装配](architecture/05-a-stage.md) | v6.0 | `ca/a_stage.py` | direction B：DB 重建 conv_history（含 tail-protection） |
+| 06 | [话题管理](architecture/06-topic-management.md) | v5.5 | `topic_manager.py` | TopicGradeManager 检测+定级（含 OV 话题提交） |
+| 07 | [检索](architecture/07-retrieval.md) | v4.0 | `ca/retrieval.py` | BM25+向量双路+RRF |
+| 08 | [缓存](architecture/08-cache.md) | v4.0 | `ca/cache.py` | AssemblyCache 内存缓存 |
+| 09 | [工具摘要](architecture/09-tool-summarizer.md) | v4.3 | `ca/tool_summarizer.py` | 工具调用摘要引擎 |
+| 10 | [嵌入](architecture/10-embedding.md) | v4.0 | `ca/embedding.py` | Ollama / ST 多后端 |
+| 11 | [L-stage 引擎生命周期](architecture/11-l-stage.md) | v4.4 | `ca/lstage.py` | 生命周期管理 + L4 空闲精炼管线（v5.14 新增） |
+| 12 | [配置体系](architecture/12-config.md) | v5.0 | `ca/config.py` | 配置加载+优先级 |
+| 13 | [测试策略](architecture/13-test-strategy.md) | v5.0 | `tests/` | 分层测试体系 |
+| 14 | [空闲精炼管线](architecture/14-idle-refinement.md) | v5.14 | `ca/lstage.py` | L4 空闲精炼：内精炼+交叉验证 |
 
-### decisions（时间维度：决策树）
+## 决策时间线（decisions/）
 
-| # | 文件 | 版本 | 类型 | 影响组件 |
-|---|------|------|------|----------|
-| 01 | [设计哲学](decisions/01-design-philosophy.md) | v0.x | 基线 | 全系统 |
-| 02 | [SQLite + WAL](decisions/02-sqlite-wal-storage.md) | v0.x | 存储 | storage-model |
-| 03 | [工具轮规则引擎](decisions/03-tool-summarizer-rules.md) | v1.0 | 工具 | fct-format-evolution |
-| 04 | [工具组格式](decisions/04-tool-group-format.md) | v1.2 | 工具 | — |
-| 05 | [双路检索 + RRF](decisions/05-dual-retrieval-rrf.md) | v2.0 | 检索 | — |
-| 06 | [嵌入服务](decisions/06-embedding-multi-backend.md) | v2.0 | 检索 | — |
-| 07 | [AssemblyCache](decisions/07-assembly-cache-singleton.md) | v2.0 | 缓存 | — |
-| 08 | [指纹去重](decisions/08-fingerprint-dedup.md) | v3.0 | 存储 | — |
-| 09 | [三区模型](decisions/09-three-zone-model.md) | v2.0 | 装配 | a-stage-role-match |
-| 10 | [LLM 降级链](decisions/10-llm-fallback-chain.md) | v2.0 | 降级 | — |
-| 11 | [预算闸门](decisions/11-budget-gate.md) | v2.5 | 配置 | — |
-| 12 | [配置体系](decisions/12-config-system.md) | v3.0 | 配置 | tail-protection |
-| 13 | [C-stage 异步](decisions/13-c-stage-async.md) | v4.0 | 写入 | e-stage-write-protocol |
-| 14 | [L-stage 守护](decisions/14-l-stage-daemon.md) | v4.0 | 摘要 | f-stage-async-summary |
-| 15 | [插件职责](decisions/15-plugin-responsibility.md) | v4.0 | 架构 | bg-review-sync-write |
-| 16 | [话题拣选 v4.6](decisions/16-topic-picking-v46.md) | v4.6 | 话题 | topic-segmentation, topic-grade-switch |
-| 17 | [L1 摘要 PDD](decisions/17-l1-summary-pdd.md) | v4.7 | 摘要 | fct-format-evolution |
-| 18 | [Schema v5](decisions/18-schema-v5-rewrite.md) | v5.0 | 存储 | storage-model, e-stage-write-protocol |
-| 19 | [注入重构](decisions/19-injection-refactor.md) | v5.1 | 装配 | a-stage-role-match |
-| 20 | [事故回顾](decisions/20-incidents-review.md) | v4.3~5.0 | meta | — |
-| 21 | **E-stage 写即落盘** | v5.0 | 写入 | storage-model, e-stage-write-protocol |
-| 22 | **F-stage 异步摘要** | v5.2 | 摘要 | f-stage-async-summary, fct-format-evolution |
-| 23 | **术语统一** | v5.5 | meta | naming-convention |
-| 24 | **Fct changes 格式** | v5.2 | 格式 | fct-format-evolution |
-| 25 | **尾巴保护** | v5.3 | 装配 | tail-protection |
-| 26 | **bg_review 同步** | v5.5 | 装配 | bg-review-sync-write |
-| 27 | **TopicGradeManager** | v5.5 | 话题 | topic-segmentation, topic-grade-switch, a-stage-role-match |
-| 28 | **增量缓存** | v5.8 | 缓存 | incremental-cache |
-| 29 | **CA-OV 提交** | v5.5 | 持久化 | ca-ov-topic-submit |
-| 30 | [已拒绝方案](decisions/30-rejected-approaches.md) | v5.0~5.8 | meta | rejected-approaches |
-| 31 | **[CE 壳注册](decisions/31-ce-shell-registration.md)** | v6.0 | 插件 | plugin-responsibility, naming-convention |
-| 32 | **[state.db user 双写清理](decisions/32-state-db-user-dedup.md)** | v6.1 | 存储 | plugin-responsibility |
-| 33 | **[多话题 OODA 分治摘要](decisions/33-multi-ooda-per-topic-summary.md)** | v6.2 | 摘要 | multi-ooda-arch, f-stage-async-summary, fct-format-evolution, fct-changes-format |
+| # | 文件 | 版本 | 决策类型 | 影响组件 |
+|---|------|------|----------|----------|
+| 01 | [设计哲学](decisions/01-design-philosophy.md) | v0.x | 架构基础 | 全系统 |
+| 02 | [三阶段架构](decisions/02-three-stage-arch.md) | v4.3 | 架构 | 管线 |
+| 03 | [SQLite WAL](decisions/03-sqlite-wal.md) | v4.2 | 存储 | store |
+| 04 | [E-stage 写即落盘](decisions/04-e-stage-on-receive.md) | v5.0 | 数据协议 | e-stage |
+| 05 | [F-stage 异步摘要](decisions/05-f-stage-async.md) | v5.2 | 管线 | f-stage |
+| 06 | [方向 B](decisions/06-direction-b.md) | v6.0 | 架构重写 | a-stage, topic mgmt |
+| 07 | [话题定级管理器](decisions/07-topic-grade-manager.md) | v5.5 | 话题 | topic_manager |
+| 08 | [双路检索 RRF](decisions/08-dual-retrieval.md) | v4.0 | 检索 | retrieval |
+| 09 | [AssemblyCache](decisions/09-assembly-cache.md) | v4.0 | 缓存 | cache |
+| 10 | [工具摘要规则](decisions/10-tool-summarizer.md) | v4.3 | 工具 | tool_summarizer |
+| 11 | [嵌入多后端](decisions/11-embedding-multi-backend.md) | v4.0 | 嵌入 | embedding |
+| 12 | [LLM 降级链](decisions/12-llm-fallback.md) | v4.3 | LLM | f-stage |
+| 13 | [尾巴保护](decisions/13-tail-protection.md) | v5.3 | A-stage | a-stage |
+| 14 | [bg_review 同步](decisions/14-bg-review-sync.md) | v5.5 | 审计 | hooks |
+| 15 | [指纹去重](decisions/15-fingerprint-dedup.md) | v4.1 | 数据 | store |
+| 16 | [预算闸门](decisions/16-budget-gate.md) | v4.2 | A-stage | a-stage (legacy) |
+| 17 | [L-stage 守护线程](decisions/17-l-stage-daemon.md) | v4.4→v5.10 | 守护→取代 | l-stage（v5.10 被 F-stage 取代） |
+| 18 | [术语统一](decisions/18-naming-unification.md) | v5.5 | 命名 | 全系统 |
+| 19 | [Schema v5](decisions/19-schema-v5.md) | v5.0 | 存储 | store |
+| 20 | [CE 壳注册](decisions/20-ce-shell-registration.md) | v5.10 | 插件 | plugin |
+| 21 | [引擎 TTL 恢复](decisions/21-engine-ttl-recovery.md) | v6+ | 稳定性 | plugin |
+| 22 | [State DB 去重](decisions/22-state-db-dedup.md) | v6.1 | 修复 | plugin |
+| **23** | **[已拒绝方案](decisions/23-rejected-approaches.md)** | v0-v6 | 汇总 | — |
+| **28** | **[话题摘要 v4](decisions/28-topic-summarization-v4.md)** | v6.0 | 摘要 | f-stage, topic_summarizer |
+| **34** | **[空闲精炼管线](decisions/34-idle-refinement.md)** | **v5.14** | **自我维护** | **l-stage, topic_wiki, store** |
+| **35** | **[Strand 多事务摘要](decisions/35-strand-multi-affair-summarization.md)** | v6.4 | 摘要 | strand_summaries, topic_summary |
+| **36** | **[Wiki Theme 生成重构](decisions/36-theme-wiki-generation.md)** | v6.5 | 归并 | theme, store |
+| **37** | **[Reality 重构](decisions/37-reality-restructure.md)** | v6.6+ | 检索/归并 | reality, theme |
+| **38** | **[图模型+注入/归并闭环](decisions/38-reality-graph-inject-merge.md)** | v7 | 检索 | cooccurrence, theme, inject |
+| 38a | [注入侧 4B 拣选 prompt](decisions/38-inject-prompt.md) | v7 | 检索 | inject |
+| **39** | **[Reality 成员云表征](decisions/39-reality-member-clouds.md)** | v7 | 检索 | inject, theme |
+| **40** | **[Flash 全链路重跑 Pilot](40-flash-reprocess-pilot.md)** | v7 | 任务书 | reprocess |
 
-**粗体** = v5.x 新决策（旧决策树中无对应节点）
+## 相关资源
 
-### 历史文档
-
-旧设计文档（OpenViking `projects/context-assembler/design/`）和决策树（`projects/context-assembler/design/decision-points/`）已被本 wiki 取代。保留供历史参考。
+| 资源 | 位置 | 说明 |
+|------|------|------|
+| **OV 决策树（全量）** | OV `projects/context-assembler/design/decision-points/` | 141+ 独立决策节点（完整追溯） |
+| **OV 变更日志** | OV `projects/context-assembler/changelog.md` + `changelog-v6-continuation.md` | v0.1 ~ v6.1 完整版本历史 |
+| **代码** | `tester/plugins/ca_assembler/` | 插件核心代码 |
+| **测试** | `tester/plugins/ca_assembler/tests/` | pytest 测试套件 |
+| **OpenViking** | `viking://resources/projects/context-assembler/` | OV 知识库中的 CA 条目 |

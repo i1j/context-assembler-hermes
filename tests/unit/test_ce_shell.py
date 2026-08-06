@@ -116,3 +116,75 @@ class TestCachePreservation:
                     "pre_llm_call", "post_llm_call",
                     "post_api_request", "pre_tool_call", "post_tool_call"]
         assert hook_names == expected
+
+
+class TestCompressGuard:
+    """E2E guard：验证 CE 管线实际调用 _build_conv_history_v6 压缩消息。
+
+    如果这个测试失败，说明 compress() 断线了（should_compress→False 或 no-op）。
+    """
+
+    def test_compress_with_plugin_returns_compressed(self, ca_engine):
+        """compress() 通过 plugin 调 _build_conv_history_v6 → 返回压缩后的消息。"""
+        from ca.store import write_turn_v5
+        from ca.grade import TopicGrade
+        from unittest.mock import MagicMock
+
+        write_turn_v5(ca_engine.store, "test", 1, 0,
+                      role="user", elm_text="你好原始内容",
+                      fct_text="你好原始内容",
+                      hdl_text="你好")
+        write_turn_v5(ca_engine.store, "test", 3, 0,
+                      role="user", elm_text="第三轮用户消息",
+                      fct_text="第三轮用户消息",
+                      hdl_text="第三轮")
+
+        mock_mgr = MagicMock()
+        mock_mgr.get_turn_grade.side_effect = lambda tn: {
+            1: TopicGrade.FAR, 3: TopicGrade.ACT
+        }.get(tn, TopicGrade.ACT)
+
+        plugin = _make_plugin(ca_engine, "test")
+        plugin._topic_mgr = mock_mgr
+        ce = CAContextEngine()
+        ce._get_plugin = MagicMock(return_value=plugin)
+
+        msg = [{"role": "user", "content": "第三轮用户消息"}]
+        result = ce.compress(msg)
+        assert result is not msg, "compress() 不应返回同一个列表对象"
+        first_content = result[0].get("content", "")
+        assert len(first_content) < 100, f"FAR turn user 应压缩为 Hdl，但长达 {len(first_content)}"
+        assert "你好" in first_content, f"Hdl 应保留原文摘要"
+
+    def test_compress_with_plugin_tail_protected(self, ca_engine):
+        """尾部保护区最后 2 user turn 保留 Elm 原文。"""
+        from ca.store import write_turn_v5
+        from ca.grade import TopicGrade
+        from unittest.mock import MagicMock
+
+        write_turn_v5(ca_engine.store, "test", 1, 0,
+                      role="user", elm_text="第一轮长文本原始内容",
+                      fct_text="FCT1", hdl_text="HDL1")
+        write_turn_v5(ca_engine.store, "test", 2, 0,
+                      role="user", elm_text="第二轮",
+                      fct_text="FCT2", hdl_text="HDL2")
+        write_turn_v5(ca_engine.store, "test", 3, 0,
+                      role="user", elm_text="第三轮原始内容",
+                      fct_text="FCT3", hdl_text="HDL3")
+
+        mock_mgr = MagicMock()
+        mock_mgr.get_turn_grade.side_effect = lambda tn: TopicGrade.FAR
+
+        plugin = _make_plugin(ca_engine, "test")
+        plugin._topic_mgr = mock_mgr
+        ce = CAContextEngine()
+        ce._get_plugin = MagicMock(return_value=plugin)
+
+        msg = [{"role": "user", "content": "第三轮原始内容"}]
+        result = ce.compress(msg)
+
+        tail_msgs = [m for m in result if m.get("role") == "user"]
+        for m in tail_msgs[-2:]:
+            c = m.get("content", "")
+            assert "FCT" not in c, f"tail 保护区不应被 Fct 替换: {c}"
+            assert "HDL" not in c, f"tail 保护区不应被 Hdl 替换: {c}"

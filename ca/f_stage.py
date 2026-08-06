@@ -1,8 +1,9 @@
 """ca/f_stage.py — F-stage 异步摘要 (v5.10, 纯 LLM 路径)
 
-设计决策: Fct-001~Fct-012 (Fct 摘要重构, PDD 哲学)
+设计决策: Fct-001~Fct-012 (Fct 摘要重构, PDD 哲学), D-033 (多话题 OODA 分治摘要)
   viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-l1-摘要重构-v470-pdd-哲学
   - daemon 线程读取 DB Elm → 调 LLM → 解析 → 写 LLM 版 Fct/Hdl
+  - 多 OODA：已知话题逐一提取 → 剩余新话题检测（docs/wiki/architecture/15-multi-ooda-arch.md）
   - 覆盖 E-stage 代码级摘要
   - 截断检测双重校验 (finish_reason + endswith)
 

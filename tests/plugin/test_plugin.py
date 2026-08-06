@@ -21,9 +21,11 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 
 import pytest
+
+from ca.grade import TopicGrade
 
 # 加载根 __init__.py（插件适配层）作为独立模块
 # conftest 已把 ca_assembler/ 添加到 sys.path，但其父目录才是 ca_assembler 包的所在
@@ -41,6 +43,7 @@ _read_state = _ca_plugin._read_state
 _state_file_path = _ca_plugin._state_file_path
 register = _ca_plugin.register
 _on_pre_llm_call_v5 = _ca_plugin._on_pre_llm_call_v5
+# v6.5: 话题召回本地化为 query_themes_by_semantics（theme 结构）
 _engines = _ca_plugin._engines
 _engines_lock = _ca_plugin._engines_lock
 
@@ -289,7 +292,7 @@ class TestPreLlmCall:
 
     def test_skips_turn_on_bg(self):
         """bg 轮跳过。"""
-        with patch.object(_ca_plugin, 'get_current_write_origin', return_value="background_review"):
+        with patch('tools.skill_provenance.get_current_write_origin', return_value="background_review"):
             plugin = CAContextAssemblerPlugin()
             plugin._engine_errored = False
             with _engines_lock:
@@ -398,6 +401,82 @@ class TestSnapshotRestore:
             assert mock_engine._saved_history_snapshot is None, "Engine snapshot should be cleared"
 
 
+class TestEngineRefreshAfterTtlCleanup:
+    """CR-009: 验证 engine 被 SessionManager TTL 清理后，hook 函数能自动恢复。"""
+
+    def test_pre_llm_call_recovers_after_engine_destroyed(self):
+        """pre_llm_call 在引擎被销毁后重新获取引擎并成功写入。"""
+        import ca
+        plugin = CAContextAssemblerPlugin()
+        session_id = f"cr009_test_{int(time.time())}"
+        plugin.on_session_start(session_id, model="deepseek-v4-flash")
+        assert plugin._engine is not None
+        assert plugin._engine_errored is False
+
+        with _engines_lock:
+            _engines[session_id] = plugin
+
+        # 写第一行数据，验证引擎正常
+        from ca.store import write_turn_v5, read_turn_stream_all
+        ok = write_turn_v5(
+            plugin._engine.store, session_id, turn=1, seq=0,
+            role='user', elm_text="first turn",
+            fct_text="first turn", hdl_text="first",
+        )
+        assert ok, "first write should succeed"
+        rows_before = read_turn_stream_all(plugin._engine.store, session_id)
+        assert len(rows_before) >= 1
+
+        # 模拟 TTL cleanup: 从 session_manager 缓存移除 + destroy
+        try:
+            ca.session_manager._sessions.pop(session_id, None)
+        except Exception:
+            pass
+        old_engine = plugin._engine
+        old_engine.destroy()
+        # 确认 engine 已不可用（store 已关闭）
+        try:
+            old_engine.store.conn.execute("SELECT 1")
+            assert False, "connection should be closed"
+        except Exception:
+            pass
+        # _engine_errored 仍为 False（插件不知情）
+        assert plugin._engine_errored is False
+
+        # 调用 pre_llm_call hook → 应触发 _refresh_engine
+        with patch('tools.skill_provenance.get_current_write_origin', return_value="foreground"):
+            result = _on_pre_llm_call_v5(
+                session_id=session_id,
+                user_message="recovery test",
+                conversation_history=[{"role": "user", "content": "first turn"}],
+                model="deepseek-v4-flash",
+            )
+
+        # 验证: 引擎被替换为新实例
+        assert plugin._engine is not old_engine, "should get new engine instance"
+        assert plugin._engine is not None
+        assert plugin._engine_errored is False
+
+        # 新引擎能读旧数据
+        rows_after = read_turn_stream_all(plugin._engine.store, session_id)
+        assert len(rows_after) >= len(rows_before), "should retain previous data"
+
+        # 新用户行已写入
+        cur = plugin._engine.store.conn.execute(
+            "SELECT Elm FROM turn_stream WHERE session_id=? AND Elm=?",
+            (session_id, "recovery test"),
+        )
+        assert cur.fetchone() is not None, "recovery user message should be in DB"
+
+        # 清理
+        with _engines_lock:
+            _engines.pop(session_id, None)
+        try:
+            ca.session_manager._sessions.pop(session_id, None)
+        except Exception:
+            pass
+
+
 # ============================================================================
 # REQ-FUNC-INTF: register 钩子
 # ============================================================================
@@ -407,11 +486,11 @@ class TestRegister:
     """register() 注册 8 个钩子。"""
 
     def test_registers_eight_hooks(self):
-        """register 注册 5 个生命周期 + 3 个工具轮 + 1 个 finalize 数据采集钩子。"""
+        """register 注册 8 个钩子（v6.2：5 生命周期 + post_api + 2 工具轮）。"""
         ctx = MagicMock()
         register(ctx)
 
-        assert ctx.register_hook.call_count == 9
+        assert ctx.register_hook.call_count == 8
         hook_names = [call[0][0] for call in ctx.register_hook.call_args_list]
         assert "on_session_start" in hook_names
         assert "on_session_end" in hook_names
@@ -498,7 +577,7 @@ class TestBgReview:
         _ca_plugin._engines["test_bg"] = plugin
 
         try:
-            with patch.object(_ca_plugin, 'get_current_write_origin', return_value="background_review"):
+            with patch('tools.skill_provenance.get_current_write_origin', return_value="background_review"):
                 # 调用模块级 hook
                 result = _ca_plugin._on_pre_llm_call_v5(
                     session_id="test_bg",
@@ -528,68 +607,236 @@ class TestBgReview:
             _ca_plugin._engines.pop("test_bg", None)
 
 
-class TestRetryFailedOvSubmits:
-    """_retry_failed_ov_submits 测试"""
+# ============================================================================
+# 从 test_circuit / test_lifecycle 合并的剩余唯一测试
+# ============================================================================
 
-    def test_empty_queue_noop(self):
-        """空队列不触发 _fire_ov_submit"""
+
+class TestPreLlmCallSessionRecall:
+    """首轮会话 recall 注入行为。"""
+
+    def _setup_plugin(self, session_id: str, turn: int = 1) -> tuple:
+        """创建插件 + 真实引擎，注册到 _engines。"""
         plugin = CAContextAssemblerPlugin()
-        plugin._session_id = "test_retry"
-        plugin._failed_ov_queue = []
-        plugin._engine = MagicMock()
+        plugin.on_session_start(session_id, model="deepseek-v4-flash")
+        assert plugin._engine is not None
+        assert plugin._engine_errored is False
+        with _engines_lock:
+            _engines[session_id] = plugin
+        conv_hist = [{"role": "user", "content": "hello"}] if turn >= 1 else []
+        return plugin, conv_hist
 
-        with patch.object(plugin, '_fire_ov_submit') as mock_fire:
-            plugin._retry_failed_ov_submits()
-        mock_fire.assert_not_called()
-
-    def test_no_session_id_noop(self):
-        """无 session_id 时跳过"""
-        plugin = CAContextAssemblerPlugin()
-        plugin._session_id = None
-        plugin._failed_ov_queue = [{"topic_id": 1, "turns": [1, 2], "switch_turn": 1}]
-        plugin._engine = MagicMock()
-
-        with patch.object(plugin, '_fire_ov_submit') as mock_fire:
-            plugin._retry_failed_ov_submits()
-        mock_fire.assert_not_called()
-
-    def test_retries_all_pending_topics(self):
-        """队列中的 topic 全部重试一次，队列清空"""
-        import threading as _real_threading
-
-        class _SyncThread:
-            """同步执行 Thread，避免 daemon thread 时序竞争。"""
-            def __init__(self, target=None, args=(), kwargs=None, **kw):
-                self._target = target
-                self._args = args
-                self._kwargs = kwargs or {}
-
-            def start(self):
-                if self._target:
-                    self._target(*self._args, **self._kwargs)
-
-        from ca.config import Config
-        backup = Config.OV_ENABLED
-        Config.OV_ENABLED = True
+    def _cleanup(self, session_id: str):
+        with _engines_lock:
+            _engines.pop(session_id, None)
         try:
-            plugin = CAContextAssemblerPlugin()
-            plugin._session_id = "test_retry"
-            plugin._failed_ov_queue = [
-                {"topic_id": 1, "turns": [1, 3], "switch_turn": 2},
-                {"topic_id": 2, "turns": [4, 6], "switch_turn": 5},
+            from ca import session_manager
+            session_manager._sessions.pop(session_id, None)
+        except Exception:
+            pass
+
+    def test_session_start_recalls_on_turn_1(self):
+        """turn=1 时从 wiki 语义召回并注入 <wiki_carryover>（v6.2 本地化）。"""
+        sid = f"recall_test_{int(time.time())}"
+        plugin, conv = self._setup_plugin(sid, turn=1)
+        try:
+            fake_entries = [
+                {"theme_id": 1, "title": "旧话题", "overview": "ov",
+                 "ooda": {}, "key_facts": ["旧话题结论"], "open_items": []},
             ]
-            plugin._engine = MagicMock()
-
-            with patch.object(plugin, '_fire_ov_submit') as mock_fire:
-                with patch.object(_real_threading, 'Thread', _SyncThread):
-                    plugin._retry_failed_ov_submits()
-
-            assert len(plugin._failed_ov_queue) == 0, "队列应清空"
-            assert mock_fire.call_count == 2, "应重试 2 个 topic"
-            # 验证传递的参数
-            tid1 = mock_fire.call_args_list[0][0][1]["topic_id"]
-            tid2 = mock_fire.call_args_list[1][0][1]["topic_id"]
-            assert {tid1, tid2} == {1, 2}, f"应重试 topic 1 和 2, got {tid1}, {tid2}"
+            with patch('ca.inject.pick_injection_themes',
+                       return_value=fake_entries) as mock_q:
+                with patch.object(plugin._engine.embed_client, 'embed',
+                                  return_value=[0.1] * 16) as mock_embed:
+                    with patch('tools.skill_provenance.get_current_write_origin',
+                               return_value="foreground"):
+                        plugin._cleanup_done = True  # 跳过 120s 清账等待
+                        result = _on_pre_llm_call_v5(
+                            session_id=sid,
+                            user_message="test query",
+                            conversation_history=conv,
+                            model="deepseek-v4-flash",
+                        )
+            # 验证 recall 被注入（wiki_carryover 只含 key_facts）
+            assert result is not None
+            assert "<wiki_carryover>" in result
+            assert "旧话题结论" in result
+            mock_q.assert_called_once()
+            mock_embed.assert_called()
+            assert plugin._session_recall_done is True
         finally:
-            Config.OV_ENABLED = backup
+            self._cleanup(sid)
+
+    def test_session_start_not_recalled_twice(self):
+        """turn=1 后 _session_recall_done=True，再调不重复。"""
+        sid = f"recall_twice_{int(time.time())}"
+        plugin, conv = self._setup_plugin(sid, turn=1)
+        # 置为已注入状态
+        plugin._session_recall_done = True
+        try:
+            with patch('ca.inject.pick_injection_themes') as mock_q:
+                with patch.object(plugin._engine.embed_client, 'embed',
+                                  return_value=[0.1] * 16):
+                    with patch('tools.skill_provenance.get_current_write_origin',
+                               return_value="foreground"):
+                        result = _on_pre_llm_call_v5(
+                            session_id=sid,
+                            user_message="another query",
+                            conversation_history=conv,
+                            model="deepseek-v4-flash",
+                        )
+            # _session_recall_done=True → 不应再查 wiki
+            mock_q.assert_not_called()
+            assert result is None
+        finally:
+            self._cleanup(sid)
+
+    def test_turn_2_does_not_trigger_session_recall(self):
+        """turn=2 时不触发 session-start recall（等 topic_switch 触发）。"""
+        sid = f"recall_turn2_{int(time.time())}"
+        plugin, conv = self._setup_plugin(sid, turn=2)
+        try:
+            with patch('ca.inject.pick_injection_themes') as mock_q:
+                with patch.object(plugin._engine.embed_client, 'embed',
+                                  return_value=[0.1] * 16):
+                    with patch('tools.skill_provenance.get_current_write_origin',
+                               return_value="foreground"):
+                        _on_pre_llm_call_v5(
+                            session_id=sid,
+                            user_message="turn 2 msg",
+                            conversation_history=[
+                                {"role": "user", "content": "first"},
+                                {"role": "user", "content": "turn 2 msg"},
+                            ],
+                            model="deepseek-v4-flash",
+                        )
+            # session-start recall 不应在 turn=2 时触发
+            # 注意: topic_switch recall 也可能触发，这里只验证 session-start 逻辑不触发
+            assert plugin._session_recall_done is False
+        finally:
+            self._cleanup(sid)
+
+
+# ============================================================================
+# 话题切换 FAR 守卫 — _on_pre_llm_call_v5 topic_switch 行为
+# ============================================================================
+
+
+class TestTopicSwitchRecall:
+    """话题切换时 FAR/REL 守卫行为。"""
+
+    def _setup_plugin(self, session_id: str) -> tuple:
+        """创建插件 + 真实引擎 + mock topic_mgr。"""
+        plugin = CAContextAssemblerPlugin()
+        plugin.on_session_start(session_id, model="deepseek-v4-flash")
+        assert plugin._engine is not None
+        plugin._session_recall_done = True  # 屏蔽首轮干扰
+        # 注入 mock topic_manager
+        mock_mgr = MagicMock()
+        mock_mgr._turn_to_topic = {1: 1, 2: 2}
+        mock_mgr._current_topic_id = 2
+        plugin._topic_mgr = mock_mgr
+        plugin._last_topic_id = 1  # 旧话题 = 1
+        with _engines_lock:
+            _engines[session_id] = plugin
+        return plugin
+
+    def _cleanup(self, session_id: str):
+        with _engines_lock:
+            _engines.pop(session_id, None)
+        try:
+            from ca import session_manager
+            session_manager._sessions.pop(session_id, None)
+        except Exception:
+            pass
+
+    def _call_hook(self, session_id: str, user_msg: str = "new topic", turn: int = 2):
+        """调用 pre_llm_call hook。"""
+        conv = [{"role": "user", "content": "old msg"}] + \
+               [{"role": "user", "content": user_msg}]
+        with patch('tools.skill_provenance.get_current_write_origin',
+                   return_value="foreground"):
+            return _on_pre_llm_call_v5(
+                session_id=session_id,
+                user_message=user_msg,
+                conversation_history=conv,
+                model="deepseek-v4-flash",
+            )
+
+    def test_far_switch_triggers_recall(self):
+        """旧话题 FAR 时从 wiki 语义召回并注入 <wiki_carryover>。"""
+        sid = f"far_test_{int(time.time())}"
+        plugin = self._setup_plugin(sid)
+        try:
+            # mock detect → switched
+            plugin._engine._compute_assemble_plan = MagicMock(return_value=([], None))
+            fake_entries = [
+                {"theme_id": 1, "title": "T", "overview": "ov",
+                 "ooda": {}, "key_facts": ["far recall 结论"], "open_items": []},
+            ]
+            with patch('ca.inject.pick_injection_themes',
+                       return_value=fake_entries) as mock_q:
+                with patch.object(plugin._engine.embed_client, 'embed',
+                                  return_value=[0.1] * 16):
+                    with patch('ca_assembler_plugin.TopicGradeManager') as mock_tm_cls:
+                        mock_tm = MagicMock()
+                        mock_tm_cls.return_value = mock_tm
+                        plugin._topic_mgr = mock_tm
+                        mock_tm.detect.return_value = True
+                        mock_tm.get_topic_grades.return_value = {1: TopicGrade.FAR}
+                        mock_tm._current_topic_id = 2
+                        mock_tm._turn_to_topic = {1: 1, 2: 2}
+
+                        result = self._call_hook(sid)
+
+            mock_q.assert_called_once()
+            assert result is not None
+            assert "far recall 结论" in result
+        finally:
+            self._cleanup(sid)
+
+    def test_rel_switch_skips_recall(self):
+        """旧话题 REL 时跳过 recall。"""
+        sid = f"rel_test_{int(time.time())}"
+        plugin = self._setup_plugin(sid)
+        try:
+            with patch('ca.inject.pick_injection_themes') as mock_q:
+                with patch.object(plugin._engine.embed_client, 'embed',
+                                  return_value=[0.1] * 16):
+                    with patch('ca_assembler_plugin.TopicGradeManager') as mock_tm_cls:
+                        mock_tm = MagicMock()
+                        mock_tm_cls.return_value = mock_tm
+                        plugin._topic_mgr = mock_tm
+                        mock_tm.detect.return_value = True
+                        mock_tm.get_topic_grades.return_value = {1: TopicGrade.REL}
+                        mock_tm._current_topic_id = 2
+                        mock_tm._turn_to_topic = {1: 1, 2: 2}
+
+                        self._call_hook(sid)
+
+            mock_q.assert_not_called()
+        finally:
+            self._cleanup(sid)
+
+    def test_no_switch_skips_recall(self):
+        """话题未切换时跳过 recall。"""
+        sid = f"noswitch_test_{int(time.time())}"
+        plugin = self._setup_plugin(sid)
+        try:
+            with patch('ca.inject.pick_injection_themes') as mock_q:
+                with patch.object(plugin._engine.embed_client, 'embed',
+                                  return_value=[0.1] * 16):
+                    with patch('ca_assembler_plugin.TopicGradeManager') as mock_tm_cls:
+                        mock_tm = MagicMock()
+                        mock_tm_cls.return_value = mock_tm
+                        plugin._topic_mgr = mock_tm
+                        mock_tm.detect.return_value = False
+                        mock_tm._current_topic_id = 1
+                        mock_tm._turn_to_topic = {}
+
+                        self._call_hook(sid)
+
+            mock_q.assert_not_called()
+        finally:
+            self._cleanup(sid)
 
