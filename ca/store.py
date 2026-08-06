@@ -518,6 +518,39 @@ CREATE INDEX IF NOT EXISTS idx_cooc_pair ON cooccurrence_events (reality_a, real
 CREATE INDEX IF NOT EXISTS idx_cooc_time ON cooccurrence_events (created_at);
 CREATE INDEX IF NOT EXISTS idx_cooc_prof ON cooccurrence_events (profile);
 
+-- v7 (决策 41, 2026-08-07): realities 表（theme 层退役后的现实工作对象）
+-- name=固定标识 / hdl=状态锚点(可改) / current_status={"goals":[],"current_state":[],"key_facts":[],"context":[]}
+-- timeline=演进序列（seq 递增，含 changes 条目）/ source_strands={"session_id":[strand_id]}
+-- query_centroid_json/query_count: 提问云形心（成员 strand 块首提问向量均值，注入拣选用）
+CREATE TABLE IF NOT EXISTS realities (
+    reality_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT,
+    hdl             TEXT,
+    current_status  TEXT    DEFAULT '{}',
+    timeline        TEXT    DEFAULT '[]',
+    source_strands  TEXT    DEFAULT '{}',
+    profile         TEXT    NOT NULL DEFAULT '',
+    centroid_json   TEXT,
+    query_centroid_json TEXT,
+    query_count     INTEGER DEFAULT 0,
+    health_score    REAL DEFAULT 1.0,
+    flagged_for_review INTEGER DEFAULT 0,
+    topic_count     INTEGER DEFAULT 0,
+    reviewed_at     REAL,
+    last_reviewed_turn INTEGER DEFAULT 0,
+    created_at      REAL,
+    updated_at      REAL
+);
+CREATE INDEX IF NOT EXISTS idx_realities_profile ON realities (profile, updated_at);
+
+-- v7 (决策 41): strand → reality 归并映射（替代 theme_strand_map）
+CREATE TABLE IF NOT EXISTS strand_to_reality (
+    strand_id   INTEGER NOT NULL,
+    reality_id  INTEGER NOT NULL,
+    PRIMARY KEY (strand_id)
+);
+CREATE INDEX IF NOT EXISTS idx_s2r_reality ON strand_to_reality (reality_id);
+
 -- wiki_associations：theme 与 graphify 代码节点 + OV 设计文档的关联
 -- v6.5.4: 列名 entry_id → theme_id（themes 表语义对齐；旧列名由迁移处理）
 CREATE TABLE IF NOT EXISTS wiki_associations (
@@ -841,6 +874,286 @@ def insert_theme_strand_map(
     except sqlite3.Error as exc:
         logger.warning("[CA] insert_theme_strand_map failed: %s", exc)
         return False
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# v7 reality 层（决策 41：生产 reality 化，2026-08-07）
+# ══════════════════════════════════════════════════════════════════════════
+
+def create_reality(
+    profile: str,
+    name: str,
+    hdl: str,
+    current_status: Optional[dict],
+    timeline_entry: Optional[dict],
+    source_strand: Optional[dict],
+    centroid_json: Optional[str],
+    changes: Optional[list] = None,
+    db_path: Optional[Path] = None,
+) -> Optional[int]:
+    """创建 reality（决策 41）：首条归并的初始状态。
+
+    timeline_entry: {seq, topic_id, turns, session_id, overview} 首条
+    source_strand: {session_id, strand_id} 首个来源（并入 source_strands）
+    changes: 初始全量去重 changes（写 timeline 首条之外的演进摘要）
+    """
+    conn = _get_topic_conn(db_path)
+    now = time.time()
+    try:
+        timeline = []
+        if timeline_entry:
+            entry = dict(timeline_entry)
+            entry.setdefault("seq", 1)
+            timeline.append(entry)
+        if changes:
+            timeline.append({"seq": 2, "changes": list(changes),
+                             "session_id": (source_strand or {}).get("session_id", "")})
+        cur = conn.execute(
+            """INSERT INTO realities
+               (name, hdl, current_status, timeline, source_strands,
+                profile, centroid_json, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                name, hdl,
+                json.dumps(current_status or {}, ensure_ascii=False),
+                json.dumps(timeline, ensure_ascii=False),
+                json.dumps(
+                    {source_strand["session_id"]: [source_strand["strand_id"]]}
+                    if source_strand else {}, ensure_ascii=False),
+                profile,
+                centroid_json or "null",
+                now, now,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    except sqlite3.Error as exc:
+        logger.warning("[CA] create_reality failed: %s", exc)
+        return None
+
+
+def load_all_realities(
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """返回所有 reality（含 current_status/timeline/source_strands/centroid 解析）。"""
+    conn = _get_topic_conn(db_path)
+    try:
+        cur = conn.execute(
+            "SELECT reality_id, name, hdl, current_status, timeline, "
+            "       source_strands, profile, centroid_json, query_centroid_json, "
+            "       query_count, health_score, flagged_for_review, topic_count "
+            "FROM realities ORDER BY reality_id",
+        )
+        cols = [
+            "reality_id", "name", "hdl", "current_status", "timeline",
+            "source_strands", "profile", "centroid", "query_centroid",
+            "query_count", "health_score", "flagged_for_review", "topic_count",
+        ]
+        out = []
+        for row in cur.fetchall():
+            d = dict(zip(cols, row))
+            for key in ("current_status", "timeline", "source_strands"):
+                if isinstance(d.get(key), str):
+                    try:
+                        d[key] = json.loads(d[key])
+                    except (json.JSONDecodeError, TypeError):
+                        d[key] = {} if key == "source_strands" else ([] if key == "timeline" else {})
+            for key in ("centroid", "query_centroid"):
+                if isinstance(d.get(key), str):
+                    try:
+                        d[key] = json.loads(d[key])
+                    except (json.JSONDecodeError, TypeError):
+                        d[key] = None
+            out.append(d)
+        return out
+    except sqlite3.Error as exc:
+        logger.warning("[CA] load_all_realities failed: %s", exc)
+        return []
+
+
+def update_reality(
+    reality_id: int,
+    name: Optional[str] = None,
+    hdl: Optional[str] = None,
+    current_status: Optional[dict] = None,
+    timeline_entry: Optional[dict] = None,
+    changes: Optional[list] = None,
+    centroid_json: Optional[str] = None,
+    source_strand: Optional[dict] = None,
+    query_centroid_json: Optional[str] = None,
+    query_count: Optional[int] = None,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """更新 reality（决策 41）：timeline 追加 + 字段覆盖（None 不变）。
+
+    timeline_entry: {seq?, topic_id, turns, session_id, overview}；
+       seq 缺省 = 现有最大 seq + 1。
+    source_strand: {session_id, strand_id} — 合并进 source_strands。
+    query_centroid_json/query_count: 提问云形心增量维护（调用方算好新值）。
+    """
+    conn = _get_topic_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT timeline, source_strands, query_centroid_json, query_count "
+            "FROM realities WHERE reality_id=?",
+            (reality_id,),
+        ).fetchone()
+        if not row:
+            logger.warning("[CA] update_reality: reality %d not found", reality_id)
+            return False
+
+        new_timeline = json.loads(row[0]) if row[0] else []
+        if timeline_entry:
+            entry = dict(timeline_entry)
+            if "seq" not in entry:
+                entry["seq"] = max([e.get("seq", 0) for e in new_timeline] or [0]) + 1
+            new_timeline.append(entry)
+        if changes:
+            new_timeline.append({"seq": max([e.get("seq", 0) for e in new_timeline] or [0]) + 1,
+                                 "changes": list(changes),
+                                 "session_id": (source_strand or {}).get("session_id", "")})
+
+        new_source = {}
+        if row[1]:
+            try:
+                new_source = json.loads(row[1])
+            except (json.JSONDecodeError, TypeError):
+                new_source = {}
+        if source_strand:
+            sid = source_strand.get("session_id")
+            s_id = source_strand.get("strand_id")
+            if sid:
+                if sid not in new_source:
+                    new_source[sid] = []
+                if s_id not in new_source[sid]:
+                    new_source[sid].append(s_id)
+
+        updates: dict = {}
+        if name is not None:
+            updates["name"] = name
+        if hdl is not None:
+            updates["hdl"] = hdl
+        if current_status is not None:
+            updates["current_status"] = json.dumps(current_status, ensure_ascii=False)
+        if centroid_json is not None:
+            updates["centroid_json"] = centroid_json
+        if query_centroid_json is not None:
+            updates["query_centroid_json"] = query_centroid_json
+        if query_count is not None:
+            updates["query_count"] = query_count
+        updates["timeline"] = json.dumps(new_timeline, ensure_ascii=False)
+        updates["source_strands"] = json.dumps(new_source, ensure_ascii=False)
+        updates["updated_at"] = time.time()
+        sets = ", ".join(f"{k}=?" for k in updates)
+        conn.execute(f"UPDATE realities SET {sets} WHERE reality_id=?",
+                     (*updates.values(), reality_id))
+        conn.commit()
+        return True
+    except sqlite3.Error as exc:
+        logger.warning("[CA] update_reality failed: %s", exc)
+        return False
+
+
+def insert_reality_strand_map(
+    strand_id: int,
+    reality_id: int,
+    method: str = "llm",
+    db_path: Optional[Path] = None,
+) -> bool:
+    """写入 strand → reality 归并映射（决策 41，strand_to_reality 表）。"""
+    conn = _get_topic_conn(db_path)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO strand_to_reality "
+            "(strand_id, reality_id) VALUES (?,?)",
+            (strand_id, reality_id),
+        )
+        conn.commit()
+        return True
+    except sqlite3.Error as exc:
+        logger.warning("[CA] insert_reality_strand_map failed: %s", exc)
+        return False
+
+
+def query_realities_by_semantics(
+    q_emb: list[float],
+    profile: str,
+    limit: int = 3,
+    exclude_session_id: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """语义检索 reality（决策 41，对标 query_themes_by_semantics）：余弦排序取 top N。
+
+    返回 reality dict：reality_id/name/hdl/current_status/timeline（供注入）。
+    跨会话、非当前 session 的 reality 才有意义 → 排除当前 session（source_strands 含该 session）。
+    无匹配 → 空列表。
+    """
+    conn = _get_topic_conn(db_path)
+    try:
+        cur = conn.execute(
+            "SELECT reality_id, name, hdl, current_status, timeline, "
+            "       centroid_json, source_strands "
+            "FROM realities "
+            "WHERE centroid_json IS NOT NULL AND centroid_json != 'null' "
+            "  AND profile = ? "
+            "ORDER BY updated_at DESC",
+            (profile,),
+        )
+        rows = cur.fetchall()
+    except sqlite3.Error as exc:
+        logger.warning("[CA] query_realities_by_semantics failed: %s", exc)
+        return []
+
+    if not rows:
+        return []
+
+    if exclude_session_id:
+        filtered = []
+        for row in rows:
+            ss_raw = row[6]
+            hit = False
+            if ss_raw:
+                try:
+                    ss = json.loads(ss_raw)
+                    if isinstance(ss, dict) and exclude_session_id in ss:
+                        hit = True
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if not hit:
+                filtered.append(row)
+        rows = filtered
+        if not rows:
+            return []
+
+    scored: list[tuple[float, dict]] = []
+    for row in rows:
+        centroid_raw = row[5]
+        if not centroid_raw or centroid_raw == "null":
+            continue
+        try:
+            centroid = json.loads(centroid_raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        c = _cosine_similarity_inline(q_emb, centroid)
+        if not c:
+            continue
+        try:
+            cs = json.loads(row[4]) if row[4] else {}
+        except (json.JSONDecodeError, TypeError):
+            cs = {}
+        try:
+            tl = json.loads(row[3]) if row[3] else []
+        except (json.JSONDecodeError, TypeError):
+            tl = []
+        scored.append((c, {
+            "reality_id": row[0],
+            "name": row[1] or "",
+            "hdl": row[2] or "",
+            "current_status": cs,
+            "timeline": tl,
+        }))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [d for _, d in scored[:limit]]
 
 
 def find_unmerged_strands(

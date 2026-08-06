@@ -107,10 +107,10 @@ class TestGraphCooccurrences:
             edges, gp, db_path=cooc_db, node_titles={1: "甲", 2: "乙"})
         assert (nn, nl) == (2, 1)
         g = json.loads(gp.read_text(encoding="utf-8"))
-        assert {n["id"] for n in g["nodes"]} == {"theme_1", "theme_2"}
+        assert {n["id"] for n in g["nodes"]} == {"reality_1", "reality_2"}
         link = g["links"][0]
         assert (link["source"], link["target"], link["relation"]) == (
-            "theme_1", "theme_2", "co_occurs_with")
+            "reality_1", "reality_2", "co_occurs_with")
         assert link["weight"] == 1.0
 
     def test_weight_update_not_duplicate(self, tmp_path, cooc_db):

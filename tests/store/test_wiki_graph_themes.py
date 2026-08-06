@@ -21,6 +21,7 @@ import pytest
 from ca.store import (
     _get_topic_conn,
     build_wiki_associations,
+    create_reality,
     create_theme,
     insert_theme_strand_map,
     query_wiki_associations,
@@ -50,12 +51,27 @@ def _mk_theme(db, title="连接池优化", sid="sess1", strand=1, profile="teste
     )
 
 
+def _mk_reality(db, name="连接池优化", sid="sess1", strand=1, profile="tester"):
+    """建 reality 数据（决策 41：wiki 子图全量链路读 realities）。"""
+    return create_reality(
+        profile=profile, name=name, hdl="完成参数优化并验证",
+        current_status={"current_state": ["连接池上限调至 200"],
+                        "key_facts": ["连接池耗尽导致超时"],
+                        "goals": ["压测报告待输出"]},
+        timeline_entry={"seq": 1, "topic_id": 1, "turns": [7, 8],
+                        "session_id": sid, "overview": "完成参数优化"},
+        source_strand={"session_id": sid, "strand_id": strand},
+        centroid_json="[0.1, 0.2]",
+        db_path=db,
+    )
+
+
 class TestWikiToGraphBuildSubgraph:
-    """wiki_to_graph.build_wiki_subgraph 读 themes 表。"""
+    """wiki_to_graph.build_wiki_subgraph 读 realities 表（决策 41）。"""
 
     def test_build_subgraph_reads_themes(self, theme_db, monkeypatch):
-        _mk_theme(theme_db, title="连接池与超时配置优化")
-        _mk_theme(theme_db, title="Wiki 结构梳理", sid="sess2", strand=9)
+        _mk_reality(theme_db, name="连接池与超时配置优化")
+        _mk_reality(theme_db, name="Wiki 结构梳理", sid="sess2", strand=9)
 
         # 指向临时 DB（wiki_to_graph 默认读 profile ca_topics.db）
         monkeypatch.setenv("CA_CACHE_DIR", str(theme_db.parent))
@@ -74,19 +90,19 @@ class TestWikiToGraphBuildSubgraph:
 
         nodes = sub["nodes"]
         knowledge = [n for n in nodes if n.get("file_type") == "knowledge"]
-        # 2 theme 节点 + 2 strand 节点
-        assert len([n for n in nodes if n["id"].startswith("theme_")]) == 2
-        # 节点 id 对齐增量命名 theme_{id}
+        # 2 reality 节点 + 2 strand 节点
+        assert len([n for n in nodes if n["id"].startswith("reality_")]) == 2
+        # 节点 id 对齐增量命名 reality_{id}
         ids = {n["id"] for n in knowledge}
-        assert any(i.startswith("theme_") for i in ids)
-        # merged_into 边：strand → theme
+        assert any(i.startswith("reality_") for i in ids)
+        # merged_into 边：strand → reality
         edges = sub["edges"]
         merged = [e for e in edges if e.get("relation") == "merged_into"]
         assert len(merged) >= 2
         for e in merged:
             assert e["source"].startswith("topic_")
-            assert e["target"].startswith("theme_")
-            assert e["source_file"] == "themes"
+            assert e["target"].startswith("reality_")
+            assert e["source_file"] == "realities"
 
     def test_build_subgraph_empty_db(self, theme_db, monkeypatch):
         """空库不崩溃，返回空子图。"""
@@ -301,10 +317,10 @@ class TestTraceMatchStrategy:
             "优化": 1.36, "机制": 2.17, "连接": 4.22,
         })
 
-        # 构造主题：与两个 OV 文档标题可匹配
-        _mk_theme(theme_db, title="话题提交功能实现与异步流程设计", sid="s1", strand=1)
-        _mk_theme(theme_db, title="话题级摘要能力升级", sid="s2", strand=2)
-        _mk_theme(theme_db, title="连接池优化", sid="s3", strand=3)  # 不应匹配
+        # 构造 reality：与两个 OV 文档标题可匹配
+        _mk_reality(theme_db, name="话题提交功能实现与异步流程设计", sid="s1", strand=1)
+        _mk_reality(theme_db, name="话题级摘要能力升级", sid="s2", strand=2)
+        _mk_reality(theme_db, name="连接池优化", sid="s3", strand=3)  # 不应匹配
 
         orig = w2g.CA_TOPICS_DB
         w2g.CA_TOPICS_DB = str(theme_db)
@@ -319,12 +335,12 @@ class TestTraceMatchStrategy:
 
         # 提交主题 → 提交文档
         assert any(
-            e["source"] == "theme_1" and "提交" in e["target"]
+            e["source"] == "reality_1" and "提交" in e["target"]
             for e in trace
         )
         # 摘要主题 → 摘要文档
         assert any(
-            e["source"] == "theme_2" and "摘要" in e["target"]
+            e["source"] == "reality_2" and "摘要" in e["target"]
             for e in trace
         )
         # 连接池优化不产生 trace（'连接'+'优化' 无 doc 重叠词）

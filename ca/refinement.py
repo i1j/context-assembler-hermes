@@ -31,7 +31,6 @@ from typing import Any, Dict, List, Optional
 from .config import Config
 from .store import (
     _get_topic_conn,
-    upsert_wiki_entry,
     write_refinement_meta,
     get_last_refinement_meta,
 )
@@ -247,37 +246,49 @@ class IdleRefinementDaemon:
 
     def _load_refinement_candidates(self, conn, active_sessions: set[str],
                                      max_entries: int = 5) -> List[Dict[str, Any]]:
-        """枚举当前轮可精炼的 entry。
+        """枚举当前轮可精炼的 reality（决策 41：theme → realities）。
 
         条件：
           - source_strands 非空
           - 未被活跃 session 引用
           - 按 updated_at 升序（最久未更新优先）
+        entry 结构对齐旧 theme：title=name；changes=timeline 的 changes 条目；
+        key_facts/open_items=current_status 段。
         """
         rows = conn.execute(
-            "SELECT theme_id, title, overview, changes_json, key_facts_json, "
-            "       open_items_json, source_strands, centroid_json, updated_at "
-            "FROM themes "
+            "SELECT reality_id, name, hdl, current_status, timeline, "
+            "       source_strands, centroid_json, updated_at "
+            "FROM realities "
             "ORDER BY updated_at ASC LIMIT ?",
             (max_entries,),
         ).fetchall()
 
         candidates = []
         for r in rows:
-            eid, title, overview, chg_json, facts_json, open_json, src_json, cent_json, updated = r
+            eid, name, hdl, cs_json, tl_json, src_json, cent_json, updated = r
             source_strands = self._safe_json(src_json, {})
-            # 跳过全部 source 都在活跃 session 中的 theme
+            # 跳过全部 source 都在活跃 session 中的 reality
             if isinstance(source_strands, dict) and source_strands.keys() & active_sessions:
                 continue
             if not isinstance(source_strands, dict):
                 source_strands = {}
+            cs = self._safe_json(cs_json, {})
+            if not isinstance(cs, dict):
+                cs = {}
+            tl = self._safe_json(tl_json, [])
+            changes = []
+            if isinstance(tl, list):
+                for e in tl:
+                    if isinstance(e, dict) and e.get("changes"):
+                        changes.extend(str(c) for c in e["changes"] if str(c).strip())
+            overview = " ".join(filter(None, [name or "", hdl or ""]))
             candidates.append({
                 "entry_id": eid,
-                "title": title or "",
-                "overview": overview or "",
-                "changes": self._safe_json(chg_json, []),
-                "key_facts": self._safe_json(facts_json, []),
-                "open_items": self._safe_json(open_json, []),
+                "title": name or "",
+                "overview": overview,
+                "changes": changes,
+                "key_facts": cs.get("key_facts") or [],
+                "open_items": cs.get("goals") or [],
                 "source_strands": source_strands,
                 "centroid_json": cent_json,
                 "updated_at": updated,
@@ -362,18 +373,24 @@ class IdleRefinementDaemon:
             self._update_entry_refinement_meta(conn, entry["entry_id"])
             return False
 
-        # 写入
+        # 写入（决策 41：realities 表）
         centroid_json = self._compute_centroid(entry["entry_id"],
                                                 new_overview, new_key_facts)
-        upsert_wiki_entry(
-            title=entry["title"],
-            overview=new_overview,
+        # 精炼回写 reality：current_status 更新 + timeline 追加 changes 条目
+        from .store import load_all_realities, update_reality
+        current = next((r for r in load_all_realities() if r["reality_id"] == entry["entry_id"]), None)
+        new_cs = dict(current.get("current_status") or {}) if current else {}
+        if new_key_facts is not None:
+            new_cs["key_facts"] = list(new_key_facts)
+        if new_open_items is not None:
+            new_cs["goals"] = list(new_open_items)
+        update_reality(
+            reality_id=entry["entry_id"],
+            name=entry["title"] or None,
+            current_status=new_cs,
+            changes=[str(c) for c in new_changes if str(c).strip()],
             centroid_json=centroid_json,
-            changes_json=json.dumps(new_changes, ensure_ascii=False),
-            key_facts_json=json.dumps(new_key_facts, ensure_ascii=False),
-            open_items_json=json.dumps(new_open_items, ensure_ascii=False),
-            source_strands=json.dumps(entry["source_strands"], ensure_ascii=False),
-            entry_id=entry["entry_id"],
+            db_path=conn,
         )
         self._update_entry_refinement_meta(conn, entry["entry_id"])
         logger.info("[CA_L4]   entry %d: refined (overview=%d chars, %d changes, %d facts)",
@@ -399,14 +416,14 @@ class IdleRefinementDaemon:
         return "null"
 
     def _update_entry_refinement_meta(self, conn, entry_id: int) -> None:
-        """更新 theme 的精炼元数据列。"""
+        """更新 reality 的精炼元数据列（决策 41）。"""
         now = time.time()
         try:
             conn.execute(
-                "UPDATE themes SET "
+                "UPDATE realities SET "
                 "  reviewed_at=?, "
                 "  last_reviewed_turn=? "
-                "WHERE theme_id=?",
+                "WHERE reality_id=?",
                 (now, self._compute_global_turn_max(), entry_id),
             )
             conn.commit()
@@ -442,7 +459,7 @@ class IdleRefinementDaemon:
                 if not isinstance(strand_ids, list):
                     continue
                 try:
-                    inconsistency = self._check_single_source(entry, sid, strand_ids)
+                    inconsistency = self._check_single_source(conn, entry, sid, strand_ids)
                     if inconsistency:
                         fixed += 1
                         # 修了 entry 后更新
@@ -457,7 +474,7 @@ class IdleRefinementDaemon:
                         checked, fixed)
         return (checked, fixed)
 
-    def _check_single_source(self, entry: Dict[str, Any], session_id: str,
+    def _check_single_source(self, conn, entry: Dict[str, Any], session_id: str,
                              strand_ids: list[int]) -> bool:
         """检查单个 session 的 Fct 数据是否与 entry key_facts 一致。
 
@@ -541,15 +558,17 @@ class IdleRefinementDaemon:
 
         centroid_json = self._compute_centroid(entry["entry_id"],
                                                 entry["overview"], new_facts)
-        upsert_wiki_entry(
-            title=entry["title"],
-            overview=entry["overview"],
+        from .store import load_all_realities, update_reality
+        current = next((r for r in load_all_realities() if r["reality_id"] == entry["entry_id"]), None)
+        new_cs = dict(current.get("current_status") or {}) if current else {}
+        new_cs["key_facts"] = list(new_facts)
+        new_cs["goals"] = list(new_open)
+        update_reality(
+            reality_id=entry["entry_id"],
+            current_status=new_cs,
+            changes=[str(c) for c in new_changes if str(c).strip()],
             centroid_json=centroid_json,
-            changes_json=json.dumps(new_changes, ensure_ascii=False),
-            key_facts_json=json.dumps(new_facts, ensure_ascii=False),
-            open_items_json=json.dumps(new_open, ensure_ascii=False),
-            source_strands=json.dumps(entry["source_strands"], ensure_ascii=False),
-            entry_id=entry["entry_id"],
+            db_path=conn,
         )
         logger.info("[CA_L4]   entry %d: cross-validate fixed %d facts",
                     entry["entry_id"], len(new_facts))
@@ -566,7 +585,7 @@ class IdleRefinementDaemon:
         fixed = 0
 
         rows = conn.execute(
-            "SELECT theme_id, centroid_json, source_strands FROM themes"
+            "SELECT reality_id, centroid_json, source_strands FROM realities"
         ).fetchall()
 
         for eid, cent_json, src_json in rows:
@@ -580,7 +599,7 @@ class IdleRefinementDaemon:
                 src_strands = self._safe_json(src_json, {})
                 if not isinstance(src_strands, dict):
                     conn.execute(
-                        "UPDATE themes SET source_strands='{}' WHERE theme_id=?",
+                        "UPDATE realities SET source_strands='{}' WHERE reality_id=?",
                         (eid,),
                     )
                     fixed += 1
@@ -589,7 +608,7 @@ class IdleRefinementDaemon:
                 cleaned = self._clean_dead_sources(src_strands)
                 if cleaned != src_strands:
                     conn.execute(
-                        "UPDATE themes SET source_strands=? WHERE theme_id=?",
+                        "UPDATE realities SET source_strands=? WHERE reality_id=?",
                         (json.dumps(cleaned, ensure_ascii=False), eid),
                     )
                     fixed += 1
@@ -619,20 +638,28 @@ class IdleRefinementDaemon:
     # ── Step 4: 健康评分 ──
 
     def _run_health_score(self, conn) -> int:
-        """为所有 theme 计算健康评分并标记。"""
+        """为所有 reality 计算健康评分并标记（决策 41）。"""
         rows = conn.execute(
-            "SELECT theme_id, title, overview, changes_json, key_facts_json, "
+            "SELECT reality_id, name, current_status, timeline, "
             "       centroid_json, source_strands, updated_at, created_at "
-            "FROM themes"
+            "FROM realities"
         ).fetchall()
 
         scored = 0
         for r in rows:
             try:
-                eid, title, overview, chg_json, facts_json, cent_json, src_json, updated, created = r
+                eid, name, cs_json, tl_json, cent_json, src_json, updated, created = r
                 source_strands = self._safe_json(src_json, {})
-                changes = self._safe_json(chg_json, [])
-                facts = self._safe_json(facts_json, [])
+                cs = self._safe_json(cs_json, {})
+                if not isinstance(cs, dict):
+                    cs = {}
+                tl = self._safe_json(tl_json, [])
+                changes = []
+                if isinstance(tl, list):
+                    for e in tl:
+                        if isinstance(e, dict) and e.get("changes"):
+                            changes.extend(str(c) for c in e["changes"] if str(c).strip())
+                facts = cs.get("key_facts") or []
                 n_sources = len(source_strands) if isinstance(source_strands, dict) else 0
 
                 score = self._compute_health_score(
@@ -645,17 +672,17 @@ class IdleRefinementDaemon:
                 )
                 flagged = 1 if score < 0.3 else 0
 
-                # 查 topic_count（v6.5.4: wiki_strand_map → theme_strand_map）
+                # 查 topic_count（决策 41: strand_to_reality 计数）
                 cur = conn.execute(
-                    "SELECT COUNT(*) FROM theme_strand_map WHERE theme_id=?",
+                    "SELECT COUNT(*) FROM strand_to_reality WHERE reality_id=?",
                     (eid,),
                 )
                 topic_count = cur.fetchone()[0]
 
                 conn.execute(
-                    "UPDATE themes SET "
+                    "UPDATE realities SET "
                     "  health_score=?, flagged_for_review=?, topic_count=? "
-                    "WHERE theme_id=?",
+                    "WHERE reality_id=?",
                     (score, flagged, topic_count, eid),
                 )
                 scored += 1

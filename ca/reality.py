@@ -25,10 +25,15 @@ reality = 现实工作对象：多个语义独立但工作中有关联的 strand
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from .theme import OODA_LABELS, parse_assignments as parse_reality_assignments
+from .config import Config
+from .theme import (OODA_LABELS, _llm_call_default, _strand_embed_text,
+                    parse_assignments as parse_reality_assignments)
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "REALITY_CREATE_PROMPT",
@@ -661,3 +666,311 @@ def parse_reality_response(text: Optional[str]) -> Optional[dict]:
         if isinstance(fixed, dict):
             return normalize_reality_response(fixed)
         return None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 主流程：run_reality_merge（决策 41 生产接入，2026-08-07）
+# ══════════════════════════════════════════════════════════════════════
+
+def _reality_code_fallback_create(strand: dict, max_chars: int) -> dict:
+    """create 兜底：strand 数据构造最小 reality（4B 失败时，宁缺勿错但保可用）。"""
+    ooda = strand.get("ooda") or {}
+    if isinstance(ooda, str):
+        try:
+            ooda = json.loads(ooda)
+        except (json.JSONDecodeError, TypeError):
+            ooda = {}
+    name = strand.get("hdl") or strand.get("title") or "未命名工作线"
+    return {
+        "name": str(name)[:60],
+        "hdl": str(strand.get("hdl") or "")[:120],
+        "current_status": {
+            "current_state": (ooda.get("现象与问题") or ooda.get("current_state") or [])[:5],
+            "key_facts": (ooda.get("决策与方案") or ooda.get("key_facts") or [])[:5],
+            "goals": (ooda.get("后续行动") or ooda.get("goals") or [])[:8],
+            "context": (ooda.get("相关文件") or ooda.get("context") or [])[:8],
+        },
+        "timeline_overview": " ".join(
+            str(i) for i in (ooda.get("现象与问题") or [])[:2]),
+    }
+
+
+def _reality_code_fallback_merge(reality: dict, group: list) -> dict:
+    """merge 兜底：保留现有 reality，新 strand 现象并入 current_state（去重截断）。"""
+    cs = dict(reality.get("current_status") or {})
+    cs["current_state"] = list((cs.get("current_state") or [])[:5])
+    new_items = []
+    for s in group:
+        ooda = s.get("ooda") or {}
+        if isinstance(ooda, str):
+            try:
+                ooda = json.loads(ooda)
+            except (json.JSONDecodeError, TypeError):
+                ooda = {}
+        for v in ooda.get("现象与问题") or []:
+            if str(v).strip() and str(v) not in new_items:
+                new_items.append(str(v))
+    if new_items:
+        cs["current_state"] = (cs.get("current_state") + new_items)[:5]
+    return {
+        "name": reality.get("name", ""),
+        "hdl": reality.get("hdl", ""),
+        "current_status": cs,
+        "timeline_overview": new_items[0] if new_items else "",
+    }
+
+
+def _update_query_centroid(
+    conn,
+    reality_id: int,
+    query_text: str,
+    embed_client: Any,
+) -> None:
+    """增量维护 reality 提问云形心：(旧形心×n + 新向量)/(n+1)。
+
+    query_text 缺失（未快照/冷启动）→ 跳过（形心由离线迁移 + 后续快照维护）。
+    """
+    if not query_text or embed_client is None:
+        return
+    qv = embed_client.embed(str(query_text)[:500])
+    if not qv:
+        return
+    row = conn.execute(
+        "SELECT query_centroid_json, query_count FROM realities WHERE reality_id=?",
+        (reality_id,)).fetchone()
+    if not row:
+        return
+    n = row[1] or 0
+    if row[0] and row[0] != "null":
+        try:
+            old = json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            old = []
+        if old and len(old) == len(qv):
+            new = [(old[i] * n + qv[i]) / (n + 1) for i in range(len(qv))]
+        else:
+            new = qv
+    else:
+        new = qv
+    conn.execute(
+        "UPDATE realities SET query_centroid_json=?, query_count=? WHERE reality_id=?",
+        (json.dumps(new, ensure_ascii=False), n + 1, reality_id))
+
+
+def run_reality_merge(
+    strands: list[dict],
+    realities: list[dict],
+    embed_client: Any = None,
+    threshold: float = 0.70,
+    top_k: int = 3,
+    max_chars: int = 4000,
+    llm_call: Any = None,
+    db_path: Any = None,
+    profile: str = "",
+    priority_realities: Optional[list] = None,
+) -> dict:
+    """两段式同步归并主流程（决策 41：生产 reality 化，对齐 run_theme_merge 骨架）。
+
+    流程:
+      1. S 匹配分候选（决策 38：注入锚 S=0 必进；共现边行为信号；冷启动退化余弦）
+      2. 4B 决策（build_reality_decide_prompt → assignments，单向否决）
+      3. 按 reality 处理：merge（build_merge_reality_prompt → update_reality）/
+         create（build_create_reality_prompt → create_reality）；4B 失败 → 代码兜底
+      4. 写库：realities upsert + strand_to_reality + 提问云形心增量
+
+    返回 {"merged": n, "created": n, "failed": n, "reality_ids": [...]}。
+    """
+    from .store import (create_reality, insert_reality_strand_map,
+                        update_reality)
+    from .theme import find_s_candidates, resolve_assignments
+
+    call = llm_call or (lambda p: _llm_call_default(p, max_chars))
+    merged = created = failed = 0
+
+    # ① 候选生成（v7 S 模型，决策 38）
+    cooc_edges: dict = {}
+    try:
+        from .store import query_cooccurrences
+        cooc_edges, _, _ = query_cooccurrences(profile=profile, db_path=db_path)
+    except Exception as exc:
+        logger.warning("[CA_REALITY] query_cooccurrences failed: %s", exc)
+
+    anchor_realities = list(priority_realities or [])  # 注入集 I（S 锚，α 权重）
+    use_s = bool(anchor_realities)
+    for st in strands:
+        st["candidates"] = []
+        if use_s:
+            st["candidates"] = find_s_candidates(
+                anchor_realities, realities, cooc_edges,
+                fused_ids=set(),
+                alpha=Config.S_ALPHA, beta=Config.S_BETA,
+                r_threshold=Config.S_R_THRESHOLD, top_k=top_k)
+            continue
+        # 冷启动退化（无注入锚：全新话题空注入）→ 余弦候选
+        if embed_client is None:
+            continue
+        text = _strand_embed_text(st)
+        if not text.strip():
+            continue
+        vec = embed_client.embed(text[:500])
+        if not vec:
+            continue
+        st["candidates"] = find_s_candidates(
+            [], realities, cooc_edges, fused_ids=set(),
+            alpha=Config.S_ALPHA, beta=Config.S_BETA,
+            r_threshold=Config.S_R_THRESHOLD, top_k=top_k) or []
+
+    # ② 4B 决策（仅含有候选的 strands；无候选 → 自动 new）
+    llm_parsed: dict = {}
+    with_cand = [s for s in strands if s.get("candidates")]
+    if with_cand:
+        prompt = build_reality_decide_prompt(with_cand)
+        raw = call(prompt)
+        if raw:
+            llm_parsed = parse_reality_assignments(raw)
+    assignments = resolve_assignments(strands, llm_parsed)
+
+    # ③ 按 action 分组
+    merge_groups: dict[int, list[dict]] = {}
+    new_strands: list[dict] = []
+    for st in strands:
+        hdl = st.get("hdl", "")
+        a = assignments.get(hdl, {"action": "new"})
+        if a.get("action") == "merge" and st.get("candidates"):
+            cand = st["candidates"][a["target"]]
+            merge_groups.setdefault(cand.get("reality_id"), []).append(st)
+        else:
+            new_strands.append(st)
+
+    touched: set[int] = set()
+    conn = None
+    try:
+        from .store import _get_topic_conn
+        conn = _get_topic_conn(db_path)
+    except Exception:
+        conn = None
+
+    # merge 处理
+    for rid, group in merge_groups.items():
+        reality = next((r for r in realities if r.get("reality_id") == rid), None)
+        if reality is None:
+            failed += len(group)
+            continue
+        try:
+            prompt = build_merge_reality_prompt(reality, group, max_chars=max_chars)
+            raw = call(prompt)
+            result = parse_reality_response(raw)
+            used_fallback = False
+            if result is None:
+                logger.info("[CA_REALITY] merge 4B failed, code fallback for reality %d", rid)
+                result = _reality_code_fallback_merge(reality, group)
+                used_fallback = True
+            elif result.get("merge") is False:
+                new_strands.extend(group)
+                continue
+            fallback = _reality_code_fallback_merge(reality, group)
+            new_name = result.get("name") or fallback["name"]
+            new_hdl = result.get("hdl") or fallback["hdl"]
+            new_cs = result.get("current_status") if isinstance(
+                result.get("current_status"), dict) else fallback["current_status"]
+            new_cs = enforce_section_limits(new_cs or {})
+            timeline_ov = result.get("timeline_overview") or fallback["timeline_overview"]
+            timeline_entry = {
+                "topic_id": group[0].get("topic_id"),
+                "turns": group[0].get("turns") or [],
+                "session_id": group[0].get("session_id", ""),
+                "overview": timeline_ov,
+            }
+            centroid_json = None
+            if embed_client is not None:
+                ctext = " ".join(filter(None, [
+                    str(new_name), str(new_hdl),
+                    *[str(i) for v in (new_cs or {}).values()
+                      if isinstance(v, list) for i in v if str(i).strip()],
+                ]))
+                if ctext.strip():
+                    cv = embed_client.embed(ctext[:500])
+                    if cv:
+                        centroid_json = json.dumps(cv, ensure_ascii=False)
+            update_reality(
+                reality_id=rid, name=new_name, hdl=new_hdl,
+                current_status=new_cs, timeline_entry=timeline_entry,
+                changes=[str(c) for s in group for c in (s.get("changes") or []) if str(c).strip()],
+                centroid_json=centroid_json,
+                source_strand={"session_id": group[0].get("session_id", ""),
+                               "strand_id": group[0].get("strand_id")},
+                db_path=db_path,
+            )
+            for st in group:
+                insert_reality_strand_map(st.get("strand_id"), rid,
+                                          method="fallback" if used_fallback else "llm",
+                                          db_path=db_path)
+                if conn is not None:
+                    _update_query_centroid(conn, rid, st.get("query_text", ""), embed_client)
+            merged += len(group)
+            touched.add(rid)
+        except Exception as exc:
+            logger.warning("[CA_REALITY] merge reality %d failed: %s", rid, exc)
+            failed += len(group)
+
+    # create 处理（每 new strand 独立 create，宁分不并）
+    for st in new_strands:
+        try:
+            prompt = build_create_reality_prompt([st], max_chars=max_chars)
+            raw = call(prompt)
+            result = parse_reality_response(raw)
+            fb = _reality_code_fallback_create(st, max_chars)
+            new_name = result.get("name") if result and result.get("name") else fb["name"]
+            new_hdl = result.get("hdl") if result and result.get("hdl") else fb["hdl"]
+            new_cs = result.get("current_status") if result and isinstance(
+                result.get("current_status"), dict) else fb["current_status"]
+            new_cs = enforce_section_limits(new_cs or {})
+            timeline_ov = (result.get("timeline_overview") or "") if result else fb["timeline_overview"]
+            timeline_entry = {
+                "topic_id": st.get("topic_id"),
+                "turns": st.get("turns") or [],
+                "session_id": st.get("session_id", ""),
+                "overview": timeline_ov,
+            }
+            centroid_json = None
+            if embed_client is not None:
+                ctext = " ".join(filter(None, [
+                    str(new_name), str(new_hdl),
+                    *[str(i) for v in (new_cs or {}).values()
+                      if isinstance(v, list) for i in v if str(i).strip()],
+                ]))
+                if ctext.strip():
+                    cv = embed_client.embed(ctext[:500])
+                    if cv:
+                        centroid_json = json.dumps(cv, ensure_ascii=False)
+            rid = create_reality(
+                profile=profile, name=new_name, hdl=new_hdl,
+                current_status=new_cs, timeline_entry=timeline_entry,
+                source_strand={"session_id": st.get("session_id", ""),
+                               "strand_id": st.get("strand_id")},
+                centroid_json=centroid_json,
+                changes=[str(c) for c in (st.get("changes") or []) if str(c).strip()],
+                db_path=db_path,
+            )
+            if rid is None:
+                failed += 1
+                continue
+            insert_reality_strand_map(st.get("strand_id"), rid,
+                                      method="llm", db_path=db_path)
+            if conn is not None:
+                _update_query_centroid(conn, rid, st.get("query_text", ""), embed_client)
+            created += 1
+            touched.add(rid)
+        except Exception as exc:
+            logger.warning("[CA_REALITY] create reality failed: %s", exc)
+            failed += 1
+
+    if conn is not None:
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    logger.info("[CA_REALITY] sync merge done: %d merged, %d created, %d failed",
+                merged, created, failed)
+    return {"merged": merged, "created": created, "failed": failed,
+            "reality_ids": sorted(touched)}

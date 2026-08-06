@@ -137,7 +137,7 @@ def sync_themes_to_graph(
 
 
 def _theme_title_map(theme_ids: list, db_path: Optional[Path]) -> dict:
-    """从 themes 表读 title（节点 label 用）。"""
+    """从 themes 表读 title（节点 label 用，v6.5 兼容）。"""
     if not theme_ids:
         return {}
     try:
@@ -147,17 +147,137 @@ def _theme_title_map(theme_ids: list, db_path: Optional[Path]) -> dict:
     return {r[0]: (r[1] or "") for r in rows}
 
 
+def _reality_rows(reality_ids: list[int], db_path: Optional[Path]):
+    """从 realities 表读待同步的 reality（reality_id, name, source_strands）。"""
+    if not reality_ids:
+        return []
+    try:
+        from ca.store import _get_topic_conn
+    except ImportError:
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        rows = conn.execute(
+            f"SELECT reality_id, name, source_strands FROM realities "
+            f"WHERE reality_id IN ({','.join('?' for _ in reality_ids)})",
+            reality_ids).fetchall()
+        conn.close()
+        return rows
+    conn = _get_topic_conn(db_path)
+    return conn.execute(
+        f"SELECT reality_id, name, source_strands FROM realities "
+        f"WHERE reality_id IN ({','.join('?' for _ in reality_ids)})",
+        reality_ids).fetchall()
+
+
+def _reality_title_map(reality_ids: list, db_path: Optional[Path]) -> dict:
+    """从 realities 表读 name（节点 label 用，决策 41）。"""
+    if not reality_ids:
+        return {}
+    try:
+        rows = _reality_rows(reality_ids, db_path)
+    except Exception:
+        return {}
+    return {r[0]: (r[1] or "") for r in rows}
+
+
+def sync_realities_to_graph(
+    reality_ids: list[int],
+    graph_path: Path,
+    db_path: Optional[Path] = None,
+) -> Tuple[int, int]:
+    """将 reality 增量同步到 graph.json（决策 41，幂等）。
+
+    节点: reality_{reality_id}（label: [知识] {name}）
+    边:   topic_{session_id}_S{strand_id} → reality_{reality_id}（merged_into）
+    与 sync_cooccurrences_to_graph 共享节点命名 reality_{id}。
+    """
+    if not reality_ids:
+        return (0, 0)
+    graph_path = Path(graph_path)
+    if not graph_path.exists():
+        logger.debug("[CA_GRAPH] No graph.json yet, skipping reality sync")
+        return (0, 0)
+
+    rows = _reality_rows(reality_ids, db_path)
+    if not rows:
+        return (0, 0)
+
+    new_nodes: list[dict] = []
+    new_links: list[dict] = []
+    for rid, name, src_json in rows:
+        name = (name or "").strip()
+        label = f"{NODE_PREFIX} {name[:100]}" if name else f"{NODE_PREFIX} Reality {rid}"
+        nid = f"reality_{rid}"
+        new_nodes.append({
+            "id": nid,
+            "label": label,
+            "norm_label": label.lower().replace(" ", "_")[:64],
+            "file_type": "knowledge",
+            "source_file": "ca_topics.db",
+            "source_location": f"realities.reality_id={rid}",
+            "_origin": "reality_merge",
+            "community": 0,
+        })
+        # source_strands: {"session_id": [strand_id, ...]} → merged_into 边
+        try:
+            sources = json.loads(src_json) if src_json else {}
+        except (json.JSONDecodeError, TypeError):
+            sources = {}
+        if isinstance(sources, dict):
+            for sid, strand_ids in sources.items():
+                for strand_id in strand_ids or []:
+                    topic_nid = f"topic_{sid}_S{strand_id}"
+                    new_links.append({
+                        "source": topic_nid,
+                        "target": nid,
+                        "relation": "merged_into",
+                        "confidence": "HIGH",
+                        "confidence_score": 0.95,
+                        "source_file": "realities",
+                        "source_location": f"source_strands:{sid}:{strand_id}",
+                        "weight": 1.0,
+                    })
+
+    with open(graph_path, encoding="utf-8") as f:
+        graph = json.load(f)
+
+    existing_ids = {n["id"] for n in graph.get("nodes", [])}
+    existing_links = {(l["source"], l["target"], l.get("relation", ""))
+                      for l in graph.get("links", [])}
+
+    added_nodes = 0
+    added_links = 0
+    for node in new_nodes:
+        if node["id"] not in existing_ids:
+            graph.setdefault("nodes", []).append(node)
+            existing_ids.add(node["id"])
+            added_nodes += 1
+    for link in new_links:
+        key = (link["source"], link["target"], link["relation"])
+        if key not in existing_links:
+            graph.setdefault("links", []).append(link)
+            existing_links.add(key)
+            added_links += 1
+
+    if added_nodes or added_links:
+        with open(graph_path, "w", encoding="utf-8") as f:
+            json.dump(graph, f, ensure_ascii=False, indent=2)
+
+    logger.info("[CA_GRAPH] reality sync: +%d nodes, +%d links", added_nodes, added_links)
+    return (added_nodes, added_links)
+
+
 def sync_cooccurrences_to_graph(
     edges: dict,
     graph_path: Path,
     db_path: Optional[Path] = None,
     node_titles: Optional[dict] = None,
 ) -> Tuple[int, int]:
-    """共现边入图（决策 38 v7）：theme_a → theme_b（relation: co_occurs_with）。
+    """共现边入图（决策 38 v7 / 41）：reality_a → reality_b（relation: co_occurs_with）。
 
-    - 节点不存在则补建（label 从 themes 表 title 读，node_titles 可覆盖）
+    - 节点不存在则补建（label 从 realities 表 name 读，node_titles 可覆盖）
     - 已存在的 co_occurs_with 边更新 weight（共现次数增长，非幂等追加）
-    - 与 sync_themes_to_graph 共享节点命名 theme_{id}
+    - 与 sync_realities_to_graph 共享节点命名 reality_{id}
 
     Returns:
         (added_nodes, changed_links)  # changed = 新增边 + 权重更新的边
@@ -169,7 +289,7 @@ def sync_cooccurrences_to_graph(
         logger.debug("[CA_GRAPH] No graph.json yet, skipping co-occurrence sync")
         return (0, 0)
     if node_titles is None:
-        node_titles = _theme_title_map(
+        node_titles = _reality_title_map(
             [x for pair in edges for x in pair], db_path)
 
     with open(graph_path, encoding="utf-8") as f:
@@ -183,7 +303,7 @@ def sync_cooccurrences_to_graph(
     changed_links = 0
     changed = False
     for (a, b), w in sorted(edges.items()):
-        na, nb = f"theme_{a}", f"theme_{b}"
+        na, nb = f"reality_{a}", f"reality_{b}"
         for nid, tid in ((na, a), (nb, b)):
             if nid not in existing_ids:
                 title = (node_titles.get(tid) or "").strip()

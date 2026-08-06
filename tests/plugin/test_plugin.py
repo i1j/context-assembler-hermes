@@ -636,15 +636,16 @@ class TestPreLlmCallSessionRecall:
             pass
 
     def test_session_start_recalls_on_turn_1(self):
-        """turn=1 时从 wiki 语义召回并注入 <wiki_carryover>（v6.2 本地化）。"""
+        """turn=1 时从 reality 语义召回并注入 <wiki_carryover>（v7 决策 41）。"""
         sid = f"recall_test_{int(time.time())}"
         plugin, conv = self._setup_plugin(sid, turn=1)
         try:
             fake_entries = [
-                {"theme_id": 1, "title": "旧话题", "overview": "ov",
-                 "ooda": {}, "key_facts": ["旧话题结论"], "open_items": []},
+                {"reality_id": 1, "name": "旧话题", "hdl": "旧话题状态锚点",
+                 "current_status": {"current_state": ["旧话题结论"]},
+                 "timeline": []},
             ]
-            with patch('ca.inject.pick_injection_themes',
+            with patch('ca.inject.pick_injection_realities',
                        return_value=fake_entries) as mock_q:
                 with patch.object(plugin._engine.embed_client, 'embed',
                                   return_value=[0.1] * 16) as mock_embed:
@@ -657,7 +658,7 @@ class TestPreLlmCallSessionRecall:
                             conversation_history=conv,
                             model="deepseek-v4-flash",
                         )
-            # 验证 recall 被注入（wiki_carryover 只含 key_facts）
+            # 验证 recall 被注入（wiki_carryover 含 current_state）
             assert result is not None
             assert "<wiki_carryover>" in result
             assert "旧话题结论" in result
@@ -674,7 +675,7 @@ class TestPreLlmCallSessionRecall:
         # 置为已注入状态
         plugin._session_recall_done = True
         try:
-            with patch('ca.inject.pick_injection_themes') as mock_q:
+            with patch('ca.inject.pick_injection_realities') as mock_q:
                 with patch.object(plugin._engine.embed_client, 'embed',
                                   return_value=[0.1] * 16):
                     with patch('tools.skill_provenance.get_current_write_origin',
@@ -696,7 +697,7 @@ class TestPreLlmCallSessionRecall:
         sid = f"recall_turn2_{int(time.time())}"
         plugin, conv = self._setup_plugin(sid, turn=2)
         try:
-            with patch('ca.inject.pick_injection_themes') as mock_q:
+            with patch('ca.inject.pick_injection_realities') as mock_q:
                 with patch.object(plugin._engine.embed_client, 'embed',
                                   return_value=[0.1] * 16):
                     with patch('tools.skill_provenance.get_current_write_origin',
@@ -771,10 +772,11 @@ class TestTopicSwitchRecall:
             # mock detect → switched
             plugin._engine._compute_assemble_plan = MagicMock(return_value=([], None))
             fake_entries = [
-                {"theme_id": 1, "title": "T", "overview": "ov",
-                 "ooda": {}, "key_facts": ["far recall 结论"], "open_items": []},
+                {"reality_id": 1, "name": "T", "hdl": "",
+                 "current_status": {"current_state": ["far recall 结论"]},
+                 "timeline": []},
             ]
-            with patch('ca.inject.pick_injection_themes',
+            with patch('ca.inject.pick_injection_realities',
                        return_value=fake_entries) as mock_q:
                 with patch.object(plugin._engine.embed_client, 'embed',
                                   return_value=[0.1] * 16):
@@ -800,7 +802,7 @@ class TestTopicSwitchRecall:
         sid = f"rel_test_{int(time.time())}"
         plugin = self._setup_plugin(sid)
         try:
-            with patch('ca.inject.pick_injection_themes') as mock_q:
+            with patch('ca.inject.pick_injection_realities') as mock_q:
                 with patch.object(plugin._engine.embed_client, 'embed',
                                   return_value=[0.1] * 16):
                     with patch('ca_assembler_plugin.TopicGradeManager') as mock_tm_cls:
@@ -823,7 +825,7 @@ class TestTopicSwitchRecall:
         sid = f"noswitch_test_{int(time.time())}"
         plugin = self._setup_plugin(sid)
         try:
-            with patch('ca.inject.pick_injection_themes') as mock_q:
+            with patch('ca.inject.pick_injection_realities') as mock_q:
                 with patch.object(plugin._engine.embed_client, 'embed',
                                   return_value=[0.1] * 16):
                     with patch('ca_assembler_plugin.TopicGradeManager') as mock_tm_cls:

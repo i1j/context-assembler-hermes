@@ -760,8 +760,8 @@ class CAContextAssemblerPlugin:
             except Exception as exc:
                 logger.warning("[CA_TOPIC_SUM] strand %d centroid write failed: %s",
                               strand_id, exc)
-            # v6.5.3: strand 归属判断（theme_ref 必须 ∈ 候选，防 4B 幻觉越界）
-            valid_refs = {t.get("theme_id") for t in (candidate_themes or [])}
+            # v6.5.3 + v7: strand 归属判断（reality_ref 必须 ∈ 候选，防 4B 幻觉越界）
+            valid_refs = {t.get("reality_id") for t in (candidate_themes or [])}
             st_ref = st.get("theme_ref")
             if st_ref is not None and st_ref not in valid_refs:
                 logger.info("[CA_TOPIC_SUM] strand %s theme_ref=%s 越界候选，丢弃",
@@ -787,49 +787,51 @@ class CAContextAssemblerPlugin:
         else:
             logger.warning("[CA_TOPIC_SUM] Topic %d: all strand writes failed", topic_id)
 
-        # ── v6.5 (M2): strand 生成时同步归并到 theme（两段式：向量召回→4B 决策→4B 更新）──
+        # ── v7 (决策 41): strand 生成时同步归并到 reality（两段式：S 候选→4B 决策→4B 更新）──
         if theme_ready:
             try:
-                from ca.theme import run_theme_merge
-                from ca.store import get_wiki_threshold, load_all_themes
-                existing = load_all_themes()
-                # v6.5.3 (2026-08-02 用户确认): 归并优先级 = 本块注入的候选 theme 优先
-                # （topic_data.candidate_themes = 切换时语义检索的 3 个参考主题）→
-                # 再考虑其它 theme → 最后新建。
-                priority_themes = topic_data.get("candidate_themes") or None
-                stats = run_theme_merge(
+                from ca.reality import run_reality_merge
+                from ca.store import get_wiki_threshold, load_all_realities
+                existing = load_all_realities()
+                # v6.5.3 (2026-08-02 用户确认) + v7: 归并优先级 = 本块注入的候选 reality 优先
+                # （topic_data.candidate_themes = 切换时语义检索的 3 个参考 reality）→
+                # 再考虑其它 reality → 最后新建。
+                priority_realities = topic_data.get("candidate_themes") or None
+                stats = run_reality_merge(
                     theme_ready, existing,
                     embed_client=engine.embed_client,
                     threshold=get_wiki_threshold(),
                     max_chars=Config.TOPIC_SUMMARY_MAX_CHARS,
                     profile=profile,
-                    priority_themes=priority_themes,
+                    priority_realities=priority_realities,
                 )
-                logger.info("[CA_THEME] sync merge: %s", stats)
-                # v6.5.3: theme 生成/融合后增量同步 graphify 边
-                tid_list = stats.get("theme_ids") or []
-                if tid_list:
-                    self._graphify_incremental(tid_list)
+                logger.info("[CA_REALITY] sync merge: %s", stats)
+                # v7: reality 生成/融合后增量同步 graphify 边
+                rid_list = stats.get("reality_ids") or []
+                if rid_list:
+                    from ca.graphify_sync import sync_realities_to_graph
+                    graph_path = (Path(__file__).resolve().parent
+                                  / "graphify-out" / "graph.json")
+                    with self._graph_lock:
+                        sync_realities_to_graph(rid_list, graph_path)
                     # v7 (决策 38): 块级共现边记录（复合键幂等）+ 共现边入图
                     try:
                         from ca.store import (query_cooccurrences,
                                               record_block_cooccurrences)
                         record_block_cooccurrences(
-                            session_id, topic_id, tid_list,
+                            session_id, topic_id, rid_list,
                             profile=profile)
                         edges, _, _ = query_cooccurrences(profile=profile)
                         if edges:
                             from ca.graphify_sync import \
                                 sync_cooccurrences_to_graph
-                            graph_path = (Path(__file__).resolve().parent
-                                          / "graphify-out" / "graph.json")
                             with self._graph_lock:
                                 sync_cooccurrences_to_graph(edges, graph_path)
                     except Exception as exc:
                         logger.warning(
-                            "[CA_THEME] cooccurrence sync failed: %s", exc)
+                            "[CA_REALITY] cooccurrence sync failed: %s", exc)
             except Exception as exc:
-                logger.warning("[CA_THEME] sync merge failed: %s", exc)
+                logger.warning("[CA_REALITY] sync merge failed: %s", exc)
 
     @staticmethod
     def _estimate_conv_tokens(conv_hist: list) -> int:
@@ -1006,11 +1008,11 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
                 logger.warning("[CA_WIKI] session-start cleanup not done within 5s; "
                                "skipping recall injection (non-blocking)")
             else:
-                # 注入拣选——embed 首条用户消息 → 负向排除 → 4B 拣选（v7 决策 38）
-                from ca.inject import pick_injection_themes
+                # 注入拣选——embed 首条用户消息 → 提问云形心散度距离范围 → 4B 拣选（决策 41 §2.4b）
+                from ca.inject import pick_injection_realities
                 q_emb = engine.embed_client.embed(user_message)
                 if q_emb:
-                    wiki_entries = pick_injection_themes(
+                    wiki_entries = pick_injection_realities(
                         user_message, q_emb, Config.HERMES_PROFILE,
                         limit=Config.TOPIC_SUMMARY_RECALL_LIMIT,
                         exclude_session_id=session_id,
@@ -1058,14 +1060,14 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
                     logger.info("[CA_TOPIC_SUM] Topic %d queued for summarize (turns %s, switch at turn %d)",
                                 old_topic_id, old_turns, turn)
             # ── 跨会话 recall：仅当旧话题被判定为 FAR（强断开）时才注入 ──
-            # v7 (决策 38): 与首轮 recall 对齐，走 4B 拣选（pick_injection_themes），
+            # v7 (决策 38/41): 与首轮 recall 对齐，走提问云形心 4B 拣选（pick_injection_realities），
             # 替代 v6.5 余弦 top-N（query_themes_by_semantics）。
             if old_topic_id is not None and Config.TOPIC_SUMMARIZE_ENABLED:
                 try:
                     tg = plugin._topic_mgr.get_topic_grades()
                     if tg.get(old_topic_id) == TopicGrade.FAR:
-                        from ca.inject import pick_injection_themes
-                        wiki_entries = pick_injection_themes(
+                        from ca.inject import pick_injection_realities
+                        wiki_entries = pick_injection_realities(
                             user_message, q_emb, Config.HERMES_PROFILE,
                             limit=Config.TOPIC_SUMMARY_RECALL_LIMIT,
                             exclude_session_id=session_id,
@@ -1297,19 +1299,91 @@ def _format_single_theme(theme: dict, max_chars: int) -> str:
             return f"## {title}"
 
 
+def _format_single_reality(reality: dict, max_chars: int) -> str:
+    """单 reality 渲染（决策 41）：name/hdl/current_status/timeline 摘要，预算内裁剪。"""
+    name = (reality.get("name") or reality.get("hdl") or "").strip() or "Reality"
+    sections: list[tuple[int, str, list[str]]] = []
+
+    hdl = (reality.get("hdl") or "").strip()
+    if hdl and hdl != name:
+        sections.append((0, "状态锚点", [hdl]))
+    cs = reality.get("current_status") or {}
+    if isinstance(cs, dict):
+        if cs.get("goals"):
+            sections.append((1, "进行中目标",
+                             [str(i) for i in cs["goals"] if str(i).strip()][:5]))
+        if cs.get("current_state"):
+            sections.append((2, "当前状态",
+                             [str(i) for i in cs["current_state"] if str(i).strip()][:5]))
+        if cs.get("key_facts"):
+            sections.append((3, "持久事实",
+                             [str(i) for i in cs["key_facts"] if str(i).strip()][:4]))
+        if cs.get("context"):
+            sections.append((4, "相关资源",
+                             [str(i) for i in cs["context"] if str(i).strip()][:3]))
+    tl = reality.get("timeline") or []
+    if isinstance(tl, list):
+        ovs = [str(e.get("overview", "")) for e in tl[-2:]
+               if isinstance(e, dict) and str(e.get("overview", "")).strip()]
+        if ovs:
+            sections.append((5, "演进摘要", ovs))
+
+    if not sections:
+        return f"## {name}"
+
+    state = {prio: {"count": 0, "len": 0} for prio, _, _ in sections}
+
+    def render() -> str:
+        parts = [f"## {name}"]
+        for prio, label, items in sorted(sections, key=lambda s: s[0]):
+            st = state[prio]
+            if not st.get("removed"):
+                parts.append(_format_theme_section(
+                    label, items, st["count"], st["len"]))
+        return "\n\n".join(parts)
+
+    def degrade(st: dict) -> bool:
+        if not st.get("removed"):
+            if st["count"] < 3:
+                st["count"] += 1
+                return True
+            if st["len"] < 2:
+                st["len"] += 1
+                return True
+            st["removed"] = True
+            return True
+        return False
+
+    while True:
+        out = render()
+        if len(out) <= max_chars:
+            return out
+        degraded = False
+        for prio, _, _ in sorted(sections, key=lambda s: -s[0]):
+            if degrade(state[prio]):
+                degraded = True
+                break
+        if not degraded:
+            return f"## {name}"
+
+
 def _format_wiki_carryover(
     themes: list[dict],
     per_theme_max_chars: int = 2000,
 ) -> str:
-    """将 theme 列表格式化为 <wiki_carryover> 注入块（当前详细状态）。
+    """将 reality/theme 列表格式化为 <wiki_carryover> 注入块（当前详细状态）。
 
-    每 theme 独立预算（per_theme_max_chars，默认 2000 字符），
+    每条目独立预算（per_theme_max_chars，默认 2000 字符），
     超预算按互信息量优先级（P7→P1）逐级裁剪，title 永不裁剪。
+    reality dict（含 reality_id 键）→ _format_single_reality；theme → _format_single_theme。
     一次性注入，不进对话记录表。
     """
     blocks: list[str] = []
     for t in themes:
-        block = _format_single_theme(t, per_theme_max_chars)
+        if isinstance(t, dict) and "reality_id" in t:
+            block = _format_single_reality(t, per_theme_max_chars)
+        else:
+            block = _format_single_theme(t, per_theme_max_chars)
         if block:
             blocks.append(block)
 

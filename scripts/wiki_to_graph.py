@@ -1,0 +1,527 @@
+"""wiki_to_graph.py — 将 wiki 知识条目同步到 Graphify 图谱。
+
+设计：
+  1. 读取 themes 表，为每个 theme 生成一个知识节点
+  2. 读取 theme_strand_map，在归并的 theme 之间生成边
+  3. 读取 OV 设计文档的 frontmatter trace: → 生成 trace 边（决策↔代码追溯）
+  4. 输出到 graphify-out/wiki_subgraph.json
+  5. 合并到主 graph.json
+
+触发：_run_wiki_merge 之后（daemon 子进程）
+"""
+
+import json
+import os
+import re
+import sqlite3
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+try:
+    import urllib.request
+    _HAS_URLLIB = True
+except ImportError:
+    _HAS_URLLIB = False
+
+CA_CACHE_DIR = os.getenv(
+    "CA_CACHE_DIR",
+    str(Path.home() / ".hermes" / "profiles" / "tester" / "ca_cache"),
+)
+GRAPHIFY_OUT = os.getenv(
+    "GRAPHIFY_OUT",
+    str(Path(__file__).resolve().parent.parent / "graphify-out"),
+)
+CA_TOPICS_DB = os.path.join(CA_CACHE_DIR, "ca_topics.db")
+WIKI_GRAPH_FILE = os.path.join(GRAPHIFY_OUT, "wiki_subgraph.json")
+GRAPH_JSON = os.path.join(GRAPHIFY_OUT, "graph.json")
+
+# ── 节点 label 前缀，避免与 AST 节点冲突 ──
+NODE_PREFIX = "[知识]"
+
+# ── OV 设计文档追溯 ──
+OV_API = os.getenv("OV_API", "http://127.0.0.1:1933")
+TRACE_SOURCES = [
+    "viking://resources/projects/context-assembler/design/topic-summarization-decision.md/话题摘要化设计_v3_取代_OV_VLM_摘要.md",
+    # v6.5.4: 原 wiki/architecture/10-ca-ov-topic-submit.md 已不存在（OV 中为 design/ca-ov-topic-submit.md）
+    "viking://resources/projects/context-assembler/design/ca-ov-topic-submit.md",
+]
+CA_CODE_DIR = str(Path(__file__).resolve().parent.parent)
+
+
+def _get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(CA_TOPICS_DB, timeout=5)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _extract_bigrams(text: str) -> list[str]:
+    """中英混合 bigram 切分：中文连续 2 字 + 英文 token。
+
+    v6.5.4: 原整串 `\w+` 匹配对中文无分词能力（'话题切换' 与 '话题摘要'
+    零重叠），改为字符级 bigram，'摘要' 可跨标题命中。
+    """
+    out: list[str] = []
+    for chunk in re.findall(r"[\u4e00-\u9fff]+", text):
+        for i in range(len(chunk) - 1):
+            out.append(chunk[i:i + 2])
+    for m in re.findall(r"[A-Za-z]{2,}", text):
+        out.append(m.lower())
+    return out
+
+
+def _bigram_idf(all_titles: list[str]) -> dict[str, float]:
+    """log-IDF 权重：bigram 在全部 theme 标题中的稀有度。
+
+    idf = ln(N/df)，df 是该 bigram 出现的 theme 数。
+    高频泛词（优化/机制/话题）权重低，专有词（提交/摘要）权重高。
+    """
+    import math
+    n = max(len(all_titles), 1)
+    df: dict[str, int] = {}
+    for t in all_titles:
+        for bg in set(_extract_bigrams(t)):
+            df[bg] = df.get(bg, 0) + 1
+    return {bg: math.log(n / d) for bg, d in df.items()}
+
+
+def _load_ov_doc_titles() -> list[dict]:
+    """读取 OV 设计/架构文档的 title，供关键词匹配。"""
+    docs: list[dict] = []
+    for uri in TRACE_SOURCES:
+        content = _fetch_ov_raw(uri)
+        if not content:
+            continue
+        # 从 frontmatter 提取 title，或第一个 ##
+        doc_title = ""
+        if content.startswith("---"):
+            end = content.find("---", 3)
+            if end != -1:
+                fm = content[3:end]
+                for line in fm.split("\n"):
+                    if line.strip().startswith("title:"):
+                        doc_title = line.split(":", 1)[1].strip().strip('"').strip("'")
+                        break
+        if not doc_title:
+            # fallback 顺序：H1（文档主标题）→ URI 末段（文件名）→ H2（章节标题，最易误命中）
+            m = re.search(r"^#\s+(.+)", content, re.MULTILINE)
+            if m:
+                doc_title = m.group(1).strip()
+        if not doc_title:
+            doc_title = uri.rstrip("/").split("/")[-1]
+        if not doc_title:
+            m = re.search(r"^##\s+(.+)", content, re.MULTILINE)
+            if m:
+                doc_title = m.group(1).strip()
+        doc_label = doc_title[:60]
+        doc_nid = f"ov_doc_{doc_label.lower().replace(' ', '_')[:48]}"
+        docs.append({
+            "title": doc_title,
+            "label": doc_label,
+            "nid": doc_nid,
+            "uri": uri,
+            "words": _extract_bigrams(doc_title),
+        })
+    return docs
+
+
+# ── OV 文档追溯边生成 ──
+
+def _fetch_ov_raw(uri: str) -> str:
+    """通过 OV WebDAV API 获取资源原始内容（含 frontmatter）。"""
+    if not _HAS_URLLIB:
+        return ""
+    import urllib.parse
+    # viking://resources/projects/... → /webdav/resources/projects/...
+    resource_path = uri.replace("viking://resources/", "")
+    if resource_path == uri:
+        return ""  # 非 resources URI，跳过
+    # 逐个 segment 编码
+    segments = resource_path.split("/")
+    encoded_segments = [urllib.parse.quote(s, safe="") for s in segments]
+    encoded_path = "/".join(encoded_segments)
+    url = f"{OV_API}/webdav/resources/{encoded_path}"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.read().decode("utf-8")
+    except Exception as exc:
+        print(f"  [trace] fetch {uri} failed: {exc}")
+        return ""
+
+
+def _parse_trace_frontmatter(content: str) -> dict:
+    """从 YAML frontmatter 提取 trace: 字段（无需 yaml 依赖）。"""
+    if not content.startswith("---"):
+        return {}
+    end = content.find("---", 3)
+    if end == -1:
+        return {}
+    fm = content[3:end]
+
+    result: dict = {"forward": [], "backward": []}
+    section = None
+    for line in fm.split("\n"):
+        stripped = line.strip()
+        # 跳过空行和纯 key:value（非 trace）
+        if not stripped or stripped == "---":
+            continue
+        # 检测 trace: 下的子 section
+        m = re.match(r"^\s{2}(forward|backward):", line)
+        if m:
+            section = m.group(1)
+            continue
+        # 读取 - item
+        m = re.match(r"^\s{4}- (.+)", line)
+        if m and section:
+            result.setdefault(section, []).append(m.group(1).strip())
+    return result
+
+
+def _add_trace_edges(subgraph: dict, seen_nodes: set[str]) -> None:
+    """从 OV 设计/架构文档读取 trace: → 生成 trace 边。"""
+    nodes = subgraph["nodes"]
+    edges = subgraph["edges"]
+
+    for uri in TRACE_SOURCES:
+        content = _fetch_ov_raw(uri)
+        if not content:
+            continue
+        fm = _parse_trace_frontmatter(content)
+        if not fm.get("forward") and not fm.get("backward"):
+            continue
+
+        # OV 文档作为源节点
+        doc_label = uri.rstrip("/").split("/")[-1]
+        doc_nid = f"ov_doc_{doc_label[:48]}"
+        doc_norm = doc_label.lower().replace(" ", "_")[:64]
+
+        if doc_nid not in seen_nodes:
+            nodes.append({
+                "label": f"{NODE_PREFIX} {doc_label[:60]}",
+                "norm_label": doc_norm,
+                "file_type": "knowledge",
+                "source_file": uri,
+                "source_location": "trace",
+                "_origin": "trace",
+                "id": doc_nid,
+                "community": 0,
+                "metadata": {"uri": uri},
+            })
+            seen_nodes.add(doc_nid)
+
+        # forward trace: 文档 → 代码
+        code_dir = CA_CODE_DIR
+        for entry in fm.get("forward", []):
+            # entry 格式: "path/file.py:func_name" 或 "path/file.py"
+            parts = entry.split(":", 1)
+            file_path = parts[0]
+            full_path = os.path.join(code_dir, file_path)
+            # 用代码文件路径作为节点 id
+            code_nid = f"code_{file_path.replace('/', '_')}"
+            code_norm = f"code_{file_path.replace('/', '_')}".lower()[:64]
+            if code_nid not in seen_nodes:
+                nodes.append({
+                    "label": file_path,
+                    "norm_label": code_norm,
+                    "file_type": "code",
+                    "source_file": full_path,
+                    "source_location": parts[1] if len(parts) > 1 else "",
+                    "_origin": "trace",
+                    "id": code_nid,
+                    "community": 0,
+                })
+                seen_nodes.add(code_nid)
+            # trace 边
+            edges.append({
+                "source": doc_nid,
+                "target": code_nid,
+                "relation": "trace",
+                "confidence": "HIGH",
+                "confidence_score": 0.95,
+                "source_file": "trace",
+                "source_location": f"forward:{entry}",
+                "weight": 1.0,
+            })
+
+        # backward trace: 文档 ← 上游决策
+        for entry in fm.get("backward", []):
+            # entry 格式: "design/C-003.md"
+            up_label = entry.rstrip("/").split("/")[-1]
+            up_nid = f"ov_doc_{up_label[:48]}"
+            up_norm = up_label.lower().replace(" ", "_")[:64]
+            if up_nid not in seen_nodes:
+                nodes.append({
+                    "label": f"{NODE_PREFIX} {up_label[:60]}",
+                    "norm_label": up_norm,
+                    "file_type": "knowledge",
+                    "source_file": f"viking://resources/projects/context-assembler/{entry}",
+                    "source_location": "trace",
+                    "_origin": "trace",
+                    "id": up_nid,
+                    "community": 0,
+                })
+                seen_nodes.add(up_nid)
+            # backward trace 边（方向：上游 → 本文档）
+            edges.append({
+                "source": up_nid,
+                "target": doc_nid,
+                "relation": "trace",
+                "confidence": "HIGH",
+                "confidence_score": 0.95,
+                "source_file": "trace",
+                "source_location": f"backward:{entry}",
+                "weight": 1.0,
+            })
+
+
+def build_wiki_subgraph() -> dict:
+    """从 realities 表构建 wiki 子图（决策 41）。
+
+    v6.5.4: 数据源从已废弃的 topic_wiki 表切换为 themes 表（v6.5 schema 迁移）；
+    2026-08-07 (决策 41): themes → realities，节点 id reality_{reality_id}。
+    节点 id 与 graphify_sync 增量同步对齐（幂等）。
+    v6.4: 含 timeline 元数据（从 strand_summaries.turns 查询，strand 粒度）。
+    含 OV 文档关键词匹配 → trace 边（决策↔会话知识）。
+
+    Returns:
+        graphify 兼容的 JSON dict: {nodes: [...], edges: [...]}
+    """
+    conn = _get_conn()
+    entries = conn.execute(
+        "SELECT reality_id, name, current_status, source_strands, updated_at, created_at "
+        "FROM realities ORDER BY reality_id"
+    ).fetchall()
+
+    # 预加载所有 strand 的 turns（供 timeline 用）
+    topic_ranges: dict[str, str] = {}  # "session/Sid" → "[1,2,3]"
+    try:
+        rows = conn.execute(
+            "SELECT session_id, strand_id, turns FROM strand_summaries "
+            "WHERE turns IS NOT NULL"
+        ).fetchall()
+        for r in rows:
+            topic_ranges[f"{r['session_id']}/S{r['strand_id']}"] = r['turns']
+    except Exception:
+        pass
+
+    # 预加载 OV 设计文档的 title（供关键词匹配用）
+    ov_doc_titles: list[dict] = _load_ov_doc_titles()
+
+    # v6.5.4: 用全部 reality 名称统计 bigram IDF（专有词加权，抑制 优化/话题 等泛词）
+    all_titles = [e["name"] or "" for e in entries]
+    idf = _bigram_idf(all_titles)
+    conn.close()
+
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    seen_nodes: set[str] = set()
+
+    for e in entries:
+        eid = e["reality_id"]
+        title = (e["name"] or "").strip()
+        try:
+            cs = json.loads(e["current_status"]) if isinstance(e["current_status"], str) else (e["current_status"] or {})
+        except Exception:
+            cs = {}
+        if not isinstance(cs, dict):
+            cs = {}
+        overview = " ".join(filter(None, [title, *[str(i) for v in cs.values()
+                                              if isinstance(v, list) for i in v[:2]]]))[:300]
+        sources_raw = e["source_strands"] or "{}"
+        sources = json.loads(sources_raw) if isinstance(sources_raw, str) else sources_raw
+
+        label = f"{NODE_PREFIX} {title[:80]}" if title else f"{NODE_PREFIX} Reality {eid}"
+        nid = f"reality_{eid}"
+        norm = label.lower().replace(" ", "_")[:64]
+
+        # 构建 timeline
+        timeline: list[dict] = []
+        for sid, strand_ids in sources.items():
+            for strand_id in strand_ids:
+                key = f"{sid}/S{strand_id}"
+                timeline.append({
+                    "session": sid,
+                    "strand": strand_id,
+                    "turns": topic_ranges.get(key, "?"),
+                })
+        # 按时序排序
+        timeline.sort(key=lambda x: (x["session"], x["strand"]))
+
+        if nid not in seen_nodes:
+            nodes.append({
+                "label": label,
+                "norm_label": norm,
+                "file_type": "knowledge",
+                "source_file": f"realities/reality_{eid}",
+                "source_location": f"realities.reality_id={eid}",
+                "_origin": "wiki",
+                "id": nid,
+                "community": 0,
+                "metadata": {
+                    "overview": overview[:200],
+                    "source_sessions": list(sources.keys()),
+                    "strand_count": sum(len(v) for v in sources.values()),
+                    "created_at": e["created_at"],
+                    "updated_at": e["updated_at"],
+                    "timeline": timeline,
+                },
+            })
+            seen_nodes.add(nid)
+
+        # v6.5.4: OV 文档 trace 匹配 — 中文 bigram + log-IDF 加权
+        # 匹配条件：有效词重叠 ≥2 且加权分 ≥5.0（有效词 = idf≥2.5，抑制 优化/机制 等泛词）
+        _wiki_words = set(_extract_bigrams(title))
+        for _doc in ov_doc_titles:
+            _doc_label = _doc.get("label", "")
+            _doc_nid = _doc.get("nid")
+            if not _doc_label or not _doc_nid:
+                continue
+            _doc_words = _doc.get("words") or set(_extract_bigrams(_doc.get("title", "")))
+            _overlap = _wiki_words & set(_doc_words)
+            if not _overlap:
+                continue
+            _valid = [w for w in _overlap if idf.get(w, 0) >= 2.5]
+            _score = sum(idf.get(w, 0) for w in _overlap)
+            if len(_valid) >= 2 and _score >= 5.0:
+                if _doc_nid not in seen_nodes:
+                    nodes.append({
+                        "label": f"{NODE_PREFIX} {_doc_label[:60]}",
+                        "norm_label": _doc_label.lower().replace(" ", "_")[:64],
+                        "file_type": "knowledge",
+                        "source_file": _doc.get("uri", ""),
+                        "source_location": "trace",
+                        "_origin": "trace",
+                        "id": _doc_nid,
+                        "community": 0,
+                        "metadata": {"uri": _doc.get("uri", "")},
+                    })
+                    seen_nodes.add(_doc_nid)
+                edges.append({
+                    "source": nid,
+                    "target": _doc_nid,
+                    "relation": "trace",
+                    "confidence": "HIGH",
+                    "confidence_score": round(min(_score / 8.0, 0.95), 3),
+                    "source_file": "realities",
+                    "source_location": f"bigram_match:{_doc_label[:40]}",
+                    "weight": round(min(_score / 8.0, 0.95), 3),
+                })
+
+        # 归并关系：同一 entry 下的多个 strand 产生内部边
+        topic_list: list[str] = []
+        for sid, strand_ids in sources.items():
+            for strand_id in strand_ids:
+                topic_list.append(f"{sid}/S{strand_id}")
+
+        # 从源码 strand 到 reality entry 的"知识提升"边
+        for topic_ref in topic_list:
+            topic_nid = f"topic_{topic_ref.replace('/', '_')}"
+            if topic_nid not in seen_nodes:
+                nodes.append({
+                    "label": f"Strand {topic_ref}",
+                    "norm_label": f"topic_{topic_ref}".lower(),
+                    "file_type": "knowledge",
+                    "source_file": f"strand_summaries/{topic_ref}",
+                    "source_location": topic_ref,
+                    "_origin": "wiki",
+                    "id": topic_nid,
+                    "community": 0,
+                })
+                seen_nodes.add(topic_nid)
+
+            edges.append({
+                "source": topic_nid,
+                "target": nid,
+                "relation": "merged_into",
+                "confidence": "HIGH",
+                "confidence_score": 0.95,
+                "source_file": "realities",
+                "source_location": "strand_to_reality",
+                "weight": 1.0,
+            })
+
+    # 不跨 entry 建边（先只保留单 entry 内部结构）
+    return {"nodes": nodes, "edges": edges}
+
+
+def merge_into_main_graph(subgraph: dict, main_path: str = GRAPH_JSON) -> bool:
+    """将 wiki 子图合并到主 graph.json。
+
+    不会覆盖已有 AST 节点。幂等——已存在的 wiki 节点不重复添加。
+    """
+    if not os.path.exists(main_path):
+        print(f"[WIKI_GRAPH] main graph not found at {main_path}, skipping merge")
+        return False
+
+    with open(main_path) as f:
+        main = json.load(f)
+
+    existing_ids = {n["id"] for n in main.get("nodes", [])}
+    added_nodes = 0
+    added_edges = 0
+
+    for n in subgraph.get("nodes", []):
+        if n["id"] not in existing_ids:
+            main["nodes"].append(n)
+            existing_ids.add(n["id"])
+            added_nodes += 1
+
+    # 边去重（graph.json 用 links 不是 edges）
+    main_links = main.get("links", [])
+    existing_edges = {(e["source"], e["target"], e.get("relation", ""))
+                      for e in main_links}
+    for e in subgraph.get("edges", []):
+        key = (e["source"], e["target"], e.get("relation", ""))
+        if key not in existing_edges:
+            main.setdefault("links", []).append(e)
+            existing_edges.add(key)
+            added_edges += 1
+
+    if added_nodes > 0 or added_edges > 0:
+        with open(main_path, "w") as f:
+            json.dump(main, f, ensure_ascii=False, indent=2)
+        print(f"[WIKI_GRAPH] merged: {added_nodes} nodes + {added_edges} edges")
+    else:
+        print(f"[WIKI_GRAPH] no changes")
+
+    return True
+
+
+def main():
+    os.makedirs(GRAPHIFY_OUT, exist_ok=True)
+    subgraph = build_wiki_subgraph()
+
+    # 追加 trace 边（决策↔代码追溯）
+    seen_nodes = {n["id"] for n in subgraph["nodes"]}
+    _add_trace_edges(subgraph, seen_nodes)
+
+    # 写子图文件
+    with open(WIKI_GRAPH_FILE, "w") as f:
+        json.dump(subgraph, f, ensure_ascii=False, indent=2)
+    print(f"[WIKI_GRAPH] wiki subgraph: {len(subgraph['nodes'])} nodes, {len(subgraph['edges'])} edges")
+    print(f"  → {WIKI_GRAPH_FILE}")
+
+    # 合并到主图
+    if os.path.exists(GRAPH_JSON):
+        merge_into_main_graph(subgraph)
+        print(f"  → merged into {GRAPH_JSON}")
+
+        # 构建 wiki 关联
+        _build_associations()
+
+
+def _build_associations():
+    """从 graph.json 为 wiki entry 建关联表。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    try:
+        from ca.store import build_wiki_associations
+        n = build_wiki_associations(GRAPH_JSON)
+        print(f"  → associations: {n} links")
+    except Exception as exc:
+        print(f"  → associations skipped: {exc}")
+
+
+if __name__ == "__main__":
+    main()

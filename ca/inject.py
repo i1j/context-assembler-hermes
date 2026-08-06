@@ -255,3 +255,221 @@ def pick_injection_themes(
     except Exception as exc:
         logger.warning("[CA_INJECT] cosine fallback failed: %s", exc)
         return []
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v7 reality 注入拣选（决策 41 §2.4b：提问云形心散度距离，2026-08-07）
+# ══════════════════════════════════════════════════════════════════════
+
+# 提问云形心距离范围安全网（θ_max=0.5：归属对召回 93%，实测）
+THETA_MAX = 0.5
+# 距离排序后给 4B 的候选预算（4B 输入均值 14.9）
+QUERY_CLOUD_TOP_K = 15
+
+INJECT_PROMPT_REALITY = """你是上下文检索器。给定用户的当前提问和候选现实工作对象（reality）列表，拣选出与提问最相关的 top-3 reality 作为注入上下文。
+
+【reality 定义】现实工作对象（工作线）：多个语义独立但工作中有关联的 strand 的集合，跨话题块持续演进。其当前状态由 current_status 描述（goals=进行中的目标 / current_state=现状 / key_facts=持久事实）。
+
+【用户提问】
+{query}
+
+【候选 reality】（已按提问云形心散度距离预筛，仅保留距离范围内的）
+{candidates}
+
+【拣选规则】
+1. 相关性判定：该 reality 的 goals/current_state 是否与提问的工作对象承接/相关？用户问这个提问时，是否需要该 reality 的背景才能有效回答？
+2. 宁缺勿错：若没有任何 reality 与提问相关（全新话题），必须输出空列表——空注入是合法且正确的结果，禁止硬选"最不无关"的 reality。
+3. 数量：0~3 个，按相关度降序。
+4. 只能引用候选列表中的 index，禁止编造列表外的 reality。
+
+【输出格式】（严格 JSON，不要 markdown 围栏）
+{{"selected": [{{"index": 0, "relevance": "承接理由（中文，说明与提问的工作关联）", "priority": 1}}]}}
+全新话题 → {{"selected": []}}"""
+
+
+def build_inject_prompt_reality(query: str, candidates: list[dict]) -> str:
+    """reality 候选格式化 → 注入拣选 prompt（决策 41 §2.4b）。"""
+    lines = []
+    for i, c in enumerate(candidates):
+        name = c.get("name", "")
+        hdl = c.get("hdl", "")
+        cs = c.get("current_status") or {}
+        goals = cs.get("goals") or []
+        state = cs.get("current_state") or []
+        parts = [f"[{i}] {str(name)[:60]}"]
+        if hdl:
+            parts.append(f"    hdl: {str(hdl)[:80]}")
+        if goals:
+            parts.append(f"    goals: {' | '.join(str(g)[:60] for g in goals[:3])}")
+        if state:
+            parts.append(f"    state: {' | '.join(str(s)[:60] for s in state[:3])}")
+        lines.append("\n".join(parts))
+    return INJECT_PROMPT_REALITY.format(query=query[:500], candidates="\n\n".join(lines))
+
+
+def _bigram_jaccard(a: str, b: str) -> float:
+    """字符 bigram jaccard（embed 失败时的字面兜底；字符重叠≠语义相关，仅兜底）。"""
+    def bigrams(s):
+        s = (s or "").lower().replace(" ", "").replace("-", "")
+        return {s[i:i + 2] for i in range(len(s) - 1)}
+    A, B = bigrams(a), bigrams(b)
+    if not A or not B:
+        return 0.0
+    return len(A & B) / len(A | B)
+
+
+def _exclude_session_realities(rows, exclude_session_id: Optional[str]) -> list:
+    """剔除 source_strands 含当前 session 的 reality（防自注入）。
+
+    列序：(reality_id, name, hdl, current_status, timeline, centroid_json,
+           query_centroid_json, source_strands) → source_strands 是第 8 列（index 7）。
+    """
+    if not exclude_session_id:
+        return rows
+    filtered = []
+    for row in rows:
+        ss_raw = row[7]
+        hit = False
+        if ss_raw:
+            try:
+                ss = json.loads(ss_raw)
+                if isinstance(ss, dict) and exclude_session_id in ss:
+                    hit = True
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if not hit:
+            filtered.append(row)
+    return filtered
+
+
+def pick_injection_realities(
+    query: str,
+    q_emb: list,
+    profile: str,
+    limit: int = 3,
+    exclude_session_id: Optional[str] = None,
+    db_path=None,
+) -> list[dict]:
+    """reality 注入拣选（决策 41 §2.4b：提问云形心散度距离主路径）。
+
+    ① 全量计算 d(q, C_r) = 1 - cos(q_emb, query_centroid_r)
+    ② 范围预筛 d ≤ THETA_MAX（0.5，安全网）
+    ③ 距离升序 → 截断 top-15（QUERY_CLOUD_TOP_K，4B 输入预算）
+    ④ 4B 拣选 top-K（工作关联判定，允许空注入）
+    ⑤ 4B 失败 → 距离 top-3 兜底；q_emb 不可用 → jaccard 字符兜底；
+       全部失败 → 余弦 fallback（query_realities_by_semantics）
+
+    Returns:
+        reality dict 列表（reality_id/name/hdl/current_status/timeline），
+        空列表 = 空注入（合法）或全库无匹配。
+    """
+    from ca.store import _get_topic_conn
+
+    conn = _get_topic_conn(db_path)
+    try:
+        cur = conn.execute(
+            "SELECT reality_id, name, hdl, current_status, timeline, "
+            "       centroid_json, query_centroid_json, source_strands "
+            "FROM realities "
+            "WHERE profile = ? "
+            "  AND (query_centroid_json IS NOT NULL AND query_centroid_json != 'null' "
+            "       OR centroid_json IS NOT NULL AND centroid_json != 'null') "
+            "ORDER BY updated_at DESC",
+            (profile,),
+        )
+        rows = cur.fetchall()
+    except Exception as exc:
+        logger.warning("[CA_INJECT] read realities failed: %s", exc)
+        return []
+    rows = _exclude_session_realities(rows, exclude_session_id)
+    if not rows:
+        return []
+
+    def _to_candidate(row):
+        try:
+            cs = json.loads(row[3]) if row[3] else {}
+        except (json.JSONDecodeError, TypeError):
+            cs = {}
+        try:
+            tl = json.loads(row[4]) if row[4] else []
+        except (json.JSONDecodeError, TypeError):
+            tl = []
+        return {
+            "index": None,  # 排序后赋值
+            "reality_id": row[0],
+            "name": row[1] or "",
+            "hdl": row[2] or "",
+            "current_status": cs,
+            "timeline": tl,
+            "centroid": row[5],
+            "query_centroid": row[6],
+        }
+
+    candidates = [_to_candidate(r) for r in rows]
+
+    # ── ① 主路径：提问云形心距离（q_emb 可用）──
+    if q_emb:
+        scored = []
+        for c in candidates:
+            qc = None
+            try:
+                qc = json.loads(c["query_centroid"]) if c["query_centroid"] else None
+            except (json.JSONDecodeError, TypeError):
+                qc = None
+            if not qc:
+                continue
+            d = 1.0 - _cosine(q_emb, qc)
+            c["_d"] = d
+            scored.append(c)
+        if scored:
+            scored.sort(key=lambda x: x["_d"])
+            in_range = [c for c in scored if c["_d"] <= THETA_MAX]
+            budget = (in_range or scored)[:QUERY_CLOUD_TOP_K]
+            for i, c in enumerate(budget):
+                c["index"] = i
+            picked = _pick_by_4b(query, budget, limit)
+            if picked is not None:
+                return picked
+            logger.info("[CA_INJECT] 4B reality 拣选失败 → 距离 top-%d 兜底", limit)
+            return budget[:limit]
+
+    # ── ② jaccard 字符兜底（q_emb 不可用 / 无形心）──
+    scored_j = []
+    for c in candidates:
+        j = max(_bigram_jaccard(query, c["name"]),
+                _bigram_jaccard(query, c["hdl"]))
+        c["_d"] = 1.0 - j
+        scored_j.append(c)
+    scored_j.sort(key=lambda x: x["_d"])
+    for i, c in enumerate(scored_j[:QUERY_CLOUD_TOP_K]):
+        c["index"] = i
+    picked = _pick_by_4b(query, scored_j[:QUERY_CLOUD_TOP_K], limit)
+    if picked is not None:
+        return picked
+    return scored_j[:limit]
+
+
+def _pick_by_4b(query: str, budget: list[dict], limit: int) -> Optional[list]:
+    """4B 拣选（工作关联判定）。None = 4B 不可用/解析失败（调用方兜底）。"""
+    try:
+        from ca.topic_summary import call_llm_raw
+        prompt = build_inject_prompt_reality(query, budget)
+        raw = call_llm_raw(prompt, num_predict=INJECT_MAX_TOKENS,
+                           temperature=0.1)
+    except Exception as exc:
+        logger.warning("[CA_INJECT] reality 4B call failed: %s", exc)
+        return None
+    if raw is None:
+        return None
+    picked = parse_inject_response(raw, len(budget))
+    if picked is None:
+        return None
+    picked_set = set(picked)
+    result = [
+        {"reality_id": c["reality_id"], "name": c["name"], "hdl": c["hdl"],
+         "current_status": c["current_status"], "timeline": c["timeline"]}
+        for c in budget if c["index"] in picked_set
+    ]
+    logger.info("[CA_INJECT] reality 4B picked %d/%d (query=%.40s)",
+                len(result), len(budget), query)
+    return result[:limit]
