@@ -44,6 +44,7 @@ plugins/ca_assembler/
 - **不硬编码 `~/.hermes` 路径** — 使用 `get_hermes_home()` 获取 CA cache 目录
 - **术语唯一** — Elm/Fct/Hdl（禁用 L0/L1/L2）
 - **theme 语义定义（用户设计哲学）** — theme = 多个语义独立但工作中有关联的事物的集合（工作线集合，**非语义簇**）；语义与工作关联是正交维度（向量测语义、4B 判工作）。设计从根本目的出发（theme 目的=切换时提供有效背景数据），先立衡量标准再定参数。
+- **reality 已取代 theme（v7 决策 41，2026-08-07）** — theme 层退役，现实工作对象存 `realities` 表；归并 `run_reality_merge`（S 匹配分）、注入 `pick_injection_realities`（提问云形心）、graphify 节点 `reality_{id}`。改 reality 链路代码前必读 `docs/wiki/decisions/41-reality-production-migration.md` + OV `design/41-reality-production-migration.md`。
 - **向量=负向排除器** — 必要不充分：用词完全不相关必非同事物，向量近≠一定同。
 - **4B+代码协作设计（用户偏好）** — 先理清入口/出口数据模型再动手，不靠反复迭代调参找方向（"仔细思考，不要来回折腾"）。Fct 数据模型必须含 OODA、stage_tag 等结构化元信息（非纯文本串）：4B 一份完整数据调一次做跨轮融合+事实提炼+title，代码做精确提取兜底。分工：代码=结构化提取/兜底，LLM=语义融合。
 - **Fct 按 OODA 四段存储** — Fct 数据按 OODA 四段（现象/背景/决策/后续）组织，topic summarizer 必须保留四段结构，勿被清理逻辑剥离（用户强调过的数据模型约束）。
@@ -76,7 +77,7 @@ hermes config get context.engine
 > 本文件只保留入口级信息。话题摘要链路关键经验（Jaccard 铁则 / topic_split 阈值 / merge 策略 / theme 链路 / token 配置 / 路径解析链 / hdl 规范）、部署与多 profile 同步、Codex 修复工作流等**设计/调试细节已迁移至 OpenViking 技术文档**：
 
 - **完整技术参考**：`viking://resources/projects/context-assembler/AGENTS/AGENTS.md`
-- **决策页**（按主题）：`docs/wiki/decisions/35-strand-multi-affair-summarization.md`（strand 摘要 / hdl 规范 / Jaccard 铁则）、`docs/wiki/decisions/36-theme-wiki-generation.md`（theme 归并 / 注入 / 链路经验）
+- **决策页**（按主题）：`docs/wiki/decisions/35-strand-multi-affair-summarization.md`（strand 摘要 / hdl 规范 / Jaccard 铁则）、`docs/wiki/decisions/36-theme-wiki-generation.md`（theme 归并 / 注入 / 链路经验）、`docs/wiki/decisions/37-reality-restructure.md` / `38-reality-graph-inject-merge.md` / `39-reality-member-clouds.md` / `40-flash-reprocess-pilot.md` / `41-reality-production-migration.md`（**生产 reality 化，theme 退役**）
 
 改代码前必读对应决策页（尤其涉及话题摘要链路、theme 归并、独立脚本跑 reprocess/evaluate 时）。
 
