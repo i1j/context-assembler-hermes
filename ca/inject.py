@@ -222,7 +222,7 @@ def pick_injection_themes(
         from ca.topic_summary import call_llm_raw
         prompt = build_inject_prompt(query, cands)
         raw = call_llm_raw(prompt, num_predict=INJECT_MAX_TOKENS,
-                           temperature=0.1)
+                           temperature=0.1, max_retries=1)
     except Exception as exc:
         logger.warning("[CA_INJECT] LLM call failed: %s", exc)
         raw = None
@@ -424,7 +424,12 @@ def pick_injection_realities(
         if scored:
             scored.sort(key=lambda x: x["_d"])
             in_range = [c for c in scored if c["_d"] <= THETA_MAX]
-            budget = (in_range or scored)[:QUERY_CLOUD_TOP_K]
+            if not in_range:
+                # 决策 41 §2.4b ④：范围空 → 空注入宁缺勿错（θ_max 安全网不可绕过）
+                logger.info("[CA_INJECT] query cloud in-range empty "
+                            "(θ_max=%.2f), empty injection", THETA_MAX)
+                return []
+            budget = in_range[:QUERY_CLOUD_TOP_K]
             for i, c in enumerate(budget):
                 c["index"] = i
             picked = _pick_by_4b(query, budget, limit)
@@ -455,7 +460,7 @@ def _pick_by_4b(query: str, budget: list[dict], limit: int) -> Optional[list]:
         from ca.topic_summary import call_llm_raw
         prompt = build_inject_prompt_reality(query, budget)
         raw = call_llm_raw(prompt, num_predict=INJECT_MAX_TOKENS,
-                           temperature=0.1)
+                           temperature=0.1, max_retries=1)
     except Exception as exc:
         logger.warning("[CA_INJECT] reality 4B call failed: %s", exc)
         return None

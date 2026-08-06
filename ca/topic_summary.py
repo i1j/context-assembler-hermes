@@ -213,11 +213,16 @@ def call_llm_raw(
     prompt: str,
     num_predict: Optional[int] = None,
     temperature: Optional[float] = None,
+    max_retries: Optional[int] = None,
 ) -> Optional[str]:
     """4B 原始调用（通用）：返回响应文本，不做 JSON 解析。
 
     v6.5: theme 链路（ca/theme.py）复用此请求逻辑；
     与 call_llm_for_summary 的区别仅在返回 raw text（由调用方自行解析）。
+
+    max_retries: 覆盖 Config.LLM_MAX_RETRIES 的重试次数。
+        用户消息热路径（reality 注入 4B 拣选，BUG-08）传 1：
+        单次不重试，失败快速降级（余弦/jaccard 兜底或空注入）。
     """
     import urllib.request
 
@@ -240,7 +245,9 @@ def call_llm_raw(
     payload = json.dumps(req_body).encode()
 
     response_text = ""
-    for attempt in range(Config.LLM_MAX_RETRIES):
+    retries = (Config.LLM_MAX_RETRIES if max_retries is None
+               else max(1, int(max_retries)))
+    for attempt in range(retries):
         try:
             req = urllib.request.Request(
                 f"{Config.LLM_ENDPOINT.rstrip('/')}/api/generate",

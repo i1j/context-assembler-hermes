@@ -22,11 +22,15 @@ CA 插件多个模块需要配置参数（嵌入后端、摘要模型、尾巴�
 
 | 配置项 | 环境变量 | 默认值 | 说明 |
 |--------|----------|--------|------|
-| 尾巴保护区 token 数 | `CA_PROTECT_TAIL_TOKENS` | 20000 | 保护最后 N user 轮 |
+| 尾巴保护区 token 数 | `CA_PROTECT_TAIL_TOKENS` | 10000 | 保护最后 N user 轮（无 settings.yaml 时兜底；settings.yaml 默认 20000） |
 | 最大对话轮数 | `CA_MAX_TURNS` | 1000 | 超过则丢弃最早 |
-| 嵌入后端 | `CA_EMBEDDING_BACKEND` | `ollama` | `ollama` / `sentence-transformers` |
-| 摘要模型 | `CA_SUMMARY_MODEL` | `qwen3:4b` | LLM 摘要用模型 |
-| 嵌入模型 | `CA_EMBEDDING_MODEL` | `qwen3-embedding-0.6B` | 向量嵌入用 |
+| 嵌入后端 | `CA_EMBED_BACKEND` | `ollama` | `ollama` / `sentence-transformers` / `fallback` |
+| 摘要模型 | `CA_LLM_MODEL` | `qwen3-4b-instruct:latest` | LLM 摘要用模型 |
+| 嵌入模型 | `CA_EMBED_MODEL` | `dengcao/Qwen3-Embedding-0.6B:Q8_0` | 向量嵌入用 |
+| 嵌入端点 | `CA_EMBED_ENDPOINT` | `http://127.0.0.1:11435` | Ollama 嵌入服务地址 |
+| 嵌入超时 | `CA_EMBED_TIMEOUT` | 10 | 单次嵌入请求超时（秒） |
+| 嵌入重试 | `CA_EMBED_MAX_RETRIES` | 2 | 嵌入失败重试次数 |
+| 批量并行超时 | `CA_EMBED_BATCH_PARALLEL_TIMEOUT` | 15 | 批量并行嵌入单条超时（秒） |
 
 ## 关键约束
 

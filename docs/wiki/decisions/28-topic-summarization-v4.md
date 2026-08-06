@@ -141,7 +141,7 @@ topic_switch 时从 turn_stream 收集该话题块已落盘的 Fct 行：
 > 每个 strand 写入 `strand_summaries` 表独立一行（不向前兼容，旧 topic_summaries 数据丢弃）。
 > A-stage 评级机制不动（沿用话题块 grade）。
 
-### L0 — 元数据（不经过 LLM，CA 本地存储）
+### Elm — 元数据（不经过 LLM，CA 本地存储）
 
 | 字段 | 来源 | 说明 |
 |------|------|------|
@@ -151,7 +151,7 @@ topic_switch 时从 turn_stream 收集该话题块已落盘的 Fct 行：
 | `profile` | 元数据 | Hermes profile 隔离 |
 | `status` | 规则 | completed / **skip**（根据 4B consumable 判定 + 代码兜底，详见「空洞内容保护」） |
 
-### L1 — strand 载荷（post_llm_call 时一次 4B 调用，每条 strand 一行）
+### Fct — strand 载荷（post_llm_call 时一次 4B 调用，每条 strand 一行）
 
 | 字段 | 操作 | 输入源 | 产出方式 |
 |------|------|--------|---------|
@@ -291,7 +291,7 @@ topic_switch 时从 `ca_topics.db` 同步召回已有话题摘要：
 | v3 | 2026-07-27 | 初始设计，取代 OV VLM 摘要 |
 | v4 | 2026-07-27 | 修订：输入改为纯Fct（去除Elm）；时序改为异步（不再同步阻塞）；存储改为共享DB `ca_topics.db`；user_requests 改为规则；新增 session 关闭问题 + turn 1 补缺方案；召回改为本地 query |
 | v5 | 2026-07-29 | 新增 `consumable` 字段 + 空洞内容保护：4B 输出新增布尔判定，代码兜底检查标题/内容空，不达标则写 `status=skip` 而非 `completed`，跳过 wiki merge |
-| v6 | 2026-07-29 | Merge 改为 Jaccard 召回 + 4B 判断（v5.12）：移除 centroid cosine 匹配，改用 `_jaccard_text`（阈值=TOPIC_JACCARD_ENTRY=0.02，与分割统一）。4B 一次调用完成"是否同话题"判断 + 归并 + `has_new_info` 标记。结果：MERGE（有增量） / SKIP（仅记映射） / CREATE（无匹配）。Embedder 维度锁定：`_EMBED_DIM=1024`，`_detect_dimension` 增加维度一致性验证。清理旧数据（17 条 32/48 维 topic_summaries + 4 条 topic_wiki）。 |
+| v6 | 2026-07-29 | Merge 改为 Jaccard 召回 + 4B 判断（v5.12）：移除 centroid cosine 匹配，改用 `_jaccard_text`（阈值=TOPIC_JACCARD_ENTRY=0.04，与分割统一）。4B 一次调用完成"是否同话题"判断 + 归并 + `has_new_info` 标记。结果：MERGE（有增量） / SKIP（仅记映射） / CREATE（无匹配）。Embedder 维度锁定：`_EMBED_DIM=1024`，`_detect_dimension` 增加维度一致性验证。清理旧数据（17 条 32/48 维 topic_summaries + 4 条 topic_wiki）。 |
 | v7 | 2026-07-29 | 决策：entry 内部增删改 + entry 删除推迟到"自我分析改进"流程（空闲时结合 graphify 循环执行）。`judge_and_merge_wiki` 不做内精炼，仅做判断+合并+输入级去重。 |
 | v8 | 2026-07-31 | 注入预算 + 迭代提炼：取消 prompt 条数软上限作为体积控制的唯一手段（长话题 6+ 轮 avg 10.63 条被截断）；新增 `max_chars` 注入预算（默认 2000 字符）+ 输入分批记账 remaining + 最多 3 轮迭代融合（轮次喂完即完成，非必跑 3 轮）+ hdl 兜底（质量过滤：len≥8 且非无意义词）。代码层做预算判断与兜底，4B 做融合压缩。 |
 

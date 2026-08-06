@@ -35,6 +35,9 @@ CA 插件需要覆盖从 Hook 接收到 DB 写入到 conv_history 装配的完�
 - CE 管线不修改 state.db（方向 B 约束）
 - bg_review 跳过所有 CA 处理
 
-## 统计（v5.10）
+## 统计（2026-08-07 基线）
 
-416 个测试用例，分布在 `tests/stage/`、`tests/unit/`、`tests/integration/`。
+789 个测试用例（787 passed / 1 skipped / 1 xfailed），分布在
+`tests/stage/`、`tests/unit/`、`tests/plugin/`、`tests/store/`、
+`tests/config/`、`tests/parse/` 等目录。无独立 `tests/integration/` 目录，
+端到端覆盖由 plugin/stage 层承担。

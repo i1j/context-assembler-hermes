@@ -25,7 +25,9 @@ F-stage 异步摘要（per-fin daemon 线程）在引擎重置或会话切换时
 
 ### L4 空闲精炼管线（v5.14 新增）
 
-L4 是位于 LStageMixin 中的 **空闲精炼守护线程**（daemon=True），在上次精炼以来的跨会话新对话轮数达到阈值后启动精炼轮次。
+L4 是插件级 **`IdleRefinementDaemon`**（`ca/refinement.py`，daemon=True，由 plugin
+在 session-start 懒启动），在上次精炼以来的跨会话新对话轮数达到阈值后启动精炼轮次。
+实现不在 LStageMixin（`ca/lstage.py` 仅引擎生命周期管理）。
 
 **触发条件**：`(全局所有 session 的 turn_stream 最大轮次之和 - last_refined_turn) >= REFINEMENT_MIN_NEW_TURNS`
 
@@ -68,6 +70,7 @@ LStageMixin
 
 L-stage 在 v4.4.0 最初设计为**双独立后台守护线程**（`BackfillThread`），轮询 `_assemble_status=1` 的未摘要行，含对话/工具双线程 + 限速 2/s+5/s + 3 次失败跳过。v5.10 后该机制被 **F-stage per-fin 触发模型**（`process_turn_f_stage` 启动 daemon 线程）完全取代。
 
-v5.14 新增 **L4 空闲精炼管线**，作为独立守护线程运行于 LStageMixin 内，专注 topic_wiki 的自我维护。
+v5.14 新增 **L4 空闲精炼管线**，作为独立守护线程实现于 `ca/refinement.py`
+（`IdleRefinementDaemon`），专注 topic_wiki 的自我维护。
 
 详见：[34-空闲精炼管线](../decisions/34-idle-refinement.md)

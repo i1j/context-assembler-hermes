@@ -53,6 +53,16 @@ class AStageMixin:
             total_chars += len(msg.get("reasoning_content", "") or "")
         return total_chars // 4  # chars → token 粗估
 
+    @staticmethod
+    def _estimate_turn_tokens(rows: list) -> int:
+        """字符粗估单个 turn_stream turn 的 token（Elm + tool 原文，决策 13 预算）。"""
+        total_chars = 0
+        for row in rows:
+            total_chars += len(str(row.get("Elm") or ""))
+            total_chars += len(str(row.get("tool_calls_json") or ""))
+            total_chars += len(str(row.get("args_json") or ""))
+        return total_chars // 4  # chars → token 粗估（与 _estimate_conv_tokens 一致）
+
     def _build_conv_history_v6(
         self,
         topic_mgr: Any,
@@ -60,7 +70,8 @@ class AStageMixin:
     ) -> List[Dict]:
         """v6：从 turn_stream DB 构造 conv_history（方向 B）。替代 mutation 逻辑。
 
-        尾部保护区（最后 2 个 user turn）全 Elm，
+        尾部保护区（决策 13：最后 CA_PROTECT_TAIL_TOKENS token 对应的 user 轮；
+        下限最后 2 轮，整段会话超预算时从末端向前按预算扩展）全 Elm，
         保护区外按话题级别 + 行类型定级：
 
             ┌──────────┬──────────┬─────────────┐
@@ -99,15 +110,30 @@ class AStageMixin:
             t = row["turn"]
             turns.setdefault(t, []).append(row)
 
-        # 3. 尾部保护区：最后 2 个 user turn（1-indexed）
+        # 3. 尾部保护区（决策 13）：从末端向前扫描，保护最后
+        #    CA_PROTECT_TAIL_TOKENS token 对应的 user 轮。
+        #    下限 = 最后 2 轮（既有行为契约）；整段会话估算 token 超过预算时，
+        #    从倒数第 3 轮起向前扩展保护区，直到预算用尽。
         user_turns = sorted([t for t in turns.keys() if any(
             r["role"] == "user" for r in turns[t]
         )])
         tail_set: Set[int] = set()
-        if len(user_turns) >= 2:
+        if user_turns:
             tail_set = set(user_turns[-2:])
-        elif len(user_turns) == 1:
-            tail_set = set(user_turns)
+            total_tokens = sum(
+                self._estimate_turn_tokens(turns.get(t, []))
+                for t in user_turns
+            )
+            if (len(user_turns) > 2
+                    and total_tokens > Config.PROTECT_TAIL_TOKENS):
+                remaining = max(1, Config.PROTECT_TAIL_TOKENS)
+                for turn_num in reversed(user_turns[:-2]):
+                    tok = self._estimate_turn_tokens(turns.get(turn_num, []))
+                    if tok <= remaining:
+                        tail_set.add(turn_num)
+                        remaining -= tok
+                    else:
+                        break
 
         # 4. 逐 turn 构造消息
         conv_hist: List[Dict] = []

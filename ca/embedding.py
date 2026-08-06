@@ -19,6 +19,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any, Dict, List, Optional
 
+from .config import Config
+
 logger = logging.getLogger(__name__)
 
 _EMBED_DIM = int(os.getenv("CA_EMBED_DIM", "1024"))  # qwen3-embedding:0.6b 固定 1024 维
@@ -33,14 +35,16 @@ except ImportError:
 
 
 class EmbeddingClient:
-    _OLLAMA_TIMEOUT = float(os.getenv("CA_EMBED_TIMEOUT", "10"))
-    _OLLAMA_MAX_RETRIES = int(os.getenv("CA_EMBED_MAX_RETRIES", "0"))
-    _BATCH_PARALLEL_TIMEOUT = float(os.getenv("CA_EMBED_BATCH_TIMEOUT", "15"))
+    # D9: 统一从 Config 读取（Config 本身由 环境变量 > settings.yaml > 内建 覆盖），
+    # 消除 getenv 绕过导致的默认值不一致（CA_EMBED_MAX_RETRIES 默认 0 vs 2 等）。
+    _OLLAMA_TIMEOUT = float(Config.EMBED_TIMEOUT)
+    _OLLAMA_MAX_RETRIES = int(Config.EMBED_MAX_RETRIES)
+    _BATCH_PARALLEL_TIMEOUT = float(Config.EMBED_BATCH_PARALLEL_TIMEOUT)
 
     def __init__(self, backend="", model="", url=""):
-        self._backend = backend or os.getenv("CA_EMBED_BACKEND", "ollama")
-        self._model = model or os.getenv("CA_EMBED_MODEL", "qwen3-embedding:0.6b")
-        self._url = (url or os.getenv("CA_EMBED_ENDPOINT", "http://127.0.0.1:11435")).rstrip("/")
+        self._backend = backend or Config.EMBED_BACKEND
+        self._model = model or Config.EMBED_MODEL
+        self._url = (url or Config.EMBED_ENDPOINT).rstrip("/")
         self._client = None
         self._dim = _EMBED_DIM
         self._dim_detected = False

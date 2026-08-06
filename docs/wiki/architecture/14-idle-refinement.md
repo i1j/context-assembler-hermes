@@ -21,7 +21,9 @@ L2 wiki merge + L3 graphify sync 仅在 session start 触发。累积的对话�
 
 ## 设计方案
 
-L4 是 CA 的空闲期自我维护管线，以 daemon 线程形式附加在 LStageMixin，**不是**消息处理路径的一部分。
+L4 是 CA 的空闲期自我维护管线，实现为插件级 `IdleRefinementDaemon`
+（`ca/refinement.py`，由 plugin 在 session-start 懒启动），**不是**消息处理路径的一部分，
+也不再依附 LStageMixin（LStageMixin 仅保留引擎生命周期管理）。
 
 ### 触发
 
@@ -49,7 +51,7 @@ L4 是 CA 的空闲期自我维护管线，以 daemon 线程形式附加在 LSta
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `REFINEMENT_ENABLED` | True | 总开关 |
+| `REFINEMENT_ENABLED` | False | 总开关（决策 36 起默认停用；启用需显式设置） |
 | `REFINEMENT_CHECK_INTERVAL` | 120s | 守护线程休眠间隔 |
 | `REFINEMENT_MIN_NEW_TURNS` | 50 | 新对话轮触发阈值（≈2× 平均会话长度） |
 | `REFINEMENT_MAX_DURATION` | 300s | 单轮最大耗时 |

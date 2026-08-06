@@ -175,7 +175,7 @@ def _compute_health_score(entry: dict, topic_count: int) -> float:
 
 ```python
 # ── L4 空闲精炼 ──
-REFINEMENT_ENABLED: ClassVar[bool] = True
+REFINEMENT_ENABLED: ClassVar[bool] = False
 REFINEMENT_CHECK_INTERVAL: ClassVar[int] = int(
     os.getenv("CA_REFINEMENT_CHECK_INTERVAL", "120"))
 REFINEMENT_MIN_NEW_TURNS: ClassVar[int] = int(
@@ -267,4 +267,3 @@ def mark_session_inactive(self, session_id: str):
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | v1 | 2026-07-30 | 初始设计：Phase 1 基础设施 + 内精炼 + 交叉验证 |
-

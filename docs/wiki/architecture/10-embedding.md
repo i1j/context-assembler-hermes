@@ -24,4 +24,5 @@ source_files: ["ca/embedding.py"]
 - **CachedEmbeddingClient**：缓存层包装，避免重复嵌入相同文本
 - **余弦相似度自实现**：numpy-free，零外部依赖
 - **sqlite-vec 已弃用**（v4.2）：外部依赖二进制兼容性问题
-- **全量嵌入**：Hdl+Fct 均为 4096 维 BLOB 存储
+- **全量嵌入**：Hdl/Fct 嵌入均为 1024 维（qwen3-embedding:0.6b），
+  以 JSON 数组文本存储（`centroid_json TEXT`）

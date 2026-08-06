@@ -100,7 +100,7 @@ flowchart LR
 | **38** | **[图模型+注入/归并闭环](decisions/38-reality-graph-inject-merge.md)** | v7 | 检索 | cooccurrence, theme, inject |
 | 38a | [注入侧 4B 拣选 prompt](decisions/38-inject-prompt.md) | v7 | 检索 | inject |
 | **39** | **[Reality 成员云表征](decisions/39-reality-member-clouds.md)** | v7 | 检索 | inject, theme |
-| **40** | **[Flash 全链路重跑 Pilot](40-flash-reprocess-pilot.md)** | v7 | 任务书 | reprocess |
+| **40** | **[Flash 全链路重跑 Pilot](decisions/40-flash-reprocess-pilot.md)** | v7 | 任务书 | reprocess |
 | **41** | **[生产 reality 化迁移 + graphify 增量旁路改造](decisions/41-reality-production-migration.md)** | v7 | 迁移/检索 | realities, inject, graphify, refinement |
 
 ## 相关资源

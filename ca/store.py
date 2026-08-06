@@ -362,12 +362,6 @@ def max_turn_v5(store, session_id: str) -> int:
         return 0
 
 
-# ── state.db dedup trigger (CA plugin-internal, zero Hermes agent changes) ──
-
-_DEDUP_INSTALLED: Set[str] = set()
-_DEDUP_LOCK = threading.Lock()
-
-
 # ═══════════════════════════════════════════════════════════
 # v5.10 — topic_summaries 共享 DB（取代 OV Memory Provider）
 # ═══════════════════════════════════════════════════════════
@@ -1363,104 +1357,6 @@ def find_sessions_by_mtime(ca_cache_dir: Optional[Path] = None, max_results: int
         reverse=True,
     )
     return [f.stem for f in db_files[:max_results]]
-
-
-def install_state_dedup_trigger(state_db_path: str | Path) -> bool:
-    """Install AFTER INSERT dedup trigger on Hermes state.db.
-
-    Prevents duplicate user messages caused by Hermes Web UI bridge's
-    _prepersist_user_message double-write (bridge writes first, then
-    agent writes again via build_turn_context -> _flush_messages_to_session_db).
-
-    Uses AFTER INSERT + DELETE older duplicate — the INSERT succeeds normally
-    (no exception, RETURNING rowid works), then the older (bridge-written)
-    row is silently removed. The agent's row (with _DB_PERSISTED_MARKER)
-    always survives.
-
-    Idempotent — safe to call on every session start.
-    Lives entirely within CA plugin — zero Hermes agent source changes.
-
-    Args:
-        state_db_path: Path to Hermes state.db
-                       (typically ~/.hermes/profiles/{profile}/state.db)
-
-    Returns:
-        True if trigger was newly installed, False if already installed or error.
-    """
-    state_db = Path(state_db_path)
-    key = str(state_db.resolve())
-
-    with _DEDUP_LOCK:
-        if key in _DEDUP_INSTALLED:
-            return False  # Fast path — already done this process lifetime
-
-        if not state_db.exists():
-            logger.warning("[CA] state.db not found at %s, skipping dedup trigger", state_db)
-            return False
-
-        conn = sqlite3.connect(str(state_db), timeout=5)
-        try:
-            cursor = conn.execute(
-                "SELECT count(*) FROM sqlite_master"
-                " WHERE type='trigger' AND name='dedup_cleanup_user_msg'"
-            )
-            if cursor.fetchone()[0] > 0:
-                _DEDUP_INSTALLED.add(key)
-                logger.info("[CA] state.db dedup trigger already exists (prior install)")
-                return False
-
-            # 1. Clean existing duplicates first
-            cursor = conn.execute("""
-                DELETE FROM messages WHERE rowid IN (
-                    SELECT m2.rowid FROM messages m1
-                    JOIN messages m2 ON m2.session_id = m1.session_id
-                      AND m2.role = 'user'
-                      AND m2.content = m1.content
-                      AND ABS(m2.timestamp - m1.timestamp) < 1.0
-                      AND m2.rowid > m1.rowid
-                )
-            """)
-            deleted = conn.total_changes
-            conn.commit()
-
-            # 2. Install AFTER INSERT trigger
-            #    On duplicate user msg insert, deletes the older row.
-            #    Agent's newer row (with _DB_PERSISTED_MARKER) survives.
-            conn.executescript("""
-                CREATE TRIGGER IF NOT EXISTS dedup_cleanup_user_msg
-                AFTER INSERT ON messages
-                WHEN NEW.role = 'user'
-                BEGIN
-                    DELETE FROM messages
-                    WHERE rowid IN (
-                        SELECT m.rowid FROM messages m
-                        WHERE m.session_id = NEW.session_id
-                          AND m.role = 'user'
-                          AND m.content = NEW.content
-                          AND ABS(m.timestamp - NEW.timestamp) < 1.0
-                          AND m.rowid < NEW.rowid
-                    );
-                END;
-            """)
-            conn.commit()
-
-            _DEDUP_INSTALLED.add(key)
-            if deleted > 0:
-                logger.info("[CA] state.db dedup trigger installed, "
-                            "cleaned %d existing duplicate rows", deleted)
-            else:
-                logger.info("[CA] state.db dedup trigger installed "
-                            "(no existing dupes)")
-            return True
-
-        except sqlite3.Error as exc:
-            logger.warning("[CA] Failed to install state.db dedup trigger: %s", exc)
-            return False
-
-        finally:
-            conn.close()
-
-
 # ═══════════════════════════════════════════════════════════
 # v5.11 — wiki 归并 + 语义召回  API
 # ═══════════════════════════════════════════════════════════

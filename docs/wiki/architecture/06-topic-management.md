@@ -18,13 +18,16 @@ source_files: ["topic_manager.py"]
 
 - **detect(turn, ca_rows, user_msg)**：pre_llm_call 中调用，检测当前话题
 - **3 种等级**：ACT（当前活跃）、REL（历史相关）、FAR（无关）
-- **切换检测**：新旧话题相似度 < 阈值 → `grade_on_switch()` → 打包旧话题 OV 提交
+- **切换检测**：新旧话题相似度 < 阈值 → `grade_on_switch()` → 旧话题块排队
+  `_run_topic_summarize`（strand 生成 + reality 归并）
 - **缓存**：增量缓存 topic→grade 映射，切换间冻结保障 prompt caching 稳定
 - **bg_review 跳过**：检测到 bg_review 会话时完全跳过话题处理
 
-## OV 话题提交
+## 话题摘要与 reality 归并
 
-话题切换时打包旧话题完整 Elm（原始消息）提交到 OpenViking，注册为可搜索资源。
+话题切换时旧话题块排队后台 `_run_topic_summarize`：读各轮 Fct → 4B 生成 strand →
+同步 `run_reality_merge` 归并到现实工作对象。OV 话题提交（`_fire_ov_submit`）
+已删除，本地 strand_summaries + realities 表替代。
 
 ## Jaccard 分割输入归一化（v6.3）
 

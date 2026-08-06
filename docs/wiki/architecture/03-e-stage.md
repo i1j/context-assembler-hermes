@@ -29,4 +29,6 @@ Hermes 对话系统的 Hook 生命周期包含 5 个阶段。需要确定每个 
 - **无 buffer** — 每条消息立即写入 turn_stream
 - **无回滚** — 一行写入即不可撤销
 - **Tool 占位行** — `post_api_request` 为每个 tool_call 写入 `role='tool', status='pending'`
+- **纯对话轮跳过** — `post_api_request` 在无 tool_defs 且 finish_reason != `tool_calls`
+  时直接 return，不写 thought 行（纯对话轮由 `post_llm_call` 的 fin 行承载）
 - **幂等** — 同一 (turn,seq) 不会重复写入

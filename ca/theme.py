@@ -395,6 +395,7 @@ def find_s_candidates(
     beta: float = 0.8,
     r_threshold: float = 0.5,
     top_k: int = 3,
+    id_key: str = "theme_id",
 ) -> list[dict]:
     """S 匹配分候选生成（决策 38 §五）：加权平均图距离，排除 S>R，升序 top-K。
 
@@ -411,12 +412,13 @@ def find_s_candidates(
 
     Returns:
         候选列表（含 s_score 字段，升序），空 = 无候选（strand 应 new）。
+        候选 dict 的 id 键与 id_key 一致（theme 链路 theme_id；reality 链路 reality_id）。
     """
     if not anchor_themes or not themes:
         return []
     cooc_edges = cooc_edges or {}
-    anchors = [t.get("theme_id") for t in anchor_themes
-               if isinstance(t, dict) and t.get("theme_id") is not None]
+    anchors = [t.get(id_key) for t in anchor_themes
+               if isinstance(t, dict) and t.get(id_key) is not None]
     if not anchors:
         return []
     fused = fused_ids or set()
@@ -430,7 +432,7 @@ def find_s_candidates(
 
     scored: list[dict] = []
     for t in themes:
-        rid = t.get("theme_id")
+        rid = t.get(id_key)
         if rid is None:
             continue
         ws, num = 0.0, 0.0
@@ -444,13 +446,16 @@ def find_s_candidates(
         s = ws / num if num > 0 else float("inf")
         if s <= r_threshold:
             scored.append({
-                "theme_id": rid,
+                id_key: rid,
                 "title": t.get("title", ""),
                 "overview": t.get("overview", ""),
+                # reality 类型候选透传 name/hdl（4B 决策输入可读性）
+                "name": t.get("name", ""),
+                "hdl": t.get("hdl", ""),
                 "s_score": s,
                 "_priority": int(rid) in anchors,  # 注入集内 reality（4B prompt 标注）
             })
-    scored.sort(key=lambda c: (c["s_score"], c["theme_id"]))
+    scored.sort(key=lambda c: (c["s_score"], c[id_key]))
     return scored[:top_k]
 
 

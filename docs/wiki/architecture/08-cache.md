@@ -14,16 +14,17 @@ source_files: ["ca/cache.py"]
 
 每次 A-stage 装配都需要频繁读取 Fct/Hdl 数据。引入内存缓存层减少 DB 查询次数和嵌入计算。
 
-## 六字典缓存
+## 四字典缓存（v6.0 后）
 
 | 缓存 | Key | 说明 |
 |------|-----|------|
 | `Hdls` | `int[turn]` | 对话轮 Hdl 文本 |
 | `Fcts` | `int[turn]` | 对话轮 Fct JSON |
-| `tool_Hdls` | `Tuple[int,int]` | 个体工具 Hdl |
-| `tool_Fcts` | `Tuple[int,int]` | 个体工具 Fct JSON |
-| `tool_group_Hdls` | `Tuple[int,int]` | 工具组 Hdl |
-| `tool_group_Fcts` | `Tuple[int,int]` | 工具组 Fct JSON |
+| `hdl_embeddings` | `int[turn]` | 对话轮 Hdl 嵌入向量 |
+| `fct_embeddings` | `int[turn]` | 对话轮 Fct 嵌入向量 |
+
+> 工具轮缓存（tool_Hdls/tool_Fcts/tool_group_*）已随方向 B 移除（v6.0），
+> 工具行不再进入 AssemblyCache。
 
 ## 关键约束
 

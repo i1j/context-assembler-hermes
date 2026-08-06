@@ -527,13 +527,13 @@ class CAContextAssemblerPlugin:
                             old_store = SQLiteStore(str(old_db_path))
                             old_max_turn = max_turn_v5(old_store, last_sid)
                             old_turns = list(range(1, old_max_turn + 1)) if old_max_turn > 0 else []
-                            old_store.close()
                             if old_turns:
                                 self._run_topic_summarize(last_sid, {
                                     "topic_id": last_tid,
                                     "turns": old_turns,
                                     "switch_turn": old_max_turn,
-                                })
+                                }, store=old_store)
+                            old_store.close()
                     except Exception as exc:
                         logger.warning("[CA_TOPIC_SUM] Backfill execution failed: %s", exc)
 
@@ -624,7 +624,8 @@ class CAContextAssemblerPlugin:
         logger.info("[CA_TOPIC_SUM] Thread started for topic %d (turns=%s)",
                     topic_data.get("topic_id"), topic_data.get("turns"))
 
-    def _run_topic_summarize(self, session_id: str, topic_data: Dict[str, Any]) -> None:
+    def _run_topic_summarize(self, session_id: str, topic_data: Dict[str, Any],
+                             store: Any = None) -> None:
         """后台线程执行话题摘要：等 F-stage → 读 Fct → 4B → 写 strand。
 
         v6.4: 摘要单元从话题块 → strand（一个话题块可写多条 strand）。
@@ -649,9 +650,11 @@ class CAContextAssemblerPlugin:
         except Exception:
             pass  # 超时不影响——用已有 Fct 数据
 
-        # 收集该话题块各轮的 Fct
-        from ca.store import collect_turn_fcts
-        turns_data = collect_turn_fcts(engine.store, session_id, turns)
+        # 收集该话题块各轮的 Fct（BUG-03/D6：backfill 传入旧会话 store，
+        # 否则查询 last_sid 恒空 → 空摘要兜底）
+        from ca.store import collect_turn_fcts, get_turn_ca_rows
+        read_store = store or engine.store
+        turns_data = collect_turn_fcts(read_store, session_id, turns)
         if not turns_data:
             logger.warning("[CA_TOPIC_SUM] No Fct data for topic %d, writing empty summary", topic_id)
             turns_data = [{"turn": t, "hdl": "", "changes": [], "stage_tags": []} for t in turns]
@@ -726,6 +729,18 @@ class CAContextAssemblerPlugin:
             st_hdl = st.get("hdl", "") or summary.get("hdl", "")
             st_turns = st.get("turns") or turns
             st_ooda = st.get("ooda") or {}
+            # v7 (决策 39): 块首提问快照 → 提问云增量维护。
+            # 来源 = strand.turns[0] 的 user Elm（决策 39 §六：strand.turns[0] 的 user 消息）。
+            first_query = ""
+            try:
+                _ft = (st_turns or turns)[0]
+                for _seq, _role, _fin, _tc, _elm, _fct, _hdl in get_turn_ca_rows(
+                        read_store, session_id, _ft):
+                    if _seq == 0 and _role == "user":
+                        first_query = str(_elm or "").strip()
+                        break
+            except Exception:
+                pass
             strand_id = write_strand_summary(
                 session_id, topic_id, profile,
                 hdl=st_hdl,
@@ -777,6 +792,7 @@ class CAContextAssemblerPlugin:
                 "changes": _flatten([st]),
                 "key_facts": summary.get("key_facts", []),
                 "theme_ref": st_ref,
+                "query_text": first_query,
             })
             written += 1
 
@@ -895,6 +911,7 @@ class CAContextAssemblerPlugin:
         if Config.TOPIC_SUMMARIZE_ENABLED:
             if self._pending_topic_summarize:
                 session_id = self._session_id
+                n_pending = len(self._pending_topic_summarize)  # BUG-06: clear 前计数
                 for pending in list(self._pending_topic_summarize):
                     threading.Thread(
                         target=self._run_topic_summarize,
@@ -903,7 +920,7 @@ class CAContextAssemblerPlugin:
                         name="CA-TopicSummarize",
                     ).start()
                 self._pending_topic_summarize.clear()
-                logger.info("[CA_TOPIC_SUM] Started %d summarize threads", len(self._pending_topic_summarize))
+                logger.info("[CA_TOPIC_SUM] Started %d summarize threads", n_pending)
 
         # OV 话题摘要提交（已删除，话题摘要由 _run_topic_summarize 处理）
 
@@ -980,17 +997,35 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
     engine._seq_counter[turn] = 0
     engine._tool_seq_map.clear()
 
-    from ca.store import write_turn_v5
+    from ca.store import read_turn_elm_rows, write_turn_v5
 
-    write_turn_v5(
-        engine.store, session_id, turn, seq=0,
-        role='user', elm_text=user_message,
-        fct_text=user_message,
-        hdl_text=user_message[:100],
-        biz_category=None,
-        written_at=time.time(),
-    )
-    logger.info("[CA_v6] pre_llm_call: wrote seq 0 turn=%d", turn)
+    # BUG-09 防覆写：turn 由 conversation_history 的 user 数重算，重复触发
+    # （重放/重试）时同一 (turn, seq=0) 会被再次写入。行不可变约束
+    # （02-store「写入即不可撤销」）→ 已存在内容相同的 user Elm 则跳过写入；
+    # 内容不同（新消息/引擎恢复路径）保持 REPLACE 覆盖语义（既有测试契约）。
+    _duplicate_replay = False
+    try:
+        for _seq, _role, _elm, *_rest in read_turn_elm_rows(
+                engine.store, session_id, turn):
+            if (_seq == 0 and _role == "user"
+                    and str(_elm or "").strip() == str(user_message).strip()):
+                _duplicate_replay = True
+                break
+    except Exception:
+        pass
+    if _duplicate_replay:
+        logger.info("[CA_v6] pre_llm_call: turn=%d user Elm identical, "
+                    "skip rewrite (行不可变，BUG-09)", turn)
+    else:
+        write_turn_v5(
+            engine.store, session_id, turn, seq=0,
+            role='user', elm_text=user_message,
+            fct_text=user_message,
+            hdl_text=user_message[:100],
+            biz_category=None,
+            written_at=time.time(),
+        )
+        logger.info("[CA_v6] pre_llm_call: wrote seq 0 turn=%d", turn)
 
     # 话题切换时的跨会话 recall（仅 FAR 切换触发）
     recall_str: Optional[str] = None
@@ -1020,7 +1055,7 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
                     if wiki_entries:
                         recall_str = _format_wiki_carryover(wiki_entries)
                         entries_detail = ", ".join(
-                            f"id={e.get('theme_id')}({e.get('title','')[:40]})"
+                            f"id={e.get('reality_id')}({e.get('name','')[:40]})"
                             for e in wiki_entries
                         )
                         logger.info("[CA_WIKI] Session-start wiki recall injected (%d chars, %d entries): %s",
@@ -1039,7 +1074,14 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
         ca_rows = get_turn_ca_rows(engine.store, session_id, turn)
         switched = plugin._topic_mgr.detect(turn, ca_rows, user_message, total_tokens=total_tokens)
         if switched:
-            q_emb = engine.embed_client.embed(user_message)
+            # 嵌入服务异常（连接/超时/HTTPError）→ 降级 None（grade_on_switch 走
+            # 无向量分支；FAR recall 走 jaccard 兜底），不中断用户轮 hook（BUG-02）
+            try:
+                q_emb = engine.embed_client.embed(user_message)
+            except Exception as exc:
+                logger.warning("[CA_v6] embed failed on topic switch, "
+                               "degrading to no-vector: %s", exc)
+                q_emb = None
             plugin._topic_mgr.grade_on_switch(q_emb, user_message)
             # 打包前一个话题数据 → 本地话题摘要
             old_topic_id = plugin._last_topic_id
@@ -1075,7 +1117,7 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
                         if wiki_entries:
                             recall_str = _format_wiki_carryover(wiki_entries)
                             entries_detail = ", ".join(
-                                f"id={e.get('theme_id')}({e.get('title','')[:40]})"
+                                f"id={e.get('reality_id')}({e.get('name','')[:40]})"
                                 for e in wiki_entries
                             )
                             # v6.5.3: 保存候选 theme，供下一个话题块 summarize 判断归属

@@ -70,9 +70,11 @@ class Retriever:
         self._bm25 = snapshot.bm25
         self._turn_indices = snapshot.turn_indices
         self._fct_embeddings = snapshot.fct_embeddings
-        self._tool_bm25 = snapshot.tool_bm25
-        self._tool_turn_keys = snapshot.tool_turn_keys
-        self._tool_fct_embeddings = snapshot.tool_fct_embeddings
+        # 方向 B 后 BM25Snapshot 无 tool_* 属性（工具轮缓存已移除）：
+        # 防御性取默认，retrieve_tools 对空工具索引返回 []（审计 D8/BUG-07）
+        self._tool_bm25 = getattr(snapshot, "tool_bm25", None)
+        self._tool_turn_keys = getattr(snapshot, "tool_turn_keys", [])
+        self._tool_fct_embeddings = getattr(snapshot, "tool_fct_embeddings", {})
 
     def retrieve(self, user_input: str,
                  query_embedding: Optional[List[float]] = None,

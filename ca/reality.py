@@ -16,7 +16,7 @@ reality = 现实工作对象：多个语义独立但工作中有关联的 strand
   OV Task & Goals       → current_status.goals（衔接判定锚）
   OV Key Facts & Decis. → current_status.key_facts（持久事实，带日期）
   OV Files & Context    → current_status.context（相关文件/资源，可空）
-  OV Abstract (L0)      → hdl（可改锚点，非 name）
+  OV Abstract           → hdl（可改锚点，非 name）
   判定：strand「现象与问题」是否承接 reality.current_status.goals？
         是 → merge（更新 current_status + 重写 hdl，旧 hdl 入 timeline）
         否 → 新 reality（宁分不并：不确定 → new）
@@ -30,7 +30,8 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .config import Config
-from .theme import (OODA_LABELS, _llm_call_default, _strand_embed_text,
+from .theme import (OODA_LABELS, _cosine, _llm_call_default,
+                    _strand_embed_text,
                     parse_assignments as parse_reality_assignments)
 
 logger = logging.getLogger(__name__)
@@ -757,6 +758,38 @@ def _update_query_centroid(
         (json.dumps(new, ensure_ascii=False), n + 1, reality_id))
 
 
+def _cold_start_cosine_candidates(
+    strand_vec: list,
+    realities: list[dict],
+    r_threshold: float = 0.5,
+    top_k: int = 3,
+) -> list[dict]:
+    """冷启动余弦候选（决策 38 §8：无注入锚/空注入时退化余弦保持可用）。
+
+    与 theme 链路 find_theme_candidates 对齐：余弦距离 s = 1 - sim ≤ R 的
+    reality 进候选，按 s 升序取 top-K。候选 dict 键为 reality_id（reality 类型）。
+    """
+    scored: list[dict] = []
+    for t in realities:
+        centroid = t.get("centroid")
+        if not isinstance(centroid, list) or not centroid:
+            continue
+        rid = t.get("reality_id")
+        if rid is None:
+            continue
+        s = 1.0 - _cosine(strand_vec, centroid)
+        if s <= r_threshold:
+            scored.append({
+                "reality_id": rid,
+                "name": t.get("name", ""),
+                "hdl": t.get("hdl", ""),
+                "s_score": s,
+                "_priority": False,
+            })
+    scored.sort(key=lambda c: (c["s_score"], int(c["reality_id"])))
+    return scored[:top_k]
+
+
 def run_reality_merge(
     strands: list[dict],
     realities: list[dict],
@@ -802,9 +835,12 @@ def run_reality_merge(
         if use_s:
             st["candidates"] = find_s_candidates(
                 anchor_realities, realities, cooc_edges,
+                # fused_ids 恒空（决策 38 期望 beta 分支；reality 无块内融合概念，
+                # S 权重退化为仅 alpha——保持行为，不引入未设计机制）
                 fused_ids=set(),
                 alpha=Config.S_ALPHA, beta=Config.S_BETA,
-                r_threshold=Config.S_R_THRESHOLD, top_k=top_k)
+                r_threshold=Config.S_R_THRESHOLD, top_k=top_k,
+                id_key="reality_id")
             continue
         # 冷启动退化（无注入锚：全新话题空注入）→ 余弦候选
         if embed_client is None:
@@ -815,10 +851,9 @@ def run_reality_merge(
         vec = embed_client.embed(text[:500])
         if not vec:
             continue
-        st["candidates"] = find_s_candidates(
-            [], realities, cooc_edges, fused_ids=set(),
-            alpha=Config.S_ALPHA, beta=Config.S_BETA,
-            r_threshold=Config.S_R_THRESHOLD, top_k=top_k) or []
+        st["candidates"] = _cold_start_cosine_candidates(
+            vec, realities,
+            r_threshold=Config.S_R_THRESHOLD, top_k=top_k)
 
     # ② 4B 决策（仅含有候选的 strands；无候选 → 自动 new）
     llm_parsed: dict = {}

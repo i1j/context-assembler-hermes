@@ -621,7 +621,9 @@ class TopicGradeManager:
                     vec = self._embed_client.embed(_extract_fct_semantic_text(fct_text))
                     if vec:
                         vectors.append(vec)
-                except (ValueError, TypeError, RuntimeError) as e:
+                except Exception as e:
+                    # 覆盖 ConnectionError/TimeoutError/urllib3 HTTPError 等
+                    # 嵌入服务异常（BUG-02）：跳过该 turn，不中断 hook
                     logger.warning("[CA] _compute_centroids: embed failed for turn %d (topic %d): %s", turn, tid, e)
                     continue
 

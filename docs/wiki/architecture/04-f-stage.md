@@ -29,6 +29,7 @@ OODA 文本  →  JSON 解析  →  Regex fallback
 
 ## 关键约束
 
-- 降级检测条件：`startswith("核心摘要：无有效增量")` + `"资源与观察：\n- 无" in ooda_text`
-- 无有效增量时不改写 Fct/Hdl（保持上次值）
-- 超时 60s 后线程自动终结
+- 降级检测（实际实现）：LLM 输出经 `MEANINGLESS_CORE` 清洗（`无`/`本轮无新内容`
+  等无意义 core_change 剔除）；Fct/Hdl 仍写入，core_change 置为
+  `user_elm or "本轮无新内容"`（不再保留上次 Fct/Hdl）
+- 超时：LLM 调用 `timeout=Config.LLM_TIMEOUT`（默认 120s）
