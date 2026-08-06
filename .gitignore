@@ -25,3 +25,10 @@ working_copy.db
 
 # graphify output (regeneratable)
 graphify-out/
+
+# graphify vendored lib (regeneratable)
+.graphify_pylib/
+
+# graphify 工具/本地生成物
+graphify-*.py
+ca-graph.html
