@@ -227,8 +227,28 @@ def _judge_link_relation(src: dict, tgt: dict) -> Optional[str]:
 # ── 信号 C：reality↔OV 语义检索（L1 API）──
 
 def _extract_ov_hits(data: Any) -> Optional[List[dict]]:
-    """宽松提取 OV 检索命中列表（响应结构防御式解析，勿假设单一 schema）。"""
+    """宽松提取 OV 检索命中列表（响应结构防御式解析，勿假设单一 schema）。
+
+    已适配 OV /api/v1/search/find 真实响应（2026-08-07 实测）：
+      {"status":"ok","result":{"memories":[...],"resources":[...],"skills":[...],"total":N}}
+    顶层键仅 status/result——旧实现只查顶层 list 键导致恒空（references_ov
+    边 0 条、探测连续 3 次失败的根因）。
+    """
     if isinstance(data, dict):
+        # ① result.* 嵌套（OV search/find 真实结构）。
+        #    resources 优先：references_ov 边目标是 OV 项目文档资源；
+        #    memories（用户/agent 记忆）与 skills 仅兜底（不应用作边目标）。
+        result = data.get("result")
+        if isinstance(result, dict):
+            for key in ("resources", "memories", "skills", "hits", "results",
+                        "items", "matches", "documents"):
+                v = result.get(key)
+                if isinstance(v, list) and v:
+                    return [d for d in v if isinstance(d, dict)]
+            hit = result.get("hit")
+            if isinstance(hit, dict):
+                return [hit]
+        # ② 顶层 list 键（宽松兼容其它响应形态）
         for key in ("hits", "results", "items", "matches", "documents"):
             v = data.get(key)
             if isinstance(v, list):
@@ -254,14 +274,35 @@ def _hit_score(hit: dict) -> float:
 
 
 def _ov_doc_nid(hit: dict) -> Optional[str]:
-    """references_ov 边 target 命名：对齐 build_wiki_subgraph 的 ov_doc_{label}（U-6）。"""
+    """references_ov 边 target 命名：对齐 build_wiki_subgraph 的 ov_doc_{label}（U-6）。
+
+    2026-08-07 适配：OV search/find 命中是 viking:// 资源（无 title/name 字段，
+    只有 uri）。uri 常指向**文档碎片/隐藏摘要**（如
+      .../34-idle-refinement/34-idle-refinement.md/背景.md
+      .../34-idle-refinement/34-idle-refinement.md/.overview.md
+      .../37-reality-restructure.md/决策_37CA_Reali...
+    ）——旧实现取 uri 尾段 → 生成 ov_doc_背景.md / ov_doc_.overview.md 等
+    **悬挂节点**（图内无此 id）。修复：取 uri 中**第一个非隐藏 .md 段**
+    （主文档，跳过 .overview/.abstract 等隐藏摘要与碎片），并解析到图内
+    source_file 尾段一致的 ov_doc 节点；解析不到 → None（宁缺勿错，防悬挂）。
+    """
     label = (hit.get("title") or hit.get("name") or hit.get("label")
              or hit.get("path") or hit.get("uri") or hit.get("id") or "")
     label = str(label).strip()
     if not label:
         return None
-    if "/" in label:
-        label = label.rstrip("/").split("/")[-1]
+
+    # ① uri 形态：取第一个非隐藏 .md 段（主文档名）
+    if label.startswith("viking://") or "/" in label:
+        parts = [p for p in label.rstrip("/").split("/") if p]
+        for p in parts:
+            if p.endswith(".md") and not p.startswith("."):
+                label = p
+                break
+        else:
+            # 无主文档段（如 .../34-idle-refinement/.overview.md）→ 无稳定锚点
+            return None
+    # ② 非 uri 形态（title/name/label 直接给出）→ 原逻辑
     return f"ov_doc_{label.lower().replace(' ', '_')[:48]}"
 
 
@@ -309,8 +350,8 @@ def _run_ov_references(realities: List[dict]) -> int:
                 continue
             fails = 0
             hits.append((r.get("reality_id"), _hit_score(top[0]),
-                         str(top[0].get("title") or top[0].get("name")
-                             or "")[:60]))
+                         str(top[0].get("uri") or top[0].get("title")
+                             or top[0].get("name") or "")[-60:]))
         if hits:
             scores = sorted(h[1] for h in hits)
             logger.info("[CA_L4] fact_linking OV 探测（阈值未验证，不落图）: "
@@ -323,6 +364,20 @@ def _run_ov_references(realities: List[dict]) -> int:
         return 0
 
     edges: List[dict] = []
+    # 图内已有 ov_doc 节点集合（防悬挂：references_ov 只连已入图文档，
+    # 未入图文档宁缺勿错——34 v2.7 信号 C 边界）
+    known_ov = set()
+    try:
+        g = _load_graph()
+        if g:
+            known_ov = {n.get("id") for n in g.get("nodes", [])
+                        if str(n.get("id", "")).startswith("ov_doc_")}
+    except Exception:
+        pass
+    if not known_ov:
+        logger.info("[CA_L4] fact_linking OV 落图跳过：图内无 ov_doc 节点（先重建 wiki 子图）")
+        return 0
+
     for r in realities:
         query = " ".join(filter(None, [
             str(r.get("name") or ""), str(r.get("hdl") or "")]))[:200]
@@ -336,6 +391,11 @@ def _run_ov_references(realities: List[dict]) -> int:
             continue
         tgt = _ov_doc_nid(top[0])
         if not tgt:
+            continue
+        if tgt not in known_ov:
+            # 命中文档未入图 → 不建悬挂边（宁缺勿错）
+            logger.debug("[CA_L4] fact_linking OV 命中未入图，跳过: %s → %s",
+                         r.get("reality_id"), tgt)
             continue
         edges.append({
             "source": f"reality_{r.get('reality_id')}",
