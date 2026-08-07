@@ -63,7 +63,7 @@ flowchart LR
 | 11 | [L-stage 引擎生命周期](architecture/11-l-stage.md) | v4.4 | `ca/lstage.py` | 生命周期管理 + L4 空闲精炼管线（v5.14 新增） |
 | 12 | [配置体系](architecture/12-config.md) | v5.0 | `ca/config.py` | 配置加载+优先级 |
 | 13 | [测试策略](architecture/13-test-strategy.md) | v5.0 | `tests/` | 分层测试体系 |
-| 14 | [空闲精炼管线](architecture/14-idle-refinement.md) | v5.14 | `ca/lstage.py` | L4 空闲精炼：内精炼+交叉验证 |
+| 14 | [空闲精炼管线](architecture/14-idle-refinement.md) | v5.14→v2 | `ca/refinement.py` | L4 精炼轮：归并审查（宁并不分）+内精炼+交叉验证（reality 化，决策 41） |
 
 ## 决策时间线（decisions/）
 
@@ -93,7 +93,7 @@ flowchart LR
 | 22 | [State DB 去重](decisions/22-state-db-dedup.md) | v6.1 | 修复 | plugin |
 | **23** | **[已拒绝方案](decisions/23-rejected-approaches.md)** | v0-v6 | 汇总 | — |
 | **28** | **[话题摘要 v4](decisions/28-topic-summarization-v4.md)** | v6.0 | 摘要 | f-stage, topic_summarizer |
-| **34** | **[空闲精炼管线](decisions/34-idle-refinement.md)** | **v5.14** | **自我维护** | **l-stage, topic_wiki, store** |
+| **34** | **[空闲精炼管线](decisions/34-idle-refinement.md)** | **v5.14→v2** | **自我维护** | **l-stage, realities, store（reality 化，2026-08-07）** |
 | **35** | **[Strand 多事务摘要](decisions/35-strand-multi-affair-summarization.md)** | v6.4 | 摘要 | strand_summaries, topic_summary |
 | **36** | **[Wiki Theme 生成重构](decisions/36-theme-wiki-generation.md)** | v6.5 | 归并 | theme, store |
 | **37** | **[Reality 重构](decisions/37-reality-restructure.md)** | v6.6+ | 检索/归并 | reality, theme |

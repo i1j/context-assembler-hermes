@@ -27,7 +27,7 @@ Hook 接收消息 → E-stage 写即落盘 → F-stage 异步摘要 → A-stage 
 | 术语 | 含义 | 示例 |
 |------|------|------|
 | **Elm** | 原始消息文本 | `"请帮我搜索xxx"` |
-| **Fct** | 结构化摘要 JSON | `{"role":"assistant","summary":"已搜索..."}` |
+| **Fct** | 结构化摘要 JSON（OODA 四段：现象/背景/决策/后续） | `{"changes":[{"stage_tag":"已实施","core_change":"..."}],"new_materials":[...],"objective_facts":[...],"consensus":[...],"todo":[...]}` |
 | **Hdl** | 一句话标题 | `"搜索xxx结果"` |
 
 ### 三个阶段
@@ -54,6 +54,6 @@ Hook 接收消息 → E-stage 写即落盘 → F-stage 异步摘要 → A-stage 
 ### CE 壳定位（用户设计定论）
 
 - **CA 注册 ContextEngine（`context.engine: ca_assembler`）是「替代」内置 ContextCompressor 的占位**，不是让 Hermes 跑 compress_context 流程。
-- **CA 不触发 Hermes compress_context**：should_compress 固定返回 False（或经 sentinel 阻断 archive/rotation），A-stage 组装（`_build_conv_history_v6`）完全由 8 个 hooks 驱动——pre_llm_call 写 seq 0 → 话题检测 → wiki recall；post_llm_call 写 fin → F-stage 异步摘要。
+- **CA 不触发 Hermes compress_context 的 archive/rotation**：CE shell 的 `should_compress` 恒返回 True（`__init__.py`，pre-set abort 标志 `_last_compress_aborted` 阻止 archive/rotation），A-stage 组装（`_build_conv_history_v6`）完全由 8 个 hooks 驱动——pre_llm_call 写 seq 0 → 话题检测 → wiki recall；post_llm_call 写 fin → F-stage 异步摘要。
 - **`register_context_engine("ca_assembler", _ce_engine)` 参数警告为无害已知项**：hermes 接口签名是 `register_context_engine(self, engine)`（1 参数），插件传 2 参数 → 每次进程启动打 "Failed to load plugin 'ca_assembler'"（errors.log 8 月 26 条，均发生在 gateway 重启时）。hooks 在 register() 前半段已注册成功且不被回滚，数据链路不受影响。**不构成缺陷，勿重复排查。**
 - 判定 CA 工作正常的标准 = hook 链路（E-stage 写库 / F-stage 摘要 / 话题检测 / wiki recall）数据完整，与 CE 是否被 Hermes 选中无关。

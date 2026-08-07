@@ -390,7 +390,6 @@ class IdleRefinementDaemon:
             current_status=new_cs,
             changes=[str(c) for c in new_changes if str(c).strip()],
             centroid_json=centroid_json,
-            db_path=conn,
         )
         self._update_entry_refinement_meta(conn, entry["entry_id"])
         logger.info("[CA_L4]   entry %d: refined (overview=%d chars, %d changes, %d facts)",
@@ -568,7 +567,6 @@ class IdleRefinementDaemon:
             current_status=new_cs,
             changes=[str(c) for c in new_changes if str(c).strip()],
             centroid_json=centroid_json,
-            db_path=conn,
         )
         logger.info("[CA_L4]   entry %d: cross-validate fixed %d facts",
                     entry["entry_id"], len(new_facts))

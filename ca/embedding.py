@@ -23,7 +23,8 @@ from .config import Config
 
 logger = logging.getLogger(__name__)
 
-_EMBED_DIM = int(os.getenv("CA_EMBED_DIM", "1024"))  # qwen3-embedding:0.6b 固定 1024 维
+# BUG-14: 统一从 Config 读取（含 reload/validate），环境变量 CA_EMBED_DIM 兼容保留
+_EMBED_DIM = Config.EMBED_DIM
 
 try:
     import urllib3

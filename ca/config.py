@@ -82,6 +82,8 @@ class Config:
     EMBED_TIMEOUT: ClassVar[float] = float(os.getenv("CA_EMBED_TIMEOUT", "10"))
     EMBED_MAX_RETRIES: ClassVar[int] = int(os.getenv("CA_EMBED_MAX_RETRIES", "2"))
     EMBED_BATCH_PARALLEL_TIMEOUT: ClassVar[float] = float(os.getenv("CA_EMBED_BATCH_PARALLEL_TIMEOUT", "15"))
+    # BUG-14: 原 embedding.py 裸 os.getenv("CA_EMBED_DIM") 绕过 Config → 纳入统一配置
+    EMBED_DIM: ClassVar[int] = int(os.getenv("CA_EMBED_DIM", "1024"))  # qwen3-embedding:0.6b 固定 1024 维
 
     OODA_EMBED_CACHE_MAX_SIZE: ClassVar[int] = int(os.getenv("CA_OODA_EMBED_CACHE_MAX_SIZE", "128"))
     OODA_DEDUP_THRESHOLD: ClassVar[float] = float(os.getenv("CA_OODA_DEDUP_THRESHOLD", "0.88"))
@@ -93,6 +95,9 @@ class Config:
     LLM_MAX_RETRIES: ClassVar[int] = int(os.getenv("CA_LLM_MAX_RETRIES", "2"))
     LLM_NUM_PREDICT: ClassVar[int] = int(os.getenv("CA_LLM_NUM_PREDICT", "24768"))
     LLM_THINK: ClassVar[Optional[bool]] = None
+    # 字段名遗留 L1（历史命名），语义为 Fct 摘要参数（F-stage 结构化摘要的
+    # 温度 / 最大 token）；环境变量名 CA_L1_TEMPERATURE / CA_L1_MAX_TOKENS
+    # 为实际配置键，保留原名。
     L1_TEMPERATURE: ClassVar[float] = float(os.getenv("CA_L1_TEMPERATURE", "0.3"))
     L1_MAX_TOKENS: ClassVar[int] = int(os.getenv("CA_L1_MAX_TOKENS", "2048"))
     # v6.4.1: 话题摘要独立 num_predict——L1_MAX_TOKENS=2048 是 F-stage 参数，
@@ -120,6 +125,12 @@ class Config:
         logger.warning("Invalid CA_LLM_THINK: '%s', ignoring", raw)
         return None
 
+    # PROTECT_TAIL_TOKENS（settings.yaml protect_tail_tokens，注释「当前话题块 Token
+    # 保护安全阀」）：语义 = 话题块 token 保护（强制切分过长主题块），由 TOPIC_PEAK_TOKEN
+    # （同值 20000，水位满压最后防线，topic_manager._apply_water_pressure 消费）承接。
+    # 本配置当前无消费点（死配置，2026-08-08 确认）；不参与 A-stage 尾部保护区——
+    # 尾部保护区 = 固定最后 2 个 user 轮（decisions/13，2026-08-08 用户裁定，
+    # 不做 token 预算扫描/扩展，维持前缀稳定性保云端缓存命中）。
     PROTECT_TAIL_TOKENS: ClassVar[int] = int(os.getenv(
         "CA_PROTECT_TAIL_TOKENS",
         str(_YAML_DEFAULTS.get("protect_tail_tokens", "10000")),
@@ -131,7 +142,7 @@ class Config:
     TOOL_TAIL_TURN_COUNT: ClassVar[int] = int(os.getenv("CA_TOOL_TAIL_TURN_COUNT", "2"))
 
     # 系统消息尾区保护：只保留最近 N 条系统消息的原文，
-    # 更早的系统消息在汇编时截断为 L0 单行（≤100 字符）。
+    # 更早的系统消息在汇编时截断为 Hdl 单行（≤100 字符）。
     SYSTEM_TAIL_TURN_COUNT: ClassVar[int] = int(os.getenv("CA_SYSTEM_TAIL_TURN_COUNT", "2"))
     CONTEXT_LENGTH: ClassVar[int] = int(os.getenv("CA_CONTEXT_LENGTH", "50000"))
 
@@ -156,7 +167,7 @@ class Config:
     # context_length = model_window × threshold（触发压缩的预算上限）。
     COMPRESSION_THRESHOLD: ClassVar[float] = float(os.getenv("CA_COMPRESSION_THRESHOLD", "0.50"))
 
-    # 话题边界检测：当前轮 L1 向量与上一对话轮 L1 向量的余弦距离
+    # 话题边界检测：当前轮与上一对话轮的嵌入向量余弦距离
     # 低于此阈值 → 新话题。范围 [0, 1]，默认 0.50。
     TOPIC_BOUNDARY_DISTANCE: ClassVar[float] = float(os.getenv("CA_TOPIC_BOUNDARY_DISTANCE", "0.50"))
 
@@ -343,6 +354,7 @@ class Config:
         pos_float("EMBED_TIMEOUT", cls.EMBED_TIMEOUT)
         pos_int("EMBED_MAX_RETRIES", cls.EMBED_MAX_RETRIES, max_v=5)
         pos_float("EMBED_BATCH_PARALLEL_TIMEOUT", cls.EMBED_BATCH_PARALLEL_TIMEOUT)
+        pos_int("EMBED_DIM", cls.EMBED_DIM)
         pos_int("OODA_EMBED_CACHE_MAX_SIZE", cls.OODA_EMBED_CACHE_MAX_SIZE, min_v=16)
         pos_float("OODA_DEDUP_THRESHOLD", cls.OODA_DEDUP_THRESHOLD, min_v=0.5)
         pos_int("RETRIEVAL_RRF_K", cls.RETRIEVAL_RRF_K)
@@ -393,6 +405,7 @@ class Config:
             cls.EMBED_TIMEOUT = float(os.getenv("CA_EMBED_TIMEOUT", str(cls.EMBED_TIMEOUT)))
             cls.EMBED_MAX_RETRIES = int(os.getenv("CA_EMBED_MAX_RETRIES", str(cls.EMBED_MAX_RETRIES)))
             cls.EMBED_BATCH_PARALLEL_TIMEOUT = float(os.getenv("CA_EMBED_BATCH_PARALLEL_TIMEOUT", str(cls.EMBED_BATCH_PARALLEL_TIMEOUT)))
+            cls.EMBED_DIM = int(os.getenv("CA_EMBED_DIM", str(cls.EMBED_DIM)))
             cls.OODA_EMBED_CACHE_MAX_SIZE = int(os.getenv("CA_OODA_EMBED_CACHE_MAX_SIZE", str(cls.OODA_EMBED_CACHE_MAX_SIZE)))
             cls.OODA_DEDUP_THRESHOLD = float(os.getenv("CA_OODA_DEDUP_THRESHOLD", str(cls.OODA_DEDUP_THRESHOLD)))
             cls.RETRIEVAL_RRF_K = int(os.getenv("CA_RETRIEVAL_RRF_K", str(cls.RETRIEVAL_RRF_K)))

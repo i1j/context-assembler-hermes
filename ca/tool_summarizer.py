@@ -180,7 +180,7 @@ class ToolSummarizer:
             if skipped: parts.append(f"{skipped.group(1)} skipped")
             el = elapsed.group(1) if elapsed else "?"
             result_summary = f"pytest: {', '.join(parts)} — {el}s"
-            l1 = {
+            fct = {
                 "tool_name": "terminal",
                 "tool_args": {"command": cmd_short} if cmd_short else {},
                 "result_summary": result_summary,
@@ -189,8 +189,8 @@ class ToolSummarizer:
                 "next_action_hint": "",
                 "_assemble_status": 0,
             }
-            l0 = _safe_truncate(f"pytest ({', '.join(parts)}) — {el}s", 100)
-            return l1, l0
+            hdl = _safe_truncate(f"pytest ({', '.join(parts)}) — {el}s", 100)
+            return fct, hdl
 
         # exit_code 检测：优先靠 exit_code，不依赖文本正则
         exit_code = None
@@ -245,7 +245,7 @@ class ToolSummarizer:
 
         error_prefix = f"exit={exit_code}: " if has_error and exit_code else ""
 
-        l1 = {
+        fct = {
             "tool_name": "terminal",
             "tool_args": {"command": cmd_short} if cmd_short else {},
             "result_summary": result_summary,
@@ -260,18 +260,18 @@ class ToolSummarizer:
         if key_lines:
             out_part = key_lines[0][:50]
             if cmd_part:
-                l0 = _safe_truncate(f"{error_prefix}{cmd_part}: {out_part}", 100)
+                hdl = _safe_truncate(f"{error_prefix}{cmd_part}: {out_part}", 100)
             else:
-                l0 = _safe_truncate(f"{error_prefix}{out_part}", 92)
+                hdl = _safe_truncate(f"{error_prefix}{out_part}", 92)
         else:
             if exit_code is not None:
                 if cmd_part:
-                    l0 = _safe_truncate(f"{cmd_part} (exit={exit_code})", 100)
+                    hdl = _safe_truncate(f"{cmd_part} (exit={exit_code})", 100)
                 else:
-                    l0 = f"exit={exit_code}"
+                    hdl = f"exit={exit_code}"
             else:
-                l0 = _safe_truncate(f"({total_effective} lines)", 100)
-        return l1, l0
+                hdl = _safe_truncate(f"({total_effective} lines)", 100)
+        return fct, hdl
 
     def _summarize_execute_code(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
         """execute_code 结构化摘要：解析 Hermes JSON 响应，提取 status + 关键输出行。
@@ -327,7 +327,7 @@ class ToolSummarizer:
             el = elapsed.group(1) if elapsed else "?"
             result_summary = f"pytest: {', '.join(parts)} — {el}s"
             has_error = status in ("error", "timeout", "interrupted")
-            l1 = {
+            fct = {
                 "tool_name": "execute_code",
                 "tool_args": self._clean_tool_args("execute_code", args),
                 "result_summary": result_summary,
@@ -336,8 +336,8 @@ class ToolSummarizer:
                 "next_action_hint": "",
                 "_assemble_status": 0,
             }
-            l0 = _safe_truncate(f"pytest ({', '.join(parts)}) — {el}s", 100)
-            return l1, l0
+            hdl = _safe_truncate(f"pytest ({', '.join(parts)}) — {el}s", 100)
+            return fct, hdl
 
         for line in non_empty:
             stripped = line.strip()
@@ -382,7 +382,7 @@ class ToolSummarizer:
             result_summary = f"{body}{tc_part}"
 
         # ---- 构建 Fct dict ----
-        l1 = {
+        fct = {
             "tool_name": "execute_code",
             "tool_args": self._clean_tool_args("execute_code", args),
             "result_summary": result_summary,
@@ -396,19 +396,19 @@ class ToolSummarizer:
         if has_error:
             if error_msg:
                 err_short = error_msg.split("\n")[0].strip()[:50]
-                l0 = _safe_truncate(f"exc@{status}: {err_short}", 100)
+                hdl = _safe_truncate(f"exc@{status}: {err_short}", 100)
             elif key_lines:
                 out_part = key_lines[0][:50]
-                l0 = _safe_truncate(f"exc@{status}: {out_part}", 100)
+                hdl = _safe_truncate(f"exc@{status}: {out_part}", 100)
             else:
-                l0 = _safe_truncate(f"exc@{status}", 100)
+                hdl = _safe_truncate(f"exc@{status}", 100)
         elif key_lines:
             out_part = key_lines[0][:50]
-            l0 = _safe_truncate(f"exc: {out_part}", 92)
+            hdl = _safe_truncate(f"exc: {out_part}", 92)
         else:
-            l0 = _safe_truncate(f"exc: ({len(non_empty)} lines)", 100)
+            hdl = _safe_truncate(f"exc: ({len(non_empty)} lines)", 100)
 
-        return l1, l0
+        return fct, hdl
 
     def _summarize_write_file(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
         """write_file 结构化摘要：文件路径 + 动作结果，不含内容"""
@@ -429,7 +429,7 @@ class ToolSummarizer:
         # 注：写文件 always succ — 响应里如果不是 JSON 或有错误，知道文件名就够诊了
         # 另外两个分支(elif output / else) 内容完全一致，已合并
 
-        l1 = {
+        fct = {
             "tool_name": "write_file",
             "tool_args": self._clean_tool_args("write_file", args),
             "result_summary": result_summary,
@@ -439,8 +439,8 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        l0 = _safe_truncate(f"write_file: {path_short}", 100)
-        return l1, l0
+        hdl = _safe_truncate(f"write_file: {path_short}", 100)
+        return fct, hdl
 
     def _summarize_patch(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
         """patch 结构化摘要：目标文件 + 替换数"""
@@ -465,7 +465,7 @@ class ToolSummarizer:
             flag = " (replace_all)" if replace_all else ""
             result_summary = f"patch: {path_short}{flag}"
 
-        l1 = {
+        fct = {
             "tool_name": "patch",
             "tool_args": self._clean_tool_args("patch", args),
             "result_summary": result_summary,
@@ -475,8 +475,8 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        l0 = _safe_truncate(f"patch: {path_short}", 100)
-        return l1, l0
+        hdl = _safe_truncate(f"patch: {path_short}", 100)
+        return fct, hdl
 
     def _summarize_read_file(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
         """read_file Fct=Elm 全量：取文件原文，去掉冗余（path/offset/limit 已在 tool_args）"""
@@ -520,21 +520,21 @@ class ToolSummarizer:
         # result_summary = Elm 头尾截断摘要（文件原文太长时保留开头+结尾 ~200 字）
         if error:
             result_summary = error
-            l1_error = error
+            fct_error = error
         else:
             raw = result_content if result_content else "(empty response)"
             # head_tail_truncate：保留文件开头(imports/签名) + 结尾(最后函数/类)
             # 比对 _sanitize_summary_text 更适合代码文件的信息密度
             s = str(raw).replace("/home/i1j", "~")
             result_summary = ToolSummarizer._head_tail_truncate(s, head_ratio=0.6, max_len=200)
-            l1_error = None
+            fct_error = None
 
-        l1 = {
+        fct = {
             "tool_name": "read_file",
             "tool_args": self._clean_tool_args("read_file", args),
             "result_summary": result_summary,
             "total_lines": total_lines,
-            "error": l1_error,
+            "error": fct_error,
             "implicit_knowledge": [],
             "next_action_hint": "",
             "_assemble_status": 0,
@@ -542,12 +542,12 @@ class ToolSummarizer:
 
         # Hdl：话题回顾用——路径 + 范围 + 行数
         if error:
-            l0 = _safe_truncate(f"read_file: {path_short} — {error[:80]}", 100)
+            hdl = _safe_truncate(f"read_file: {path_short} — {error[:80]}", 100)
         elif total_lines != "?":
-            l0 = _safe_truncate(f"read_file: {path_short} (lines {offset}-{limit}, {total_lines}行)", 100)
+            hdl = _safe_truncate(f"read_file: {path_short} (lines {offset}-{limit}, {total_lines}行)", 100)
         else:
-            l0 = _safe_truncate(f"read_file: {path_short} (lines {offset}-{limit})", 100)
-        return l1, l0
+            hdl = _safe_truncate(f"read_file: {path_short} (lines {offset}-{limit})", 100)
+        return fct, hdl
 
     def _summarize_search_files(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
         """search_files 结构化摘要：查询条件 + 结果数量 + 前几个文件名"""
@@ -600,7 +600,7 @@ class ToolSummarizer:
         if len(result_summary) > 500:
             result_summary = result_summary[:497] + "…"
 
-        l1 = {
+        fct = {
             "tool_name": "search_files",
             "tool_args": self._clean_tool_args("search_files", args),
             "result_summary": result_summary,
@@ -610,8 +610,8 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        l0 = _safe_truncate(f"search_files: {pattern[:40]} → {total_count} hits", 100)
-        return l1, l0
+        hdl = _safe_truncate(f"search_files: {pattern[:40]} → {total_count} hits", 100)
+        return fct, hdl
 
     def _summarize_skills_list(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
         """skills_list 结构化摘要：技能名列表"""
@@ -639,7 +639,7 @@ class ToolSummarizer:
         name_str = ", ".join(skills) if skills else "?"
         result_summary = f"skills_list: {total} items ({name_str})"
 
-        l1 = {
+        fct = {
             "tool_name": "skills_list",
             "tool_args": self._clean_tool_args("skills_list", args),
             "result_summary": result_summary,
@@ -649,8 +649,8 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        l0 = _safe_truncate(f"skills_list: {total} skills", 100)
-        return l1, l0
+        hdl = _safe_truncate(f"skills_list: {total} skills", 100)
+        return fct, hdl
 
     def _summarize_skill_view(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
         """结构化 Markdown 提取：frontmatter + 高价值章节全量 + 其余章节索引"""
@@ -681,8 +681,8 @@ class ToolSummarizer:
         # Error / dedup
         if not body:
             desc_short = description[:60] if description else skill_name
-            l0 = _safe_truncate(f"skill_view: {skill_name} — {desc_short}", 100)
-            l1 = {
+            hdl = _safe_truncate(f"skill_view: {skill_name} — {desc_short}", 100)
+            fct = {
                 "tool_name": "skill_view",
                 "tool_args": self._clean_tool_args("skill_view", args),
                 "result_summary": description or "[空]",
@@ -691,7 +691,7 @@ class ToolSummarizer:
                 "next_action_hint": "",
                 "_assemble_status": 0,
             }
-            return l1, l0
+            return fct, hdl
 
         lines = body.split("\n")
         total_lines = len(lines)
@@ -782,9 +782,9 @@ class ToolSummarizer:
         result_summary = "\n".join(parts).strip()
 
         desc_short = _safe_truncate(description, 60) if description else skill_name
-        l0 = _safe_truncate(f"skill_view: {skill_name} — {desc_short} ({total_lines}行)", 100)
+        hdl = _safe_truncate(f"skill_view: {skill_name} — {desc_short} ({total_lines}行)", 100)
 
-        l1 = {
+        fct = {
             "tool_name": "skill_view",
             "tool_args": self._clean_tool_args("skill_view", args),
             "result_summary": result_summary,
@@ -793,7 +793,7 @@ class ToolSummarizer:
             "next_action_hint": "",
             "_assemble_status": 0,
         }
-        return l1, l0
+        return fct, hdl
 
     @staticmethod
     def _pick_key_fields(args: Dict, keys: List[str]) -> Dict[str, Any]:
@@ -846,7 +846,7 @@ class ToolSummarizer:
         else:
             result_summary = f"OK: {key_str}"
 
-        l1 = {
+        fct = {
             "tool_name": "skill_manage",
             "tool_args": self._clean_tool_args("skill_manage", args),
             "result_summary": result_summary,
@@ -859,8 +859,8 @@ class ToolSummarizer:
         action = key_fields.get("action", "?")
         name = key_fields.get("name", "?")
         status = "error" if error else "ok"
-        l0 = _safe_truncate(f"skill_manage: {action} {name} ({status})", 100)
-        return l1, l0
+        hdl = _safe_truncate(f"skill_manage: {action} {name} ({status})", 100)
+        return fct, hdl
 
     def _summarize_memory(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
         """memory 结构化摘要：action + 目标 + 结果"""
@@ -885,7 +885,7 @@ class ToolSummarizer:
         else:
             result_summary = f"{action} {target} (no output)"
 
-        l1 = {
+        fct = {
             "tool_name": "memory",
             "tool_args": self._clean_tool_args("memory", args),
             "result_summary": result_summary,
@@ -896,10 +896,10 @@ class ToolSummarizer:
         }
 
         status = "error" if error else "ok"
-        l0 = _safe_truncate(f"memory: {action} {target} ({status})", 100)
-        if content_preview and len(l0) + len(content_preview) + 5 <= 100:
-            l0 += f" — {content_preview}"
-        return l1, l0
+        hdl = _safe_truncate(f"memory: {action} {target} ({status})", 100)
+        if content_preview and len(hdl) + len(content_preview) + 5 <= 100:
+            hdl += f" — {content_preview}"
+        return fct, hdl
 
     def _summarize_todo(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
         """todo Fct=全量列表：保留每项 content+status；Hdl=计数+首个提示"""
@@ -959,7 +959,7 @@ class ToolSummarizer:
         if first_content:
             summary_text += f" — {first_content}"
 
-        l1 = {
+        fct = {
             "tool_name": "todo",
             "tool_args": self._clean_tool_args("todo", args),
             "result_summary": result_summary,
@@ -968,8 +968,8 @@ class ToolSummarizer:
             "next_action_hint": "",
             "_assemble_status": 0,
         }
-        l0 = _safe_truncate(summary_text, 100)
-        return l1, l0
+        hdl = _safe_truncate(summary_text, 100)
+        return fct, hdl
 
     def summarize(self, tool_call_msg: Dict, tool_responses: List[Dict]) -> Tuple[Dict, str]:
         tool_name = (tool_call_msg.get("function", {}).get("name", "")).strip()
@@ -1056,7 +1056,7 @@ class ToolSummarizer:
         if result_summary and len(result_summary) > 300:
             result_summary = _safe_truncate(result_summary, 300)
 
-        l1 = {
+        fct = {
             "tool_name": tool_name,
             "tool_args": self._clean_tool_args(tool_name, arguments),
             "result_summary": result_summary or "无返回数据",
@@ -1066,10 +1066,10 @@ class ToolSummarizer:
             "_assemble_status": 0,
         }
 
-        core = l1["result_summary"] or l1.get("error") or "无返回数据"
-        l0 = _safe_truncate(f"{tool_name}: {core}", 100)
+        core = fct["result_summary"] or fct.get("error") or "无返回数据"
+        hdl = _safe_truncate(f"{tool_name}: {core}", 100)
 
-        return l1, l0
+        return fct, hdl
 
     def _extract_fields(self, data_list, field_names, full=True, truncate=False, name_only=False):
         result: Dict[str, Any] = {}

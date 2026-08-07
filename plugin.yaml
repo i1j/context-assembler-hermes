@@ -17,6 +17,12 @@ hooks:
   - on_session_reset
   - pre_llm_call
   - post_llm_call
+  - post_api_request
+  - pre_tool_call
+  - post_tool_call
+
+# Hermes UI 元数据；运行时配置经 env（CA_*）/settings.yaml，此 schema 未接入消费。
+# 默认值与 ca/config.py 实际生效值对齐（BUG-13）。
 config_schema:
   embed_backend:
     type: string
@@ -24,16 +30,16 @@ config_schema:
     enum: ["ollama", "sentence-transformers", "fallback"]
   embed_model:
     type: string
-    default: "qwen3-embedding:0.6b"
+    default: "dengcao/Qwen3-Embedding-0.6B:Q8_0"
   embed_endpoint:
     type: string
-    default: "http://localhost:11439"
+    default: "http://127.0.0.1:11435"
   llm_model:
     type: string
-    default: "qwen3-4b-instruct"
+    default: "qwen3-4b-instruct:latest"
   llm_endpoint:
     type: string
-    default: "http://localhost:11440"
+    default: "http://localhost:11435"
   context_length:
     type: integer
     default: 50000

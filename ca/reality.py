@@ -733,7 +733,15 @@ def _update_query_centroid(
     """
     if not query_text or embed_client is None:
         return
-    qv = embed_client.embed(str(query_text)[:500])
+    try:
+        qv = embed_client.embed(str(query_text)[:500])
+    except Exception as exc:
+        # BUG-12：embed 故障时降级跳过，不中断该话题块 reality 归并
+        #（merge/create 已写库，形心留待下次快照增量维护）。
+        logger.warning(
+            "[CA_REALITY] query centroid embed failed (reality_id=%d): %s",
+            reality_id, exc)
+        return
     if not qv:
         return
     row = conn.execute(

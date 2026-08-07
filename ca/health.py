@@ -25,8 +25,8 @@ class HealthCheck:
             conn.execute("SELECT 1")
             latency = (time.perf_counter() - start) * 1000
             result["latency_ms"] = round(latency, 2)
-            result["checkpoint_running"] = store._checkpoint_thread is not None
-            result["checkpoint_interval"] = store._checkpoint_interval
+            # v5.0 已移除 checkpoint daemon（BUG-10: 引用已删属性 → 恒 unhealthy），
+            # 指标不再有意义，仅保留 WAL/db size。
             wal_path = store._db_path.with_suffix(".db-wal")
             result["wal_size_mb"] = round(wal_path.stat().st_size / (1024 * 1024), 2) if wal_path.exists() else 0.0
             result["db_size_mb"] = round(store._db_path.stat().st_size / (1024 * 1024), 2) if store._db_path.exists() else 0.0

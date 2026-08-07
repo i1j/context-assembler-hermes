@@ -26,5 +26,5 @@ source_files: ["ca/tool_summarizer.py", "ca/tool_field_priority.yaml"]
   | P2 | 可忽略 |
 
 - **三段回退链**：YAML 配置 handler → JSON 框架 → 字符串截断
-- **10 个结构化 Handler**：exec、search、read、write、code、web 等
+- **11 个结构化 Handler**（`_summarize_*`）：terminal、execute_code、write_file、patch、read_file、search_files、skills_list、skill_view、skill_manage、memory、todo 等
 - 每个 tool_call 单独摘要，输出 `tool_name:result_summary` 格式

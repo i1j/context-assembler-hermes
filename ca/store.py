@@ -389,6 +389,9 @@ def _get_topic_store_path() -> Path:
 
 def _get_topic_conn(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """获取共享 topic DB 的连接（线程级缓存，单例 per-process）。"""
+    if isinstance(db_path, sqlite3.Connection):
+        # BUG-11 防御：调用方误传有效连接时直接复用（绕过路径缓存）。
+        return db_path
     p = db_path or _get_topic_store_path()
     key = str(p.resolve())
     with _TOPIC_STORE_LOCK:

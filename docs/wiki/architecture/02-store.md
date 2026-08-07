@@ -43,7 +43,10 @@ Hdl            TEXT             -- 一句话标题（F-stage 写入）
 
 ## 关键约束
 
-- 行不可变 — 写入即不可撤销
+- 行不可变 — 默认不可变：同 `(session_id, turn, seq)` 重复写入时，内容相同跳过
+  （BUG-09 防重放，见 `__init__.py` pre_llm_call 写入前存在性检查）；内容不同
+  （引擎恢复/重放路径）保持 `INSERT OR REPLACE` 覆盖语义；回填列（Fct/Hdl）
+  更新同样走 REPLACE（`store.py` `write_turn_v5`）
 - 旧 turn_cache 表在 v5.10 迁移后移除
 
 ## 数据表族（v6.5 → v7 演进，2026-08-07）
@@ -64,4 +67,3 @@ Hdl            TEXT             -- 一句话标题（F-stage 写入）
 **realities 表结构（决策 41 生产版）**：`reality_id`(PK AI) / `name`(固定标识) / `hdl`(状态锚点,可改) / `current_status`(JSON: goals/current_state/key_facts/context) / `timeline`(JSON 演进序列) / `source_strands`(JSON: {"session_id":[strand_id]}) / `profile` / `centroid_json`(语义检索 fallback) / `query_centroid_json`+`query_count`(提问云形心,注入主拣选) / `health_score`/`flagged_for_review`/`topic_count`/`reviewed_at`/`last_reviewed_turn`(L4 精炼) / `created_at`/`updated_at`。
 
 **写入入口**：strand 生成后 `run_reality_merge`（`ca/reality.py`）upsert realities + strand_to_reality + query_centroid 增量；`record_block_cooccurrences`（`ca/store.py`）写真 reality_id 共现边。
-

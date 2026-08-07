@@ -96,7 +96,7 @@ def clean_increment(data: Dict[str, Any]) -> Dict[str, Any]:
             cleaned["core_change"] = _draft_core
     return cleaned
 
-# ── L1 v2 解析器常量 ──
+# ── Fct v2 解析器常量 ──
 
 MEANINGLESS_CORE: Set[str] = {"无", "暂无", "无有效增量", "无新增", "none", "null", "",
                             "无变化", "无明显变化", "无核心变化", "无核心变更"}

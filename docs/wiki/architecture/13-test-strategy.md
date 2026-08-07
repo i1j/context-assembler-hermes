@@ -21,7 +21,7 @@ CA 插件需要覆盖从 Hook 接收到 DB 写入到 conv_history 装配的完�
 | Stage 测试 | E-stage 写契约 | Hook 字段写入、幂等性、行不可变 |
 | | F-stage 摘要 | fin 粒度触发、LLM 降级链 |
 | | A-stage conv_history | 三区降级、尾巴保护、FAR 行删除 |
-| Unit 测试 | 工具摘要 | 四级优先级、10 Handler |
+| Unit 测试 | 工具摘要 | 四级优先级、11 Handler |
 | | 检索 | BM25 检索、RRF 排序 |
 | | 缓存 | 冷启动 warmup、指纹去重 |
 | 集成测试 | 端到端 | Hook→DB→A-stage 全链路 |
@@ -37,7 +37,11 @@ CA 插件需要覆盖从 Hook 接收到 DB 写入到 conv_history 装配的完�
 
 ## 统计（2026-08-07 基线）
 
-789 个测试用例（787 passed / 1 skipped / 1 xfailed），分布在
+795 个测试用例（793 passed / 1 skipped / 1 xfailed），分布在
 `tests/stage/`、`tests/unit/`、`tests/plugin/`、`tests/store/`、
-`tests/config/`、`tests/parse/` 等目录。无独立 `tests/integration/` 目录，
+`tests/config/`、`tests/parse/`、`tests/audit/` 等目录。无独立 `tests/integration/` 目录，
 端到端覆盖由 plugin/stage 层承担。
+
+> 沙箱/受限环境下 3 个外部依赖用例会失败（不计入基线）：`tests/store/test_embedding.py`
+> 2 个（Ollama 嵌入服务不可达）、`tests/plugin/test_plugin.py` 1 个（真实 profile
+> ca_cache 目录写入受限）；正常环境下通过。

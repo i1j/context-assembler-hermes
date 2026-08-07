@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 import urllib.request
@@ -24,8 +25,11 @@ logger = logging.getLogger(__name__)
 API_URL = "https://api.deepseek.com/v1/chat/completions"
 MODEL = "deepseek-chat"
 
-# 默认 .env 路径（tester profile，任务书指定）
-DEFAULT_ENV = Path.home() / ".hermes" / "profiles" / "tester" / ".env"
+# 默认 .env 路径（D-新9: 不再硬编码 tester profile，随 HERMES_PROFILE 环境变量）
+DEFAULT_ENV = (
+    Path.home() / ".hermes" / "profiles"
+    / (os.getenv("HERMES_PROFILE", "tester") or "tester") / ".env"
+)
 
 
 def load_api_key(env_path: Optional[Path] = None) -> str:

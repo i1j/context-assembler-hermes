@@ -64,3 +64,15 @@ def test_tc_maint_004(engine):
     store = engine.store
     result = HealthCheck.check_store(store)
     assert isinstance(result, dict)
+
+
+@pytest.mark.medium
+def test_check_store_healthy(engine):
+    """check_store 返回 status=healthy（BUG-10 回归：不再引用已删 checkpoint 属性）"""
+    from ca.health import HealthCheck
+    store = engine.store
+    result = HealthCheck.check_store(store)
+    assert result["status"] == "healthy", \
+        f"check_store should be healthy, got {result}"
+    assert "latency_ms" in result
+    assert "db_size_mb" in result

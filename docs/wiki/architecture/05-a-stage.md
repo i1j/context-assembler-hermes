@@ -24,7 +24,7 @@ v5 使用 topic-aware 三级替换（`_simple_mutation_mode_v5`）在 Hermes 消
 |-------------|------|----------------|---------|------|
 | Tail（保护区） | Elm | Elm | Elm | Elm |
 | ACT | Elm | Elm | Fct | Fct |
-| REL | Fct | Fct | Fct | Fct |
+| REL | Fct | Fct | Hdl | Hdl |
 | FAR | Hdl | Hdl | 删除 | 删除 |
 
 ### 行类型降级

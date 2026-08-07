@@ -452,6 +452,12 @@ def find_s_candidates(
                 # reality 类型候选透传 name/hdl（4B 决策输入可读性）
                 "name": t.get("name", ""),
                 "hdl": t.get("hdl", ""),
+                # BUG-01 遗留（2026-08-08）：4B merge 决策 goals 判定锚 + 家族一致性成员。
+                # current_status 透传（load_all_realities 返回已解析 dict）；
+                # member_hdls 因 load_all_realities 不返回该键恒缺 → 降级为已知限制
+                #（新-U3 留待真实采样）。
+                "current_status": t.get("current_status"),
+                "member_hdls": t.get("member_hdls"),
                 "s_score": s,
                 "_priority": int(rid) in anchors,  # 注入集内 reality（4B prompt 标注）
             })
