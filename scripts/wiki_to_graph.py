@@ -446,17 +446,120 @@ def build_wiki_subgraph() -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
-def merge_into_main_graph(subgraph: dict, main_path: str = GRAPH_JSON) -> bool:
+# 第三轮 T2：strand-topic 节点正则（topic_{session_id}_S{strand_id}）。
+# 注意：session_id 含下划线（如 topic_20260619_124810_e21229_S1），
+# 故用 .+ 而非 [^_]+；配合 file_type=="knowledge" 过滤，代码 AST 节点
+# （topic_manager_*，file_type=code/rationale）天然豁免，严禁误删。
+_STRAND_TOPIC_RE = re.compile(r"^topic_.+_S\d+$")
+
+
+def _load_db_knowledge_reference(db_path: str):
+    """读 realities 表 → (reality_ids, strand_topic_ids 引用集)。
+
+    Returns:
+        (set, set) 或 None（DB 读失败 → 调用方跳过清理，不产生破坏性删除）。
+    """
+    reality_ids: set = set()
+    strand_topics: set = set()
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        try:
+            rows = conn.execute(
+                "SELECT reality_id, source_strands FROM realities"
+            ).fetchall()
+            for rid, src_json in rows:
+                reality_ids.add(rid)
+                try:
+                    sources = json.loads(src_json) if src_json else {}
+                except (json.JSONDecodeError, TypeError):
+                    sources = {}
+                if isinstance(sources, dict):
+                    for sid, strand_ids in sources.items():
+                        for strand_id in strand_ids or []:
+                            strand_topics.add(f"topic_{sid}_S{strand_id}")
+        finally:
+            conn.close()
+    except Exception as exc:
+        print(f"  [WIKI_GRAPH] knowledge reference load failed: {exc}")
+        return None
+    return reality_ids, strand_topics
+
+
+def _clean_knowledge_domain(main: dict, db_path: str) -> tuple[int, int]:
+    """merge 前一致性清理：knowledge 域以 realities 表为唯一权威。
+
+    - reality_{id} 不在 DB → 删除（含其所有边；如僵尸 reality_420 连带 cooc 边）
+    - theme_* 节点 → 全删（themes 冻结，34 v2.3 清残留，含 17 条 theme_ 相关边）
+    - strand-topic（topic_{session_id}_S{strand_id} 格式且 file_type=knowledge）
+      不在 DB source_strands
+      引用集 → 删除（先建后删顺序由调用方保证：清理 → merge 全量替换）
+    - 悬挂边（source/target 无对应节点）删除
+    - code AST 节点（file_type != knowledge）一律不动（T2 红线）
+
+    Returns:
+        (removed_nodes, removed_edges)；DB 不可读 → (0, 0) 跳过清理。
+    """
+    ref = _load_db_knowledge_reference(db_path)
+    if ref is None:
+        print("  [WIKI_GRAPH] cleanup skipped (DB unavailable)")
+        return (0, 0)
+    reality_ids, strand_topics = ref
+
+    nodes = main.get("nodes", [])
+    links = main.get("links", [])
+
+    removed_ids: set = set()
+    for n in nodes:
+        nid = n.get("id", "")
+        if n.get("file_type") != "knowledge":
+            continue
+        if nid.startswith("reality_"):
+            try:
+                rid = int(nid.split("_", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            if rid not in reality_ids:
+                removed_ids.add(nid)
+        elif nid.startswith("theme_"):
+            removed_ids.add(nid)
+        elif _STRAND_TOPIC_RE.match(nid) and nid not in strand_topics:
+            removed_ids.add(nid)
+
+    if removed_ids:
+        main["nodes"] = [n for n in nodes if n.get("id") not in removed_ids]
+        links = main.get("links", [])
+
+    node_ids = {n.get("id") for n in main["nodes"]}
+    kept = [l for l in links
+            if l.get("source") in node_ids and l.get("target") in node_ids]
+    removed_edges = len(links) - len(kept)
+    main["links"] = kept
+    return (len(removed_ids), removed_edges)
+
+
+def merge_into_main_graph(subgraph: dict, main_path: str = GRAPH_JSON,
+                          db_path: str = CA_TOPICS_DB) -> bool:
     """将 wiki 子图合并到主 graph.json。
 
+    第三轮 T2：合并前对主图 knowledge 域做一致性清理（realities 表为唯一权威，
+    清僵尸 reality / theme 残留 / 悬挂边），然后 merge。
     不会覆盖已有 AST 节点。幂等——已存在的 wiki 节点不重复添加。
     """
     if not os.path.exists(main_path):
         print(f"[WIKI_GRAPH] main graph not found at {main_path}, skipping merge")
         return False
 
-    with open(main_path) as f:
-        main = json.load(f)
+    try:
+        with open(main_path) as f:
+            main = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[WIKI_GRAPH] main graph load failed: {exc}, skipping merge")
+        return False
+
+    removed_nodes, removed_edges = _clean_knowledge_domain(main, db_path)
+    if removed_nodes or removed_edges:
+        print(f"[WIKI_GRAPH] knowledge cleanup: -{removed_nodes} nodes, "
+              f"-{removed_edges} edges")
 
     existing_ids = {n["id"] for n in main.get("nodes", [])}
     added_nodes = 0
@@ -479,10 +582,11 @@ def merge_into_main_graph(subgraph: dict, main_path: str = GRAPH_JSON) -> bool:
             existing_edges.add(key)
             added_edges += 1
 
-    if added_nodes > 0 or added_edges > 0:
+    if removed_nodes or removed_edges or added_nodes > 0 or added_edges > 0:
         with open(main_path, "w") as f:
             json.dump(main, f, ensure_ascii=False, indent=2)
-        print(f"[WIKI_GRAPH] merged: {added_nodes} nodes + {added_edges} edges")
+        print(f"[WIKI_GRAPH] merged: +{added_nodes} nodes, +{added_edges} edges"
+              f" (cleanup: -{removed_nodes} nodes, -{removed_edges} edges)")
     else:
         print(f"[WIKI_GRAPH] no changes")
 

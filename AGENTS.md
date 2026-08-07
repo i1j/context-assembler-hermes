@@ -77,7 +77,7 @@ hermes config get context.engine
 > 本文件只保留入口级信息。话题摘要链路关键经验（Jaccard 铁则 / topic_split 阈值 / merge 策略 / theme 链路 / token 配置 / 路径解析链 / hdl 规范）、部署与多 profile 同步、Codex 修复工作流等**设计/调试细节已迁移至 OpenViking 技术文档**：
 
 - **完整技术参考**：`viking://resources/projects/context-assembler/AGENTS/AGENTS.md`
-- **决策页**（按主题）：`docs/wiki/decisions/35-strand-multi-affair-summarization.md`（strand 摘要 / hdl 规范 / Jaccard 铁则）、`docs/wiki/decisions/36-theme-wiki-generation.md`（theme 归并 / 注入 / 链路经验）、`docs/wiki/decisions/37-reality-restructure.md` / `38-reality-graph-inject-merge.md` / `39-reality-member-clouds.md` / `40-flash-reprocess-pilot.md` / `41-reality-production-migration.md`（**生产 reality 化，theme 退役**）
+- **决策页**（按主题）：`docs/wiki/decisions/35-strand-multi-affair-summarization.md`（strand 摘要 / hdl 规范 / Jaccard 铁则）、`docs/wiki/decisions/36-theme-wiki-generation.md`（theme 归并 / 注入 / 链路经验）、`docs/wiki/decisions/37-reality-restructure.md` / `38-reality-graph-inject-merge.md` / `39-reality-member-clouds.md` / `40-flash-reprocess-pilot.md` / `41-reality-production-migration.md`（**生产 reality 化，theme 退役**）、`42-hindsight-borrowed-retrieval.md`（**Hindsight 借鉴：检索图路/时序路 + 心智模型层**，精炼轮 v2.5 联动）
 
 改代码前必读对应决策页（尤其涉及话题摘要链路、theme 归并、独立脚本跑 reprocess/evaluate 时）。
 

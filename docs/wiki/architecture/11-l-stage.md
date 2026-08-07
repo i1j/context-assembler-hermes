@@ -35,13 +35,14 @@ L4 是插件级 **`IdleRefinementDaemon`**（`ca/refinement.py`，daemon=True，
 
 **精炼任务（v2，对象 = realities 表）**：
 1. 并发会话保护（跳过活跃 session 的 source 数据）
-2. Reality 归并审查（v2 核心，宁并不分：单 strand/同 session 拆裂/向量预筛候选 → 承接判定 → s2r 重映射）
+2. Reality 归并审查（v2 核心，宁并不分：单 strand/同 session 拆裂/向量预筛/跨块 hdl 相同/graphify 社区 五源候选 → 承接判定 → s2r 重映射）
 3. 内容层详情重生成（仅 affected，分批 ≤10，hdl/current_status 与全成员同步，timeline 代码维护）
 4. Reality 内精炼（1 次 4B per reality：去冗余、纠错、矛盾合并）
 5. Fct↔Reality 交叉验证（重读 Fct → 4B 对比一致性）
 6. 僵尸清理（空 centroid / 死 source）
 7. Reality 健康评分 + 自动标记 `flagged_for_review`
-8. 如有改动 → 触发 L3 graphify 增量同步（sync_realities_to_graph）
+8. 知识子图全量重建（v2.3：reality 权威，清僵尸/悬挂边，重建后社区发现供 Step 2e）
+9. 事实关联建边（v2.4→v2.6：shares_topic bigram / depends_on·continues 承接判定 / references_ov reality↔OV 项目数据 → 知识图谱关联层；代码关联不建边，权威源是 OV 文档 frontmatter；**数据修复前置**：Step 1.5/4/6/7 先修数据，Step 8/8.5 后建边）
 
 **配置**：`REFINEMENT_*` 族（`ca/config.py`），含 `CHECK_INTERVAL`、`MIN_NEW_TURNS`、
 `SINGLE_STRAND_TRIGGER`、`MAX_ENTRIES_PER_CYCLE`、`MERGE_REVIEW`、`MAX_MERGES_PER_CYCLE` 等。
@@ -68,7 +69,7 @@ LStageMixin
   │       │   ├── 交叉验证 ──→  修正不一致
   │       │   ├── 僵尸清理 ──→  清 empty centroid / 死 source
   │       │   ├── 健康评分 ──→  标记 flagged_for_review
-  │       │   └── graphify 增量同步（sync_realities_to_graph）
+  │       │   └── 知识子图重建（v2.3：reality 权威全量，清僵尸/悬挂边）
   │       └── 未达阈值 → 继续休眠
   └── stop_idle_refinement()           ← 新增：clean 退出
 ```

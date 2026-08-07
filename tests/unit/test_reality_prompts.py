@@ -255,9 +255,13 @@ class TestTimelineAppend:
         assert result == ["已识别5.3 GB孤儿数据"]  # 未追加
 
     def test_append_new(self):
+        """R-4（决策 42）：追加结构化为 {"hdl", "ts"}；存量 str 条目保留（2026-08-08 设计变更跟随）。"""
         tl = ["旧hdl"]
         result = reality_mod.append_timeline_hdl(tl, "新hdl")
-        assert result == ["旧hdl", "新hdl"]
+        assert result[0] == "旧hdl"  # 存量 str 条目保留
+        assert len(result) == 2
+        assert result[1]["hdl"] == "新hdl"
+        assert isinstance(result[1]["ts"], float)
 
     def test_append_empty(self):
         """空 hdl 不追加。"""

@@ -1000,13 +1000,17 @@ def update_reality(
             return False
 
         new_timeline = json.loads(row[0]) if row[0] else []
+        # R-4（决策 42）存量兼容：str 条目（旧 hdl）在 seq 计算时跳过（dict 才可取 seq）
         if timeline_entry:
             entry = dict(timeline_entry)
+            entry["ts"] = entry.get("ts") or time.time()  # R-4：结构化时间戳
             if "seq" not in entry:
-                entry["seq"] = max([e.get("seq", 0) for e in new_timeline] or [0]) + 1
+                entry["seq"] = max([e.get("seq", 0) for e in new_timeline
+                                    if isinstance(e, dict)] or [0]) + 1
             new_timeline.append(entry)
         if changes:
-            new_timeline.append({"seq": max([e.get("seq", 0) for e in new_timeline] or [0]) + 1,
+            new_timeline.append({"seq": max([e.get("seq", 0) for e in new_timeline
+                                             if isinstance(e, dict)] or [0]) + 1,
                                  "changes": list(changes),
                                  "session_id": (source_strand or {}).get("session_id", "")})
 

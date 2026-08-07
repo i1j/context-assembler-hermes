@@ -227,6 +227,19 @@ def sync_realities_to_graph(
             for sid, strand_ids in sources.items():
                 for strand_id in strand_ids or []:
                     topic_nid = f"topic_{sid}_S{strand_id}"
+                    # 第三轮 T1：补建 topic source 节点（对齐 build_wiki_subgraph
+                    # 节点格式）——根治 merged_into 悬挂边（增量 sync 不再只写边引用）。
+                    # 幂等：下方 existing_ids 去重复用（节点已存在则跳过）。
+                    new_nodes.append({
+                        "id": topic_nid,
+                        "label": f"Strand {sid}/S{strand_id}",
+                        "norm_label": f"topic_{sid}_S{strand_id}".lower(),
+                        "file_type": "knowledge",
+                        "source_file": f"strand_summaries/{sid}/S{strand_id}",
+                        "source_location": f"{sid}/S{strand_id}",
+                        "_origin": "wiki",
+                        "community": 0,
+                    })
                     new_links.append({
                         "source": topic_nid,
                         "target": nid,

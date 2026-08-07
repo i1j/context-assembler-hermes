@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from .config import Config
@@ -553,14 +554,19 @@ def append_timeline_hdl(timeline: list, hdl: str) -> list:
     根因：merge fallback 路径只 append old_hdl 但 hdl 不重写 → 下一次
     merge 的 old_hdl 仍是同一值，重复追加（reality@35 第 3/4 条相同）。
     规则：空 hdl 不追加；与末条相同不追加（保持演变序列唯一）。
+    R-4（决策 42）：追加结构化为 {"hdl": h, "ts": time.time()}；末条兼容
+    str（存量）或 dict（新结构）——比较时取 hdl 字段。
     返回新 timeline（原地修改并返回）。
     """
     h = (hdl or "").strip()
     if not h:
         return timeline
-    if timeline and str(timeline[-1]).strip() == h:
-        return timeline
-    timeline.append(h)
+    if timeline:
+        last = timeline[-1]
+        last_hdl = last.get("hdl") if isinstance(last, dict) else str(last)
+        if str(last_hdl).strip() == h:
+            return timeline
+    timeline.append({"hdl": h, "ts": time.time()})
     return timeline
 
 
@@ -798,6 +804,14 @@ def _cold_start_cosine_candidates(
     return scored[:top_k]
 
 
+def _min_start_turn(strand: dict) -> int:
+    """strand 起始轮次（turns 列表最小值）；空/缺省 → 0（R-2 生长序排序键）。"""
+    turns = strand.get("turns") or []
+    nums = [int(t) for t in turns
+            if isinstance(t, (int, float)) or str(t).isdigit()]
+    return min(nums) if nums else 0
+
+
 def run_reality_merge(
     strands: list[dict],
     realities: list[dict],
@@ -900,6 +914,9 @@ def run_reality_merge(
             failed += len(group)
             continue
         try:
+            # R-2 生长序约束 1（决策 42）：group 内 strand 按起始轮次升序——
+            # timeline 追加顺序 = strand 归并顺序（代码维护，勿信 LLM）
+            group.sort(key=_min_start_turn)
             prompt = build_merge_reality_prompt(reality, group, max_chars=max_chars)
             raw = call(prompt)
             result = parse_reality_response(raw)
@@ -923,6 +940,7 @@ def run_reality_merge(
                 "turns": group[0].get("turns") or [],
                 "session_id": group[0].get("session_id", ""),
                 "overview": timeline_ov,
+                "ts": time.time(),  # R-4（决策 42）：结构化时间戳
             }
             centroid_json = None
             if embed_client is not None:
@@ -974,6 +992,7 @@ def run_reality_merge(
                 "turns": st.get("turns") or [],
                 "session_id": st.get("session_id", ""),
                 "overview": timeline_ov,
+                "ts": time.time(),  # R-4（决策 42）：结构化时间戳
             }
             centroid_json = None
             if embed_client is not None:

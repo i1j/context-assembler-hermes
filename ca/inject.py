@@ -15,6 +15,7 @@
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -342,6 +343,61 @@ def _exclude_session_realities(rows, exclude_session_id: Optional[str]) -> list:
     return filtered
 
 
+def _default_graph_path() -> Path:
+    """graph.json 路径（插件根 graphify-out/，与 __init__.py 增量同步一致）。"""
+    return (Path(__file__).resolve().parent.parent
+            / "graphify-out" / "graph.json")
+
+
+def _reality_id_from_node(node_id: str) -> Optional[int]:
+    try:
+        return int(node_id.split("_", 1)[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _load_graph_neighbors(graph_path, budget_ids: list,
+                          candidates: list) -> list:
+    """图路候选扩展（决策 42 R-1）：budget 中 reality 的一跳图邻居。
+
+    只读 reality 间边（co_occurs_with / shares_topic / depends_on / continues），
+    深度 1、去重（budget 内不重复）、上限 +5（超过截断）。
+    容错：graph.json 不存在/解析失败 → 返回空列表（无图时行为与现状完全一致）。
+    返回 candidates 中的邻居 dict（reality_id/name/hdl/current_status/timeline）。
+    """
+    try:
+        with open(graph_path, encoding="utf-8") as f:
+            graph = json.load(f)
+    except Exception as exc:
+        logger.debug("[CA_INJECT] graph route skipped: %s", exc)
+        return []
+    try:
+        rels = {"co_occurs_with", "shares_topic", "depends_on", "continues"}
+        budget_set = {f"reality_{b}" for b in budget_ids}
+        by_id = {c["reality_id"]: c for c in candidates}
+        out: list = []
+        seen = set(budget_ids)
+        for e in (graph.get("links") or graph.get("edges") or []):
+            if e.get("relation") not in rels:
+                continue
+            src, tgt = e.get("source"), e.get("target")
+            rid = None
+            if src in budget_set and str(tgt).startswith("reality_"):
+                rid = _reality_id_from_node(tgt)
+            elif tgt in budget_set and str(src).startswith("reality_"):
+                rid = _reality_id_from_node(src)
+            if rid is None or rid in seen or rid not in by_id:
+                continue
+            seen.add(rid)
+            out.append(by_id[rid])
+            if len(out) >= 5:
+                break
+        return out
+    except Exception as exc:
+        logger.debug("[CA_INJECT] graph route parse failed: %s", exc)
+        return []
+
+
 def pick_injection_realities(
     query: str,
     q_emb: list,
@@ -430,6 +486,16 @@ def pick_injection_realities(
                             "(θ_max=%.2f), empty injection", THETA_MAX)
                 return []
             budget = in_range[:QUERY_CLOUD_TOP_K]
+            # ③.5 图路扩展（决策 42 R-1：图邻居候选扩展，recall augmentation；
+            # 只扩展候选池，排序/拣选逻辑不动——决策 38 行为信号优先不被破坏）
+            neighbors = _load_graph_neighbors(
+                _default_graph_path(),
+                [c["reality_id"] for c in budget],
+                candidates)
+            if neighbors:
+                budget = budget + neighbors
+                logger.info("[CA_INJECT] graph route: +%d neighbors",
+                            len(neighbors))
             for i, c in enumerate(budget):
                 c["index"] = i
             picked = _pick_by_4b(query, budget, limit)

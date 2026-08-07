@@ -199,6 +199,10 @@ class IdleRefinementDaemon:
                 self._run_graphify_sync()
                 graphify_synced = 1
 
+            # Step 8.5: 事实关联建边（34 v2.4/v2.6/v2.7；信号 A 暂缓，本轮 B + C）
+            tasks_run.append("fact_linking")
+            associations_added = self._run_fact_linking(conn)
+
             # 写 refinement_meta 记录
             duration = time.monotonic() - t0
             write_refinement_meta(
@@ -285,10 +289,12 @@ class IdleRefinementDaemon:
             candidates.append({
                 "entry_id": eid,
                 "title": name or "",
+                "hdl": hdl or "",
                 "overview": overview,
                 "changes": changes,
                 "key_facts": cs.get("key_facts") or [],
                 "open_items": cs.get("goals") or [],
+                "current_status": cs,
                 "source_strands": source_strands,
                 "centroid_json": cent_json,
                 "updated_at": updated,
@@ -532,8 +538,10 @@ class IdleRefinementDaemon:
 
         # 构造 prompt
         prompt = _CROSS_VALIDATE_PROMPT.format(
-            entry_title=json.dumps(entry["title"], ensure_ascii=False),
-            entry_facts=json.dumps(entry["key_facts"], ensure_ascii=False),
+            reality_name=json.dumps(entry["title"], ensure_ascii=False),
+            reality_hdl=json.dumps(entry.get("hdl") or "", ensure_ascii=False),
+            reality_cs=json.dumps(entry.get("current_status") or {},
+                                  ensure_ascii=False),
             fct_data=json.dumps(turns_data, ensure_ascii=False),
         )
 
@@ -761,6 +769,34 @@ class IdleRefinementDaemon:
         except Exception as exc:
             logger.warning("[CA_L4] Graphify sync failed: %s", exc)
 
+    # ── Step 8.5: 事实关联建边（信号 B L2 + 信号 C L1；不上 L3）──
+
+    def _run_fact_linking(self, conn) -> int:
+        """Step 8.5 事实关联建边（ca/fact_linking.py，34 v2.4/v2.6/v2.7）。
+
+        Returns:
+            新增边数（记 refinement_meta.associations_added）。
+        """
+        try:
+            from .fact_linking import run_fact_linking
+            rows = conn.execute(
+                "SELECT reality_id, name, hdl, current_status FROM realities"
+            ).fetchall()
+            realities = [
+                {"reality_id": r[0], "name": r[1] or "", "hdl": r[2] or "",
+                 "current_status": self._safe_json(r[3], {})}
+                for r in rows
+            ]
+            if not realities:
+                return 0
+            added = run_fact_linking(conn, realities)
+            if added:
+                logger.info("[CA_L4] Fact linking: +%d edges", added)
+            return added
+        except Exception as exc:
+            logger.warning("[CA_L4] Fact linking failed: %s", exc)
+            return 0
+
     # ── 工具 ──
 
     @staticmethod
@@ -815,21 +851,32 @@ open_items: {open_items}
 """
 
 _CROSS_VALIDATE_PROMPT = """你是一个数据一致性检测助手。你收到：
-A) 一个知识条目（wiki entry）的标题和已有 key_facts
-B) 该条目的原始 Fct 数据（话题摘要的原始输入）
+A) 一个现实工作对象（reality）的 name、hdl 状态锚点与当前状态（current_status）
+B) 该 reality 的原始 Fct 数据（话题摘要的原始输入）
+
+reality.current_status 四段结构：
+  current_state — 现状快照
+  key_facts — 已确认的持久事实
+  goals — 进行中的目标
+  context — 相关文件/资源（可空）
 
 请判断两边的核心内容是否一致。
 
-- 如果 Fct 中包含 wiki key_facts 中没有的重要信息 → "inconsistent": true
-- 如果 wiki key_facts 中包含了 Fct 不支持或矛盾的信息 → "inconsistent": true
+- 如果 Fct 中包含 reality current_status（key_facts/goals/current_state）中没有
+  的重要信息 → "inconsistent": true
+- 如果 reality current_status 中包含了 Fct 不支持或矛盾的信息 → "inconsistent": true
 - 如果两者一致 → "inconsistent": false
 
-当 inconsistent=true，请输出修正后的 facts / changes / open_items。
+当 inconsistent=true，请输出修正后的 facts / changes / open_items：
+  corrected_facts → 写回 current_status.key_facts
+  corrected_changes → 历史变更（timeline changes 条目）
+  corrected_open_items → 写回 current_status.goals
 
-=== 已有 wiki entry ===
+=== Reality ===
 
-title: {entry_title}
-facts: {entry_facts}
+name: {reality_name}
+hdl: {reality_hdl}
+current_status: {reality_cs}
 
 === 原始 Fct 数据 ===
 
