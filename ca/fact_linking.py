@@ -51,6 +51,98 @@ OV_SEARCH_TIMEOUT = float(os.getenv("CA_OV_SEARCH_TIMEOUT", "15"))
 _GRAPH_LOCK = threading.Lock()
 
 
+# ── 信号 C：profile 过滤（2026-08-07 用户约束）──
+# references_ov 边允许非 CA 项目资源（resources/projects/windows/... 等），
+# 但禁止**其它 profile** 的资源（user/winker/、topics/sysadmin/、
+# resources/winker/...）——profile 边界外数据不得混入图。
+# profile 名单运行时扫描 ~/.hermes/profiles/（不硬编码）。
+
+def _known_profiles() -> set:
+    """扫描本地已安装的 Hermes profile 名单。
+
+    ~/.hermes/profiles/ 下混有非 profile 目录（.git/ca_cache/scripts 等，
+    虽有 config.yaml/memories 但结构不完整）。用 auth.json 判 profile 身份
+    （真 profile 必有，2026-08-07 实测 tester/winker/sysadmin/pmgr 有、
+    .git/ca_cache/scripts 无）。
+    """
+    try:
+        profiles_root = Path.home() / ".hermes" / "profiles"
+        if profiles_root.is_dir():
+            out = set()
+            for p in profiles_root.iterdir():
+                if p.is_dir() and (p / "auth.json").is_file():
+                    out.add(p.name)
+            return out
+    except OSError:
+        pass
+    return set()
+
+
+_PROFILES_CACHE: Optional[frozenset] = None
+
+
+def known_profiles() -> set:
+    """带缓存扫描（进程内 profile 名单不变）。"""
+    global _PROFILES_CACHE
+    if _PROFILES_CACHE is None:
+        _PROFILES_CACHE = frozenset(_known_profiles())
+    return set(_PROFILES_CACHE)
+
+
+def current_profile() -> Optional[str]:
+    """当前 profile 名：HERMES_HOME 尾段（多 profile 环境事实源）。"""
+    env_home = os.environ.get("HERMES_HOME", "").strip()
+    if env_home:
+        return Path(env_home).name
+    try:
+        from hermes_constants import get_hermes_home  # 生产 daemon 内可用
+        return Path(get_hermes_home()).name
+    except Exception:
+        return None
+
+
+def filter_foreign_profiles(hits: List[dict]) -> List[dict]:
+    """剔除其它 profile 的命中；保留本 profile 与无 profile 段（共享资源）命中。
+
+    用户约束（2026-08-07）：references_ov 允许非 CA 项目资源，但禁止其它
+    profile 资源。uri 形态：
+      viking://user/<profile>/...        → user 后第一段 = profile
+      viking://topics/<profile>/...      → topics 后第一段 = profile
+      viking://resources/<profile>/...   → resources 后第一段 = profile
+                                           （resources/projects/... 除外——共享项目）
+      viking://resources/projects/...    → 无 profile 段 → 保留（含非 CA 项目）
+    """
+    if not hits:
+        return hits
+    profs = known_profiles()
+    if not profs:
+        return hits  # 扫描不到名单 → 不过滤（保守）
+    mine = current_profile()
+    out = []
+    for h in hits:
+        uri = str(h.get("uri") or "")
+        if not uri or not uri.startswith("viking://"):
+            out.append(h)  # 无 uri / 非 viking → 无法判定，保留
+            continue
+        segs = uri[len("viking://"):].split("/")
+        profile_seg = None
+        for i, s in enumerate(segs):
+            if s in ("user", "topics") and i + 1 < len(segs):
+                profile_seg = segs[i + 1]
+                break
+            if s == "resources" and i + 1 < len(segs) and segs[i + 1] != "projects":
+                cand = segs[i + 1]
+                if cand in profs:
+                    profile_seg = cand
+                    break
+        if profile_seg is None:
+            out.append(h)  # 共享项目/架构资源 → 保留
+        elif mine and profile_seg == mine:
+            out.append(h)  # 本 profile → 保留
+        # 其它 profile → 剔除
+    return out
+
+
 def _graph_path() -> Path:
     return Path(__file__).resolve().parent.parent / "graphify-out" / "graph.json"
 
@@ -307,7 +399,11 @@ def _ov_doc_nid(hit: dict) -> Optional[str]:
 
 
 def _ov_search_find(query: str) -> Optional[List[dict]]:
-    """OV 语义检索 top 命中（L1 API；超时/失败 → None，降级跳过不崩）。"""
+    """OV 语义检索 top 命中（L1 API；超时/失败 → None，降级跳过不崩）。
+
+    2026-08-07：结果经 filter_foreign_profiles 剔除其它 profile 命中
+    （用户约束：references_ov 允许非 CA 项目，禁止其它 profile 资源）。
+    """
     import urllib.request
 
     url = f"{OV_API.rstrip('/')}{OV_SEARCH_PATH}"
@@ -321,7 +417,10 @@ def _ov_search_find(query: str) -> Optional[List[dict]]:
         logger.warning("[CA_L4] fact_linking OV search failed (query=%.30s): %s",
                        query, exc)
         return None
-    return _extract_ov_hits(data)
+    hits = _extract_ov_hits(data)
+    if hits:
+        hits = filter_foreign_profiles(hits)
+    return hits
 
 
 def _run_ov_references(realities: List[dict]) -> int:

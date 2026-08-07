@@ -10,6 +10,7 @@
 """
 
 import json
+from pathlib import Path
 
 import ca.fact_linking as fl
 
@@ -242,3 +243,70 @@ class TestSignalC:
         assert fl.run_fact_linking(None, realities) == 0
         g = json.loads(gp.read_text(encoding="utf-8"))
         assert g["links"] == []
+
+
+class TestProfileFilter:
+    """其它 profile 资源过滤（2026-08-07 用户约束：允许非 CA 项目，禁止其它 profile）。"""
+
+    def test_foreign_profiles_removed(self, monkeypatch):
+        """user/topics/resources 下的其它 profile 命中 → 剔除。"""
+        monkeypatch.setattr(fl, "_PROFILES_CACHE", frozenset({"tester", "winker", "sysadmin", "pmgr"}))
+        hits = [
+            {"uri": "viking://user/winker/memories/x.md", "score": 0.9},
+            {"uri": "viking://topics/sysadmin/t1/.abstract.md", "score": 0.8},
+            {"uri": "viking://resources/winker/ca_topics/w/mrx/.overview.md", "score": 0.7},
+        ]
+        assert fl.filter_foreign_profiles(hits) == []
+
+    def test_own_profile_and_shared_kept(self, monkeypatch):
+        """本 profile + 无 profile 段（共享项目/非 CA 项目）→ 保留。"""
+        monkeypatch.setattr(fl, "_PROFILES_CACHE", frozenset({"tester", "winker", "sysadmin", "pmgr"}))
+        monkeypatch.setattr(fl, "current_profile", lambda: "tester")
+        hits = [
+            {"uri": "viking://user/tester/memories/x.md", "score": 0.9},
+            {"uri": "viking://resources/projects/context-assembler/decisions/34-idle-refinement/34-idle-refinement.md/背景.md", "score": 0.8},
+            {"uri": "viking://resources/projects/windows/comfyui/docs/wiki/README.md", "score": 0.7},
+            {"uri": "viking://resources/TP-001/TP-001.md", "score": 0.6},
+        ]
+        out = fl.filter_foreign_profiles(hits)
+        assert len(out) == 4
+
+    def test_known_profiles_skips_non_profile_dirs(self, tmp_path, monkeypatch):
+        """~/.hermes/profiles/ 下非 profile 目录（.git/ca_cache/scripts）不混入名单。"""
+        fake_home = tmp_path
+        fake_root = fake_home / ".hermes" / "profiles"
+        for name in ("tester", "winker", ".git", "ca_cache", "scripts"):
+            d = fake_root / name
+            d.mkdir(parents=True)
+            (d / "auth.json").write_text("{}")
+        # 非 profile 目录删掉 auth.json（模拟真实结构：.git/ca_cache 无 auth.json）
+        for name in (".git", "ca_cache", "scripts"):
+            (fake_root / name / "auth.json").unlink()
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+        assert fl._known_profiles() == {"tester", "winker"}
+
+    def test_ov_search_find_filters(self, monkeypatch):
+        """_ov_search_find 结果经 profile 过滤（其它 profile 命中不返回）。"""
+        monkeypatch.setattr(fl, "_PROFILES_CACHE", frozenset({"tester", "winker", "sysadmin", "pmgr"}))
+        monkeypatch.setattr(fl, "current_profile", lambda: "tester")
+        # mock 网络层：返回含其它 profile 命中的响应
+        import types
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self):
+                return json.dumps({"status": "ok", "result": {
+                    "resources": [
+                        {"uri": "viking://user/winker/memories/x.md", "score": 0.9},
+                        {"uri": "viking://resources/projects/context-assembler/decisions/34-idle-refinement/34-idle-refinement.md/背景.md", "score": 0.8},
+                    ], "memories": [], "skills": []}}).encode()
+        fake_urlopen = lambda req, timeout=None: FakeResp()
+        # _ov_search_find 内部 import urllib.request → 需 patch 模块
+        import urllib.request as _ur
+        monkeypatch.setattr(_ur, "urlopen", fake_urlopen)
+        monkeypatch.setattr(fl, "OV_API", "http://127.0.0.1:1")
+        monkeypatch.setattr(fl, "OV_SEARCH_TIMEOUT", 1)
+        monkeypatch.setattr(fl, "OV_SEARCH_PATH", "/x")
+        hits = fl._ov_search_find("test")
+        assert len(hits) == 1
+        assert hits[0]["uri"].startswith("viking://resources/projects/")
