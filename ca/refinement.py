@@ -2,7 +2,7 @@
 ca/refinement.py — L4 空闲精炼管线 (v5.14)
 
 设计决策: 34-idle-refinement.md
-  viking://resources/projects/context-assembler/wiki/decisions/34-idle-refinement.md
+  viking://resources/projects/context-assembler/decisions/34-idle-refinement/34-idle-refinement.md
 
 职责：
   - 空闲守护线程（周期检查 + 条件触发）
@@ -127,7 +127,11 @@ class IdleRefinementDaemon:
             from hermes_constants import get_hermes_home
             cache_dir = Path(get_hermes_home()) / "ca_cache"
         except ImportError:
-            cache_dir = Path.home() / ".hermes" / "ca_cache"
+            # 独立脚本环境（无 hermes_constants）：尊重 HERMES_HOME env，
+            # 与 store._get_topic_store_path fallback 保持一致（否则多 profile
+            # 下误清全部 source_strands —— 2026-08-07 精炼轮误清事故）。
+            env_home = os.environ.get("HERMES_HOME", "").strip()
+            cache_dir = (Path(env_home) if env_home else Path.home() / ".hermes") / "ca_cache"
 
         if not cache_dir.exists():
             return 0
@@ -501,7 +505,11 @@ class IdleRefinementDaemon:
             from hermes_constants import get_hermes_home
             cache_dir = Path(get_hermes_home()) / "ca_cache"
         except ImportError:
-            cache_dir = Path.home() / ".hermes" / "ca_cache"
+            # 独立脚本环境（无 hermes_constants）：尊重 HERMES_HOME env，
+            # 与 store._get_topic_store_path fallback 保持一致（否则多 profile
+            # 下误清全部 source_strands —— 2026-08-07 精炼轮误清事故）。
+            env_home = os.environ.get("HERMES_HOME", "").strip()
+            cache_dir = (Path(env_home) if env_home else Path.home() / ".hermes") / "ca_cache"
 
         db_path = cache_dir / f"{session_id}.db"
         if not db_path.exists():
@@ -632,7 +640,11 @@ class IdleRefinementDaemon:
             from hermes_constants import get_hermes_home
             cache_dir = Path(get_hermes_home()) / "ca_cache"
         except ImportError:
-            cache_dir = Path.home() / ".hermes" / "ca_cache"
+            # 独立脚本环境（无 hermes_constants）：尊重 HERMES_HOME env，
+            # 与 store._get_topic_store_path fallback 保持一致（否则多 profile
+            # 下误清全部 source_strands —— 2026-08-07 精炼轮误清事故）。
+            env_home = os.environ.get("HERMES_HOME", "").strip()
+            cache_dir = (Path(env_home) if env_home else Path.home() / ".hermes") / "ca_cache"
 
         cleaned = {}
         for sid, tids in source_ids.items():
@@ -652,6 +664,7 @@ class IdleRefinementDaemon:
         ).fetchall()
 
         scored = 0
+        flagged_count = 0
         for r in rows:
             try:
                 eid, name, cs_json, tl_json, cent_json, src_json, updated, created = r
@@ -677,6 +690,8 @@ class IdleRefinementDaemon:
                     created_at=created or 0,
                 )
                 flagged = 1 if score < 0.3 else 0
+                if flagged:
+                    flagged_count += 1
 
                 # 查 topic_count（决策 41: strand_to_reality 计数）
                 cur = conn.execute(
@@ -698,17 +713,7 @@ class IdleRefinementDaemon:
         if scored > 0:
             conn.commit()
             logger.info("[CA_L4] Health scored: %d entries (%.1f%% flagged)",
-                        scored, scored and 100 * sum(
-                            1 for row in rows
-                            if self._compute_health_score(
-                                n_sources=len(self._safe_json(row[6], {})),
-                                centroid_json=row[5] or "",
-                                changes=self._safe_json(row[3], []),
-                                key_facts=self._safe_json(row[4], []),
-                                updated_at=row[7] or 0,
-                                created_at=row[8] or 0,
-                            ) < 0.3
-                        ) / scored)
+                        scored, 100 * flagged_count / scored)
         return scored
 
     @staticmethod
