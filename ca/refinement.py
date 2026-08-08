@@ -40,6 +40,24 @@ logger = logging.getLogger(__name__)
 # ── 哨兵常量 ──
 _EMPTY_TITLES = {"", "无", "无新增", "无新内容"}
 
+# ── OV 根探测（决策 44 前置，2026-08-08）──
+OV_API = os.getenv("OV_API", "http://127.0.0.1:1933")
+
+
+def _ov_probe_threshold() -> Optional[float]:
+    """探测启用阈值：复用信号 C 的 CA_OV_REFERENCE_THRESHOLD。
+
+    env 未配置 → None（保守：探测只登记候选根，不启用任何根，
+    与信号 C 未配置阈值不落图一致）。
+    """
+    raw = os.getenv("CA_OV_REFERENCE_THRESHOLD", "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
 
 # ═══════════════════════════════════════════════════════════════
 # 空闲守护线程
@@ -197,6 +215,15 @@ class IdleRefinementDaemon:
                 tasks_run.append("health_score")
                 scored = self._run_health_score(conn)
                 entries_reviewed += scored
+
+            # Step 4.5: OV 根探测（决策 44：多根逐步启用；Step 5 之前）
+            try:
+                probe_enabled = self._probe_ov_roots(conn)
+                if probe_enabled:
+                    tasks_run.append("ov_root_probe")
+                    logger.info("[CA_L4] ov_roots probe: 本轮启用 1 个新根")
+            except Exception as exc:
+                logger.warning("[CA_L4] ov_roots probe failed: %s", exc)
 
             # Step 5: Graphify 增量同步
             if Config.REFINEMENT_GRAPHIFY_SYNC and entries_modified > 0:
@@ -772,6 +799,176 @@ class IdleRefinementDaemon:
 
     # ── Step 5: Graphify 增量同步 ──
 
+    def _probe_ov_roots(self, conn=None) -> int:
+        """探测外部 OV 项目根并逐步启用（决策 44；Step 5 前每次 cycle 执行）。
+
+        1. fs/tree 探测 viking://resources/projects 根级项目目录
+        2. 未在 ov_roots 表 → INSERT OR IGNORE enabled=0（origin='refine_probe'）
+        3. 对 enabled=0 候选根：复用 OV search/find 统计 realities 语义命中
+           （每根最多 3 个 query，控制成本）；命中≥1 且 top-1 score ≥
+           CA_OV_REFERENCE_THRESHOLD → 启用该根
+        4. 每轮最多启用 1 个新根（防一轮全开 → 图爆炸）
+        5. 幂等：已存在根只更新 last_seen；已启用根不重复启用
+        6. env 未配置 CA_OV_REFERENCE_THRESHOLD → 只登记不启用（保守）
+
+        Returns:
+            本轮启用根数（0 或 1）。
+        """
+        threshold = _ov_probe_threshold()
+        if conn is None:
+            conn = _get_topic_conn()
+        now = time.time()
+
+        # 1. 探测 projects 根级项目目录
+        try:
+            root_uris = self._ov_projects_roots()
+        except Exception as exc:
+            logger.warning("[CA_L4] ov_roots probe: fs/tree failed: %s", exc)
+            return 0
+        if not root_uris:
+            logger.info("[CA_L4] ov_roots probe: projects 根探测为空（OV 不可用），跳过")
+            return 0
+
+        # 2. 新根入表 enabled=0；已存在根更新 last_seen（幂等）
+        try:
+            known = {r[0] for r in conn.execute(
+                "SELECT root_uri FROM ov_roots").fetchall()}
+            for uri in root_uris:
+                if uri in known:
+                    conn.execute(
+                        "UPDATE ov_roots SET last_seen=? WHERE root_uri=?",
+                        (now, uri))
+                else:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO ov_roots "
+                        "(root_uri, filters, enabled, origin, added_at, last_seen) "
+                        "VALUES (?, '{}', 0, 'refine_probe', ?, ?)",
+                        (uri, now, now))
+                    logger.info("[CA_L4] ov_roots probe: 新根登记 %s (enabled=0)",
+                                uri)
+            conn.commit()
+        except sqlite3.Error as exc:
+            logger.warning("[CA_L4] ov_roots probe: DB 写入失败: %s", exc)
+            return 0
+
+        # 3. 评估 enabled=0 候选根（阈值未配置 → 保守不启用）
+        if threshold is None:
+            logger.info("[CA_L4] ov_roots probe: CA_OV_REFERENCE_THRESHOLD 未配置，"
+                        "只登记候选根不启用")
+            return 0
+        try:
+            candidates = [r[0] for r in conn.execute(
+                "SELECT root_uri FROM ov_roots WHERE enabled=0 "
+                "ORDER BY root_uri").fetchall()]
+            reality_rows = conn.execute(
+                "SELECT name, hdl FROM realities ORDER BY reality_id"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            logger.warning("[CA_L4] ov_roots probe: 候选读取失败: %s", exc)
+            return 0
+        queries = [
+            " ".join(filter(None, [str(r[0] or ""), str(r[1] or "")]))[:200]
+            for r in reality_rows
+        ]
+        queries = [q for q in queries if q.strip()]
+
+        try:
+            from .fact_linking import _hit_score, _ov_search_find
+        except Exception:
+            _hit_score = None
+            _ov_search_find = None
+
+        enabled_uri: Optional[str] = None
+        for uri in candidates:
+            if enabled_uri is not None:
+                break  # 每轮最多启用 1 个
+            hit_count = 0
+            top_score = 0.0
+            for query in queries[:3]:  # 每根最多 3 个 query（成本控制）
+                if _ov_search_find is None:
+                    break
+                top = _ov_search_find(query)
+                if not top:
+                    continue
+                for hit in top:
+                    hit_uri = str(hit.get("uri") or hit.get("title")
+                                  or hit.get("name") or "")
+                    # 根边界：uri 本身或 uri + "/" 前缀（避免 osaka 匹配 osaka2）
+                    if not (hit_uri == uri
+                            or hit_uri.startswith(uri.rstrip("/") + "/")):
+                        continue
+                    hit_count += 1
+                    if _hit_score is not None:
+                        try:
+                            top_score = max(top_score, _hit_score(hit))
+                        except Exception:
+                            pass
+            if hit_count >= 1 and top_score >= threshold:
+                enabled_uri = uri
+                logger.info(
+                    "[CA_L4] ov_roots probe: 启用根 %s (hits=%d top_score=%.3f "
+                    "threshold=%.3f)", uri, hit_count, top_score, threshold)
+
+        if enabled_uri is not None:
+            try:
+                conn.execute(
+                    "UPDATE ov_roots SET enabled=1, last_seen=? "
+                    "WHERE root_uri=?", (now, enabled_uri))
+                conn.commit()
+                return 1
+            except sqlite3.Error as exc:
+                logger.warning("[CA_L4] ov_roots probe: 启用写入失败: %s", exc)
+                return 0
+        return 0
+
+    @staticmethod
+    def _ov_projects_roots() -> list[str]:
+        """fs/tree 探测 viking://resources/projects 根级项目目录（isDir）。
+
+        网络失败/超时 → []（降级跳过，不抛异常）。
+        """
+        import urllib.parse
+        import urllib.request
+        url = (f"{OV_API.rstrip('/')}/api/v1/fs/tree?"
+               + urllib.parse.urlencode(
+                   {"uri": "viking://resources/projects"}))
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            logger.warning("[CA_L4] ov_roots probe: fs/tree fetch failed: %s",
+                           exc)
+            return []
+        out: list[str] = []
+        for e in IdleRefinementDaemon._extract_probe_entries(payload):
+            if str(e.get("isDir", "false")).strip().lower() in ("true", "1"):
+                uri = str(e.get("uri") or "").strip()
+                if uri.startswith("viking://resources/projects/"):
+                    out.append(uri)
+        return sorted(set(out))
+
+    @staticmethod
+    def _extract_probe_entries(payload: Any) -> list[dict]:
+        """fs/tree 响应形状兜底（与 scripts/wiki_to_graph._extract_tree_entries 同规则）。"""
+        if isinstance(payload, list):
+            return [e for e in payload if isinstance(e, dict)]
+        if not isinstance(payload, dict):
+            return []
+        for key in ("entries", "items", "nodes", "files", "data"):
+            v = payload.get(key)
+            if isinstance(v, list):
+                return [e for e in v if isinstance(e, dict)]
+        result = payload.get("result")
+        if isinstance(result, dict):
+            for key in ("entries", "items", "nodes", "files", "data"):
+                v = result.get(key)
+                if isinstance(v, list):
+                    return [e for e in v if isinstance(e, dict)]
+        elif isinstance(result, list):
+            return [e for e in result if isinstance(e, dict)]
+        return []
+
     def _run_graphify_sync(self) -> None:
         """触发 wiki_to_graph.py 全量同步。"""
         try:
@@ -779,10 +976,19 @@ class IdleRefinementDaemon:
             import sys
             script = Path(__file__).resolve().parent.parent / "scripts" / "wiki_to_graph.py"
             if script.exists():
+                # 2026-08-08：显式注入 HERMES_HOME，防止子进程无 env 时按
+                # ~/.hermes fallback 读错 profile 的 ca_topics.db（原硬编码 tester 缺陷）。
+                env = dict(os.environ)
+                try:
+                    from hermes_constants import get_hermes_home
+                    env.setdefault("HERMES_HOME", str(get_hermes_home()))
+                except ImportError:
+                    pass
                 subprocess.Popen(
                     [sys.executable, str(script)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    env=env,
                 )
                 logger.info("[CA_L4] Graphify sync triggered")
         except Exception as exc:

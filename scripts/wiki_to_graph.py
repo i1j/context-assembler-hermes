@@ -25,10 +25,23 @@ try:
 except ImportError:
     _HAS_URLLIB = False
 
-CA_CACHE_DIR = os.getenv(
-    "CA_CACHE_DIR",
-    str(Path.home() / ".hermes" / "profiles" / "tester" / "ca_cache"),
-)
+def _resolve_ca_cache_dir() -> str:
+    """解析 CA cache 目录（2026-08-08 修复：不再硬编码 tester profile）。
+
+    解析顺序：CA_CACHE_DIR env（显式覆盖）→ HERMES_HOME env（gateway/独立脚本
+    注入）→ ~/.hermes/ca_cache fallback。与 store._get_topic_store_path 对齐，
+    避免 winker/sysadmin profile 跑时误读 tester 库。
+    """
+    env_cache = os.getenv("CA_CACHE_DIR", "").strip()
+    if env_cache:
+        return env_cache
+    env_home = os.getenv("HERMES_HOME", "").strip()
+    if env_home:
+        return str(Path(env_home) / "ca_cache")
+    return str(Path.home() / ".hermes" / "ca_cache")
+
+
+CA_CACHE_DIR = _resolve_ca_cache_dir()
 GRAPHIFY_OUT = os.getenv(
     "GRAPHIFY_OUT",
     str(Path(__file__).resolve().parent.parent / "graphify-out"),
@@ -43,17 +56,73 @@ NODE_PREFIX = "[知识]"
 # ── OV 设计文档追溯 ──
 OV_API = os.getenv("OV_API", "http://127.0.0.1:1933")
 TRACE_SOURCES = [
-    "viking://resources/projects/context-assembler/design/topic-summarization-decision.md/话题摘要化设计_v3_取代_OV_VLM_摘要.md",
-    # v6.5.4: 原 wiki/architecture/10-ca-ov-topic-submit.md 已不存在（OV 中为 design/ca-ov-topic-submit.md）
-    "viking://resources/projects/context-assembler/design/ca-ov-topic-submit.md",
+    "viking://resources/projects/context-assembler/decisions/topic-summarization-decision.md/话题摘要化设计_v3_取代_OV_VLM_摘要.md",
+    "viking://resources/projects/context-assembler/architecture/ca-ov-topic-submit.md",
+    # 决策 43 v4 目录重组后：三条核心决策线（34 精炼轮 / 37 reality 重构 / 38-reality 图模型）
+    "viking://resources/projects/context-assembler/decisions/34-idle-refinement/34-idle-refinement.md",
+    "viking://resources/projects/context-assembler/decisions/37-reality-restructure.md/37-reality-restructure.md",
+    "viking://resources/projects/context-assembler/decisions/38-reality-graph-inject-merge.md/38-reality-graph-inject-merge.md",
 ]
 CA_CODE_DIR = str(Path(__file__).resolve().parent.parent)
 
+# ── ov_roots 多根配置（决策 44 前置，2026-08-08）──
+# 权威 schema/种子在 ca/store.py _SCHEMA_SQL_STRANDS + _migrate_ov_roots_seed；
+# 此处为独立脚本运行（不经 store._get_topic_conn）时的幂等兜底，保证
+# build_wiki_subgraph 在任何入口都能读 ov_roots 表。
+_OV_CA_ROOT = "viking://resources/projects/context-assembler"
+_OV_ROOTS_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS ov_roots (
+    root_uri    TEXT PRIMARY KEY,
+    filters     TEXT DEFAULT '{}',
+    enabled     INTEGER DEFAULT 1,
+    origin      TEXT DEFAULT 'manual',
+    added_at    REAL,
+    last_seen   REAL
+);
+INSERT OR IGNORE INTO ov_roots (root_uri, filters, enabled, origin, added_at)
+VALUES
+ ('viking://resources/projects/context-assembler', '{}', 1, 'seed',
+  CAST(strftime('%s','now') AS REAL)),
+ ('viking://resources/projects/windows',
+  '{"exclude":["/code/"]}', 1, 'seed',
+  CAST(strftime('%s','now') AS REAL)),
+ ('viking://resources/projects/irobot', '{}', 0, 'seed',
+  CAST(strftime('%s','now') AS REAL));
+"""
+
+
+def _get_db_path() -> str:
+    """ca_topics.db 路径解析（2026-08-08 修复：HERMES_HOME 优先，不再硬编码 tester）。
+
+    解析顺序：模块级 CA_TOPICS_DB 显式覆盖（测试/独立脚本）→ CA_CACHE_DIR env
+    （显式覆盖）→ HERMES_HOME env（gateway/子进程注入）→ CA_CACHE_DIR fallback。
+    """
+    env_cache = os.getenv("CA_CACHE_DIR", "").strip()
+    env_home = os.getenv("HERMES_HOME", "").strip()
+    computed = (
+        os.path.join(env_cache, "ca_topics.db") if env_cache
+        else str(Path(env_home) / "ca_cache" / "ca_topics.db") if env_home
+        else os.path.join(CA_CACHE_DIR, "ca_topics.db")
+    )
+    if CA_TOPICS_DB != computed:
+        return CA_TOPICS_DB  # 显式覆盖（测试 monkeypatch / 调用方赋值）
+    return computed
+
 
 def _get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(CA_TOPICS_DB, timeout=5)
+    conn = sqlite3.connect(_get_db_path(), timeout=5)
     conn.row_factory = sqlite3.Row
+    _ensure_ov_roots(conn)
     return conn
+
+
+def _ensure_ov_roots(conn: sqlite3.Connection) -> None:
+    """ov_roots 表 + 种子幂等兜底（独立脚本入口；store 迁移已跑则无操作）。"""
+    try:
+        conn.executescript(_OV_ROOTS_SCHEMA_SQL)
+        conn.commit()
+    except sqlite3.Error as exc:
+        print(f"  [WIKI_GRAPH] ov_roots ensure failed: {exc}")
 
 
 def _extract_bigrams(text: str) -> list[str]:
@@ -86,6 +155,216 @@ def _bigram_idf(all_titles: list[str]) -> dict[str, float]:
     return {bg: math.log(n / d) for bg, d in df.items()}
 
 
+def _uri_ov_doc_nid(uri: str) -> str | None:
+    """URI 文件段规则生成 ov_doc nid（与 ca/fact_linking._ov_doc_nid uri 分支逐字节一致）。
+
+    取 uri 中第一个非隐藏 .md 段（跳过 .overview/.abstract 等隐藏摘要与碎片路径），
+    保留 .md 后缀；无主文档段 → None。
+    """
+    parts = [p for p in uri.rstrip("/").split("/") if p]
+    for p in parts:
+        if p.endswith(".md") and not p.startswith("."):
+            return f"ov_doc_{p.lower().replace(' ', '_')[:48]}"
+    return None
+
+
+def _extract_tree_entries(payload: Any) -> list[dict]:
+    """fs/tree 响应形状兜底：顶层 list / entries / items / data / result 嵌套。"""
+    if isinstance(payload, list):
+        return [e for e in payload if isinstance(e, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("entries", "items", "nodes", "files", "data"):
+        v = payload.get(key)
+        if isinstance(v, list):
+            return [e for e in v if isinstance(e, dict)]
+    result = payload.get("result")
+    if isinstance(result, dict):
+        for key in ("entries", "items", "nodes", "files", "data"):
+            v = result.get(key)
+            if isinstance(v, list):
+                return [e for e in v if isinstance(e, dict)]
+    elif isinstance(result, list):
+        return [e for e in result if isinstance(e, dict)]
+    return []
+
+
+def _fetch_tree(uri: str) -> list[dict]:
+    """GET /api/v1/fs/tree 单层条目列表；网络失败/超时 → [] + 警告（降级）。"""
+    if not _HAS_URLLIB:
+        return []
+    import urllib.parse
+    url = (f"{OV_API.rstrip('/')}/api/v1/fs/tree?"
+           + urllib.parse.urlencode({"uri": uri}))
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        print(f"  [WIKI_GRAPH] fs/tree fetch failed: {exc}"
+              " → 降级（保留 TRACE_SOURCES 逻辑）")
+        return []
+    return _extract_tree_entries(payload)
+
+
+def _recursive_fs_tree(uri: str, depth: int = 0, max_depth: int = 6,
+                       seen: set | None = None,
+                       root_uri: str | None = None) -> list[dict]:
+    """递归 fs/tree 收集（决策 44：OV fs/tree 非递归，多根必须逐级展开）。
+
+    isDir 条目（字符串 "True"/"1"）递归其 uri；文件条目直接收集。
+    max_depth 防失控（实测 windows 最深 4 级，6 足够）；seen 去环（防御性）。
+    单层失败 → 跳过该子目录（其余根不受影响）。
+    rel_path 完整性（2026-08-09 修复 B1/B2）：fs/tree 返回的 rel_path 随查询
+    层级变化（实测相对被查询 uri、顶层含/不含根段形态不一），递归收集必然丢
+    前缀 → 条目 rel_path 一律由完整 uri 剥离 root_uri 前缀推导（_rel_from_uri），
+    深层条目含全部前缀段，exclude "/code/" 等子串匹配不失效。root_uri 默认取
+    顶层 uri。
+    """
+    if seen is None:
+        seen = set()
+    if root_uri is None:
+        root_uri = uri
+    if depth > max_depth or uri in seen:
+        return []
+    seen.add(uri)
+    out: list[dict] = []
+    for e in _fetch_tree(uri):
+        entry = dict(e)
+        entry_uri = str(entry.get("uri") or "").strip()
+        rel = _rel_from_uri(entry_uri, root_uri) if entry_uri else None
+        if rel:
+            entry["rel_path"] = rel
+        if str(entry.get("isDir", "false")).strip().lower() in ("true", "1"):
+            if entry_uri:
+                out.extend(_recursive_fs_tree(
+                    entry_uri, depth + 1, max_depth, seen, root_uri))
+        else:
+            out.append(entry)
+    return out
+
+
+def _rel_from_uri(uri: str, root_uri: str) -> str | None:
+    """从完整 uri 推导相对根 rel_path（修复 B1，2026-08-09）。
+
+    OV fs/tree 返回的 rel_path 形态不一：实测相对被查询 uri（如查
+    .../comfyui-vram-free/code 返回 commands/commands.md），顶层又可能含根段
+    （windows/comfyui-model-setup/...）或仅含子项目前缀。唯一恒定可靠的是完整
+    uri → 剥离 root_uri 前缀即完整相对根路径
+    （comfyui-vram-free/code/commands/commands.md），exclude 子串匹配
+    （如 /code/）不再漏网。uri 不在 root_uri 下（防御）→ None，调用方保留
+    fs/tree 原 rel_path。
+    """
+    base = root_uri.rstrip("/")
+    u = uri.rstrip("/")
+    if u.startswith(base + "/"):
+        return u[len(base) + 1:]
+    return None
+
+
+def _rel_to_root(rel_path: str, root_uri: str) -> str:
+    """rel_path 相对根路径：若首段是根名则剥离（OV fs/tree 两种形态兼容）。
+
+    fs/tree 实测 rel_path 含根段（如 windows/comfyui-model-setup/...）；现有
+    mock/部分服务返回不含根段（decisions/...）。include 过滤按相对根匹配。
+    """
+    base = root_uri.rstrip("/").split("/")[-1]
+    parts = rel_path.split("/")
+    if parts and parts[0] == base:
+        return "/".join(parts[1:])
+    return rel_path
+
+
+def _apply_filters(entries: list[dict], filters: dict,
+                   root_uri: str) -> list[dict]:
+    """filters 收集层过滤（评审 T2：职责分离，_clean_knowledge_domain 不重复过滤）。
+
+    - include: 前缀匹配 rel_path 相对根的首段（如 ["comfyui-model-setup"]）
+    - exclude: 子串匹配 rel_path 全路径（含根段，如 ["/code/"] 排除 code/ 目录）
+    - 空 {} / 空数组 = 全收录
+    """
+    include = [p for p in (filters.get("include") or []) if isinstance(p, str)]
+    exclude = [p for p in (filters.get("exclude") or []) if isinstance(p, str)]
+    out: list[dict] = []
+    for e in entries:
+        rel = str(e.get("rel_path") or "").strip()
+        if not rel:
+            continue
+        if include:
+            first = _rel_to_root(rel, root_uri).split("/", 1)[0]
+            if not any(first.startswith(p) for p in include):
+                continue
+        if any(p in rel for p in exclude):
+            continue
+        out.append(e)
+    return out
+
+
+def _load_ov_roots(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """读 ov_roots 表 enabled=1 的根（context-assembler 最高优先级，先收集）。
+
+    Returns:
+        [{"root_uri", "filters"}, ...]；表不可读 → [] + 警告（降级为空清单）。
+    """
+    if conn is None:
+        conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT root_uri, filters FROM ov_roots WHERE enabled=1 "
+            "ORDER BY CASE WHEN root_uri = ? THEN 0 ELSE 1 END, root_uri",
+            (_OV_CA_ROOT,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        print(f"  [WIKI_GRAPH] ov_roots read failed: {exc}")
+        return []
+    roots: list[dict] = []
+    for r in rows:
+        try:
+            flt = json.loads(r["filters"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            flt = {}
+        if not isinstance(flt, dict):
+            flt = {}
+        roots.append({"root_uri": r["root_uri"], "filters": flt})
+    return roots
+
+
+def _load_all_ov_docs() -> list[dict]:
+    """多根递归拉取 OV 项目全量文档清单（决策 44，ov_roots 表驱动）。
+
+    遍历 ov_roots 表 enabled=1 的根（context-assembler 优先）→ 每根递归
+    fs/tree（max_depth=6、seen 去环）→ 应用该根 filters → 合并去重：
+    同根内保留最短 rel_path（碎片/隐藏摘要去重）；跨根同 nid 保留高优先级根
+    （后到者丢弃 → ov_nid_by_uri 一对一确定性）。每文档生成
+    {"uri", "rel_path", "nid"}（URI 文件段规则，与 _ov_doc_nid 一致）。
+    网络失败/超时 → 空列表 + 警告，不抛异常（降级保留原 TRACE_SOURCES 逻辑）。
+    """
+    if not _HAS_URLLIB:
+        print("  [WIKI_GRAPH] fs/tree skipped (no urllib)")
+        return []
+    roots = _load_ov_roots()
+    best: dict[str, dict] = {}
+    for root in roots:
+        root_uri = root["root_uri"]
+        root_best: dict[str, dict] = {}
+        for e in _apply_filters(_recursive_fs_tree(root_uri),
+                                root["filters"], root_uri):
+            uri = str(e.get("uri") or "").strip()
+            rel = str(e.get("rel_path") or "").strip()
+            if not uri or not rel or not rel.endswith(".md"):
+                continue
+            nid = _uri_ov_doc_nid(uri)
+            if not nid:
+                continue
+            cur = root_best.get(nid)
+            if cur is None or len(rel) < len(cur["rel_path"]):
+                root_best[nid] = {"uri": uri, "rel_path": rel, "nid": nid}
+        # 跨根合并：first-wins（根已按 context-assembler 优先排序）
+        for nid, doc in root_best.items():
+            if nid not in best:
+                best[nid] = doc
+    return sorted(best.values(), key=lambda d: d["rel_path"])
+
 def _load_ov_doc_titles() -> list[dict]:
     """读取 OV 设计/架构文档的 title，供关键词匹配。"""
     docs: list[dict] = []
@@ -115,6 +394,9 @@ def _load_ov_doc_titles() -> list[dict]:
             if m:
                 doc_title = m.group(1).strip()
         doc_label = doc_title[:60]
+        # 2026-08-08：正常路径 trace 边 target 用全量节点 nid（URI 文件段规则，
+        # 见 build_wiki_subgraph 的 ov_nid_by_uri）；此处 title 命名 nid 仅作
+        # fs/tree 不可用时的降级回退（保留原 TRACE_SOURCES 逻辑）
         doc_nid = f"ov_doc_{doc_label.lower().replace(' ', '_')[:48]}"
         docs.append({
             "title": doc_title,
@@ -194,7 +476,10 @@ def _add_trace_edges(subgraph: dict, seen_nodes: set[str]) -> None:
 
         # OV 文档作为源节点
         doc_label = uri.rstrip("/").split("/")[-1]
-        doc_nid = f"ov_doc_{doc_label[:48]}"
+        # 2026-08-08 命名统一：doc 节点 id 用 URI 文件段规则（与全量节点一致），
+        # 避免 topic-summarization-decision 等文档生成 title 命名重复节点
+        # （被 _clean_knowledge_domain 清理后 trace 边丢失）
+        doc_nid = _uri_ov_doc_nid(uri) or f"ov_doc_{doc_label[:48]}"
         doc_norm = doc_label.lower().replace(" ", "_")[:64]
 
         if doc_nid not in seen_nodes:
@@ -318,6 +603,29 @@ def build_wiki_subgraph() -> dict:
     edges: list[dict] = []
     seen_nodes: set[str] = set()
 
+    # 2026-08-08：OV 资源全量入图（fs/tree 清单；网络失败 → [] 降级保留
+    # TRACE_SOURCES 逻辑）。nid 用 URI 文件段规则（与 _ov_doc_nid 逐字节一致），
+    # metadata 携带完整 viking:// URI；bigram 匹配只负责 trace 边。
+    all_ov_docs: list[dict] = _load_all_ov_docs()
+    ov_nid_by_uri = {d["uri"]: d["nid"] for d in all_ov_docs}
+    for _doc in all_ov_docs:
+        _nid = _doc["nid"]
+        if _nid in seen_nodes:
+            continue
+        _base = _doc["rel_path"].rstrip("/").split("/")[-1]
+        nodes.append({
+            "label": f"{NODE_PREFIX} {_base[:60]}",
+            "norm_label": _base.lower().replace(" ", "_")[:64],
+            "file_type": "knowledge",
+            "source_file": _doc["uri"],
+            "source_location": _doc["rel_path"],
+            "_origin": "ov_import",
+            "id": _nid,
+            "community": 0,
+            "metadata": {"uri": _doc["uri"]},
+        })
+        seen_nodes.add(_nid)
+
     for e in entries:
         eid = e["reality_id"]
         title = (e["name"] or "").strip()
@@ -375,8 +683,11 @@ def build_wiki_subgraph() -> dict:
         _wiki_words = set(_extract_bigrams(title))
         for _doc in ov_doc_titles:
             _doc_label = _doc.get("label", "")
-            _doc_nid = _doc.get("nid")
-            if not _doc_label or not _doc_nid:
+            _doc_uri = _doc.get("uri", "")
+            # 2026-08-08：trace 边 target 用 URI 文件段规则 nid（引用已建的全量
+            # 节点，不再生成 title 命名旧节点）；fs/tree 不可用 → 回退 _doc["nid"]
+            _doc_nid = ov_nid_by_uri.get(_doc_uri) or _doc.get("nid")
+            if not _doc_label or not _doc_uri or not _doc_nid:
                 continue
             _doc_words = _doc.get("words") or set(_extract_bigrams(_doc.get("title", "")))
             _overlap = _wiki_words & set(_doc_words)
@@ -386,16 +697,20 @@ def build_wiki_subgraph() -> dict:
             _score = sum(idf.get(w, 0) for w in _overlap)
             if len(_valid) >= 2 and _score >= 5.0:
                 if _doc_nid not in seen_nodes:
+                    # 全量清单可用但该文档不在清单 → 不建节点不建边（防悬挂）
+                    if ov_nid_by_uri:
+                        continue
+                    # fs/tree 不可用降级：保留原 TRACE_SOURCES 逻辑
                     nodes.append({
                         "label": f"{NODE_PREFIX} {_doc_label[:60]}",
                         "norm_label": _doc_label.lower().replace(" ", "_")[:64],
                         "file_type": "knowledge",
-                        "source_file": _doc.get("uri", ""),
+                        "source_file": _doc_uri,
                         "source_location": "trace",
                         "_origin": "trace",
                         "id": _doc_nid,
                         "community": 0,
-                        "metadata": {"uri": _doc.get("uri", "")},
+                        "metadata": {"uri": _doc_uri},
                     })
                     seen_nodes.add(_doc_nid)
                 edges.append({
@@ -493,6 +808,8 @@ def _clean_knowledge_domain(main: dict, db_path: str) -> tuple[int, int]:
     - strand-topic（topic_{session_id}_S{strand_id} 格式且 file_type=knowledge）
       不在 DB source_strands
       引用集 → 删除（先建后删顺序由调用方保证：清理 → merge 全量替换）
+    - ov_doc_* 节点不在 fs/tree 全量清单 → 删除（2026-08-08：清掉 frontmatter
+      title 命名的旧节点，如 ov_doc_决策_38：...；清单为空=fs/tree 不可用 → 跳过）
     - 悬挂边（source/target 无对应节点）删除
     - code AST 节点（file_type != knowledge）一律不动（T2 红线）
 
@@ -504,6 +821,12 @@ def _clean_knowledge_domain(main: dict, db_path: str) -> tuple[int, int]:
         print("  [WIKI_GRAPH] cleanup skipped (DB unavailable)")
         return (0, 0)
     reality_ids, strand_topics = ref
+
+    # fs/tree 全量清单为 ov_doc 权威；不可用（空清单）→ 跳过该规则（保守）
+    ov_docs = _load_all_ov_docs()
+    ov_nids: set = {d["nid"] for d in ov_docs} if ov_docs else set()
+    if not ov_docs:
+        print("  [WIKI_GRAPH] ov_doc cleanup skipped (fs/tree unavailable)")
 
     nodes = main.get("nodes", [])
     links = main.get("links", [])
@@ -523,6 +846,8 @@ def _clean_knowledge_domain(main: dict, db_path: str) -> tuple[int, int]:
         elif nid.startswith("theme_"):
             removed_ids.add(nid)
         elif _STRAND_TOPIC_RE.match(nid) and nid not in strand_topics:
+            removed_ids.add(nid)
+        elif ov_nids and nid.startswith("ov_doc_") and nid not in ov_nids:
             removed_ids.add(nid)
 
     if removed_ids:

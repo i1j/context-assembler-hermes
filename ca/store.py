@@ -1,7 +1,7 @@
 """ca/store.py — SQLite 持久化存储层 (v5.10, turn_stream only)
 
 设计决策: S-001~S-005 (SQLite 存储)
-  viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-存储层
+  viking://resources/projects/context-assembler/decisions/decision-points-wiki.md#toc-存储层
   - WAL + threading.local() + busy_timeout 3000ms
   - 写入重试指数退避
   - Schema v5.0 (turn_stream 表, PK=(session_id, turn, seq))
@@ -408,6 +408,7 @@ def _get_topic_conn(db_path: Optional[Path] = None) -> sqlite3.Connection:
         conn.execute(f"PRAGMA busy_timeout={Config.DB_BUSY_TIMEOUT_MS}")
         conn.executescript(_SCHEMA_SQL_STRANDS)
         _migrate_wiki_associations_column(conn)
+        _migrate_ov_roots_seed(conn)
         _TOPIC_STORE_CACHE[key] = conn
         return conn
 
@@ -579,8 +580,47 @@ CREATE TABLE IF NOT EXISTS refinement_meta (
     duration_sec      REAL    DEFAULT 0,
     status            TEXT    NOT NULL DEFAULT 'completed'
 );
+
+-- v7 (决策 44 前置, 2026-08-08): OV 多根持久化配置表
+-- build_wiki_subgraph 多根递归拉取 + 精炼轮逐步启用的开关（各 profile 库独立）。
+-- filters JSON: {"include": ["首段前缀"], "exclude": ["rel_path 子串"]}，空 {} = 全收录
+CREATE TABLE IF NOT EXISTS ov_roots (
+    root_uri    TEXT PRIMARY KEY,   -- viking://resources/projects/windows
+    filters     TEXT DEFAULT '{}',  -- JSON；空 = 全收录
+    enabled     INTEGER DEFAULT 1,  -- 精炼轮逐步启用的开关
+    origin      TEXT DEFAULT 'manual', -- manual|refine_probe|seed
+    added_at    REAL,
+    last_seen   REAL
+);
 """
 
+
+# 种子数据：INSERT OR IGNORE 幂等（迁移时执行一次，重复执行不覆盖用户修改）。
+# context-assembler 保持 enabled=1（现状行为不变）；windows 直接启用
+# （references_ov 候选目标文档所在根）；irobot enabled=0 由精炼轮探测评估。
+_OV_ROOTS_SEED_SQL = """
+INSERT OR IGNORE INTO ov_roots (root_uri, filters, enabled, origin, added_at)
+VALUES
+ ('viking://resources/projects/context-assembler', '{}', 1, 'seed',
+  CAST(strftime('%s','now') AS REAL)),
+ ('viking://resources/projects/windows',
+  '{"exclude":["/code/"]}', 1, 'seed',
+  CAST(strftime('%s','now') AS REAL)),
+ ('viking://resources/projects/irobot', '{}', 0, 'seed',
+  CAST(strftime('%s','now') AS REAL));
+"""
+
+
+def _migrate_ov_roots_seed(conn: sqlite3.Connection) -> None:
+    """ov_roots 种子迁移：INSERT OR IGNORE 幂等，不覆盖已有行。
+
+    失败静默跳过（表结构/权限异常时不影响主流程）。
+    """
+    try:
+        conn.executescript(_OV_ROOTS_SEED_SQL)
+        conn.commit()
+    except sqlite3.Error:
+        pass
 
 # ═══════════════════════════════════════════════════════════
 # v6.4 — strand 读写 API（strand_summaries / wiki_strand_map）
@@ -1647,10 +1687,20 @@ def _source_to_ov_uri(source_file: str) -> str:
     """将 graphify 的 source_file 路径映射到 OpenViking 资源 URI。"""
     if not source_file:
         return ""
-    # docs/wiki/xxx → viking://resources/projects/context-assembler/
-    if source_file.startswith("docs/wiki/"):
-        tail = source_file[len("docs/wiki/"):]
-        return f"viking://resources/projects/context-assembler/design/{tail}"
+    # docs/{architecture,decisions,testing}/xxx → viking://resources/projects/context-assembler/
+    # 目录重组（2026-08-07 决策 43 v4）：architecture/ + decisions/ 分类
+    if source_file.startswith("docs/architecture/"):
+        tail = source_file[len("docs/"):]
+        return f"viking://resources/projects/context-assembler/{tail}"
+    if source_file.startswith("docs/decisions/"):
+        tail = source_file[len("docs/"):]
+        return f"viking://resources/projects/context-assembler/{tail}"
+    if source_file.startswith("docs/testing/"):
+        tail = source_file[len("docs/"):]
+        return f"viking://resources/projects/context-assembler/{tail}"
+    if source_file.startswith("docs/"):
+        tail = source_file[len("docs/"):]
+        return f"viking://resources/projects/context-assembler/{tail}"
     return ""
 
 
