@@ -19,6 +19,7 @@
 | [debug-20260612-verification-report.md](debug-20260612-verification-report.md) | v5.1 出口记录验证（bg_review + 20K 三区行为） | 历史存档（v5.10 后 `_mutation_mode` 已移除） |
 | [20260610-ca-mutation-thinking-rootcause.md](../architecture/20260610-ca-mutation-thinking-rootcause.md) | CA Mutation 思维问题根因分析（四层失效：超限/映射 bug/快速插入/汇编对策） | 有效 |
 | [test-system-refactoring-v5.0.md](test-system-refactoring-v5.0.md) | v5.0 测试系统重构设计 | 有效 |
+| [step9-doc-maintenance-verification-20260808.md](step9-doc-maintenance-verification-20260808.md) | 精炼轮 Step 9 文档维护验证（三层链接解析、双目标、实测 51/48 断链归零） | 有效（2026-08-08） |
 
 ## 调试记录（原始发现，存本地项目文件夹）
 
