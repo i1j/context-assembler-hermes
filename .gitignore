@@ -32,3 +32,7 @@ graphify-out/
 # graphify 工具/本地生成物
 graphify-*.py
 ca-graph.html
+
+# OpenViking 自动生成元数据（OV 侧生成，本地工作副本不跟踪）
+.abstract.md
+.overview.md

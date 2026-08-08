@@ -57,7 +57,7 @@ Fct告警 → 首轮Fct → 空字段过滤 → HEAVY_FIELDS → CE停用
 | **v5.0-pr4-inject-fix** | 2026-06-09 | 注入层微修复批 | read_turn_texts l1/l0 缺 api_call_count 过滤（同 turn 多工具组 l1 相同）；_format_group_summary thought+intent 重复；L0 工具组缺"工具组："前缀；_format_l1_for_display 占位符噪声。 | **已修复** |
 | **v4.4.0-ooda-fix** | 2026-06-03 | 修复：OODA 解析器前导冒号 | 在 `_extract_sections` content 提取后追加 `.lstrip(":：　 ")`，去除全角/半角冒号。 | **已修复** |
 | **v5.1** | 2026-06-09 | Replace 模式注入重构 + bypass 统一 | 三模式（Replace/Append/Off）+ bypass_turns 统一 + 20K 尾区保护 + biz_category 双向嵌入 + state DB 污染切断 + tool 行 content 清空 + bg_review 尾区保护。详见下方详细章节。 | **已发布** |
-| **v5.2** | 2026-06-13 | 缓存分析 + 注入重构 | ① hdl_embedding 孤儿数据清除 ② tool_plan 独立 tool 行决策 + `[~/N/M]` 标签 ③ bg_review 轮从 DB 读数替代空格占位。详见 [v5.1 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md)。 | **发布** |
+| **v5.2** | 2026-06-13 | 缓存分析 + 注入重构 | ① hdl_embedding 孤儿数据清除 ② tool_plan 独立 tool 行决策 + `[~/N/M]` 标签 ③ bg_review 轮从 DB 读数替代空格占位。详见 [v5.1 分析报告](architecture/ca-v5.1-cache-analysis-and-injection-refactor.md)。 | **发布** |
 | **v5.2.1** | 2026-06-14 | 话题分割修复 + 自适应阈值 | ① `_add_bigrams` 集合排序稳定修复 ② Jaccard 独立合并路径（默认 0.18） ③ 自适应阈值模块 + `topic_threshold_meta.json` 持久化 ④ 跨会话加权漂移（0.6×last + 0.4×avg）。 | **已实施** |
 | **v5.3.0** | 2026-06-17 | Fct 提示词多对标签重构 | FCT_GENERATION_PROMPT 从「单一 stage_tag 合并多状态」改为「每对 stage_tag/core_change 仅含单一状态」。PAIR_PATTERN 多对解析，全链路适配。242 测试通过。 | **已实施** |
 | **v5.5.0** | 2026-06-15 | 命名统一 + 话题分割重构 | Elm/Fct/Hdl 重命名 + 话题分割 + A-stage 角色队列匹配 + E-stage write-on-receive + turn_stream 新表 + F-stage Phase 1-4 + 死代码清理。详见下方详细章节。 | **已发布** |
@@ -537,7 +537,7 @@ Fct告警 → 首轮Fct → 空字段过滤 → HEAVY_FIELDS → CE停用
 | **tool_plan 独立 tool 行决策** | `_AssemblePlanResult.tool_plan` + `_compute_tool_plan_v2` + `_build_aligned_outcomes`/`_build_messages_from_plan` 签名扩展 + `_format_tool_group_assembly` 精简为仅 header + tool 行输出 `[~/N/M]` 独立标签 | `ca/__init__.py` |
 | **bg_review 轮从 DB 读数** | `_mutation_mode` 中 bg_review 轮由 `" "` 改为从 DB 读取 L1/L0 填充 | `ca/__init__.py` |
 
-详见 [v5.1 分析报告](docs/analysis/ca-v5.1-cache-analysis-and-injection-refactor.md)。
+详见 [v5.1 分析报告](architecture/ca-v5.1-cache-analysis-and-injection-refactor.md)。
 
 ---
 

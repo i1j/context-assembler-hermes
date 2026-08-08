@@ -163,6 +163,7 @@ class IdleRefinementDaemon:
         inconsistencies = 0
         associations_added = 0
         graphify_synced = 0
+        doc_maintained = 0
 
         try:
             conn = _get_topic_conn()
@@ -207,6 +208,19 @@ class IdleRefinementDaemon:
             tasks_run.append("fact_linking")
             associations_added = self._run_fact_linking(conn)
 
+            # Step 9: 文档维护（决策 43 §4.1：链接对齐 L1 代码可精确做）
+            if Config.REFINEMENT_DOC_MAINTENANCE:
+                tasks_run.append("doc_maintenance")
+                try:
+                    from ca.doc_maintenance import DocMaintenance
+                    dm = DocMaintenance(apply_local=not Config.REFINEMENT_DOC_DRY_RUN,
+                                        apply_ov=Config.REFINEMENT_DOC_OV_APPLY)
+                    report = dm.run()
+                    doc_maintained = len(report.files_modified)
+                except Exception as exc:
+                    logger.warning("[CA_L4] Step 9 doc maintenance failed: %s", exc)
+                    doc_maintained = -1
+
             # 写 refinement_meta 记录
             duration = time.monotonic() - t0
             write_refinement_meta(
@@ -223,9 +237,9 @@ class IdleRefinementDaemon:
                 status="completed",
             )
             logger.info("[CA_L4] Cycle done: %d entries reviewed, %d modified "
-                        "(%d cross-checked, %d inconsistencies, %.1fs)",
+                        "(%d cross-checked, %d inconsistencies, %d docs maintained, %.1fs)",
                         entries_reviewed, entries_modified,
-                        fcts_cross_checked, inconsistencies, duration)
+                        fcts_cross_checked, inconsistencies, doc_maintained, duration)
 
         except Exception as exc:
             duration = time.monotonic() - t0
@@ -360,7 +374,7 @@ class IdleRefinementDaemon:
             open_items=json.dumps(entry["open_items"], ensure_ascii=False),
         )
 
-        result = call_llm_for_summary(prompt)
+        result = call_llm_for_summary(prompt, priority="low")  # v7.1: 精炼轮空闲任务
         if not result:
             logger.info("[CA_L4]   entry %d: 4B returned None, skipping",
                         entry["entry_id"])
@@ -553,7 +567,7 @@ class IdleRefinementDaemon:
             fct_data=json.dumps(turns_data, ensure_ascii=False),
         )
 
-        result = call_llm_for_summary(prompt)
+        result = call_llm_for_summary(prompt, priority="low")  # v7.1: 精炼轮空闲任务
         if not result:
             return False
 

@@ -1,7 +1,7 @@
 """ca/config.py — 集中配置管理 (v5.10)
 
 设计决策: F-001 (Config 类变量集中管理)
-  viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-配置体系
+  viking://resources/projects/context-assembler/decisions/decision-points-wiki.md#toc-配置体系
   功能：
 - 所有可调参数通过环境变量暴露，提供默认值。
 - 支持启动校验（validate）和运行时热重载（reload）。
@@ -89,7 +89,7 @@ class Config:
     OODA_DEDUP_THRESHOLD: ClassVar[float] = float(os.getenv("CA_OODA_DEDUP_THRESHOLD", "0.88"))
     RETRIEVAL_RRF_K: ClassVar[int] = int(os.getenv("CA_RETRIEVAL_RRF_K", "60"))
 
-    LLM_MODEL: ClassVar[str] = os.getenv("CA_LLM_MODEL", "qwen3-4b-instruct:latest")
+    LLM_MODEL: ClassVar[str] = os.getenv("CA_LLM_MODEL", "qwen3-4b-instruct:16k")
     LLM_ENDPOINT: ClassVar[str] = os.getenv("CA_LLM_ENDPOINT", "http://localhost:11435")
     LLM_TIMEOUT: ClassVar[float] = float(os.getenv("CA_LLM_TIMEOUT", "120"))
     LLM_MAX_RETRIES: ClassVar[int] = int(os.getenv("CA_LLM_MAX_RETRIES", "2"))
@@ -213,6 +213,14 @@ class Config:
         "CA_REFINEMENT_GRAPHIFY_SYNC", "1") == "1"
     REFINEMENT_MAX_ENTRIES_PER_CYCLE: ClassVar[int] = int(
         os.getenv("CA_REFINEMENT_MAX_ENTRIES_PER_CYCLE", "5"))
+    # Step 9 文档维护（决策 43 §4.1 链接对齐，2026-08-08）：
+    # 纯 L1 代码零 LLM；默认 dry-run 只报告，apply 需显式配置。
+    REFINEMENT_DOC_MAINTENANCE: ClassVar[bool] = os.getenv(
+        "CA_REFINEMENT_DOC_MAINTENANCE", "0") == "1"
+    REFINEMENT_DOC_DRY_RUN: ClassVar[bool] = os.getenv(
+        "CA_REFINEMENT_DOC_DRY_RUN", "1") == "1"
+    REFINEMENT_DOC_OV_APPLY: ClassVar[bool] = os.getenv(
+        "CA_REFINEMENT_DOC_OV_APPLY", "0") == "1"
 
     # 累积切割水位（Token 阈值）
     ACCUMULATED_SPLIT_START: ClassVar[int] = int(os.getenv("CA_ACCUMULATED_SPLIT_START", "5000"))
@@ -309,6 +317,13 @@ class Config:
 
     # CA 话题摘要管线（取代 OV Memory Provider）
     TOPIC_SUMMARIZE_ENABLED: ClassVar[bool] = os.getenv("CA_TOPIC_SUMMARIZE_ENABLED", "1") == "1"
+    # 话题参考 reality 注入管道开关（v7.1，2026-08-08，BUG-08 止血）：
+    # pick_injection_realities 在 pre_llm_call 用户消息路径上同步调用 4B
+    # （LLM_TIMEOUT=120s × retries + 退避 + turn==1 等清账 5s）→ 首轮/FAR 切换
+    # 可阻塞分钟级。独立开关，与 TOPIC_SUMMARIZE_ENABLED 解耦（后者还控制
+    # 后台清理/摘要线程，不能一刀切）。关闭后首轮 recall 与 FAR 切换 recall
+    # 均短路，数据积累（E/F-stage）不受影响。
+    REALITY_INJECT_ENABLED: ClassVar[bool] = os.getenv("CA_REALITY_INJECT_ENABLED", "1") == "1"
     TOPIC_SUMMARY_RECALL_LIMIT: ClassVar[int] = int(os.getenv("CA_TOPIC_SUMMARY_RECALL_LIMIT", "3"))
     # v8: 注入预算（字符）——话题摘要 4B 输出上限 + 迭代提炼触发阈值
     # v6.4: 2000 → 4000（多 strand 输出体积 ~3174 实测，2000 会触发 Bug 2 误杀）
@@ -442,6 +457,7 @@ class Config:
             cls.BM25_HIT_THRESHOLD = int(os.getenv("CA_BM25_HIT_THRESHOLD", str(cls.BM25_HIT_THRESHOLD)))
             cls.HERMES_PROFILE = cls._detect_profile()
             cls.TOPIC_SUMMARIZE_ENABLED = os.getenv("CA_TOPIC_SUMMARIZE_ENABLED", "1") == "1"
+            cls.REALITY_INJECT_ENABLED = os.getenv("CA_REALITY_INJECT_ENABLED", "1") == "1"
             cls.TOPIC_SUMMARY_RECALL_LIMIT = int(os.getenv("CA_TOPIC_SUMMARY_RECALL_LIMIT", str(cls.TOPIC_SUMMARY_RECALL_LIMIT)))
             cls.TOPIC_SUMMARY_MAX_CHARS = int(os.getenv("CA_TOPIC_SUMMARY_MAX_CHARS", str(cls.TOPIC_SUMMARY_MAX_CHARS)))
             cls.TOPIC_SUMMARY_MAX_TOKENS = int(os.getenv("CA_TOPIC_SUMMARY_MAX_TOKENS", str(cls.TOPIC_SUMMARY_MAX_TOKENS)))
@@ -470,6 +486,9 @@ class Config:
             cls.REFINEMENT_HEALTH_SCORE = os.getenv("CA_REFINEMENT_HEALTH_SCORE", "1") == "1"
             cls.REFINEMENT_GRAPHIFY_SYNC = os.getenv("CA_REFINEMENT_GRAPHIFY_SYNC", "1") == "1"
             cls.REFINEMENT_MAX_ENTRIES_PER_CYCLE = int(os.getenv("CA_REFINEMENT_MAX_ENTRIES_PER_CYCLE", str(cls.REFINEMENT_MAX_ENTRIES_PER_CYCLE)))
+            cls.REFINEMENT_DOC_MAINTENANCE = os.getenv("CA_REFINEMENT_DOC_MAINTENANCE", "0") == "1"
+            cls.REFINEMENT_DOC_DRY_RUN = os.getenv("CA_REFINEMENT_DOC_DRY_RUN", "1") == "1"
+            cls.REFINEMENT_DOC_OV_APPLY = os.getenv("CA_REFINEMENT_DOC_OV_APPLY", "0") == "1"
 
             cls.validate()
             logger.info("Configuration reloaded and validated.")
