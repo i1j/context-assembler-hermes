@@ -1,11 +1,11 @@
-"""refinement._probe_ov_roots — OV 根探测 + 逐步启用（决策 44 前置，2026-08-08）。
+"""refinement._govern_ov_roots — OV 根探测登记 + LLM 治理决策（决策 44 续，2026-08-10）。
 
-覆盖：
+覆盖（决策 44 前置探测机制的回归 + 治理轮返回值语义）：
   - 新根自动入表 enabled=0（origin='refine_probe'）
-  - 语义命中评估：命中≥1 且 top-1 ≥ CA_OV_REFERENCE_THRESHOLD → 启用
-  - 每轮最多启用 1 个（多候选分轮启用）
-  - 幂等：已存在根只更新 last_seen，重复调用不重复启用/不重复插入
-  - 阈值未配置（env 缺失）→ 只登记不启用（保守）
+  - LLM 决策 mock keep → 不启用任何根（启用权已移交 LLM，代码不再自动启用）
+  - 返回值 = 本轮执行语句数（keep 决策 → 0；不再返回「启用根数」）
+  - 幂等：已存在根只更新 last_seen，重复调用不重复插入
+  - OV fs/tree 失败 → 无写入（整体失败 keep 全部）
 """
 
 import json
@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.request
 
 import ca.fact_linking as fl
+import ca.refinement as ref
 
 from ca.refinement import IdleRefinementDaemon
 from ca.store import _get_topic_conn
@@ -51,7 +52,11 @@ class _FakeResp:
 
 
 class _FakeProjectsUrlopen:
-    """仅处理 projects 根级 fs/tree；其它请求（webdav/search）拒绝。"""
+    """仅处理 projects 根级 fs/tree；其它请求（webdav/search）拒绝。
+
+    各根级 fs/tree（证据 doc_count）未 mock → 连接拒绝 → 单项证据缺失
+    （evidence_available=false），不影响探测登记与 keep 决策路径。
+    """
 
     def __call__(self, req, timeout=None):
         url = req.full_url if hasattr(req, "full_url") else str(req)
@@ -87,24 +92,46 @@ def _search_hits(query):
     return []
 
 
-class TestProbeOvRoots:
+_PROJECT_ROOTS = [
+    "viking://resources/projects/context-assembler",
+    "viking://resources/projects/windows",
+    "viking://resources/projects/irobot",
+    "viking://resources/projects/osaka",
+    "viking://resources/projects/tokyo",
+    "viking://resources/projects/kyoto",
+]
+
+
+def _keep_all_response(*args, **kwargs):
+    """LLM 决策 mock：全部根 keep（返回 0 语句）。"""
+    return json.dumps([
+        {"root_uri": uri, "action": "keep", "reason": "test keep"}
+        for uri in _PROJECT_ROOTS
+    ])
+
+
+class TestGovernOvRootsProbe:
     def _setup(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("CA_OV_REFERENCE_THRESHOLD", "0.55")
         monkeypatch.setattr(urllib.request, "urlopen",
                             _FakeProjectsUrlopen())
         monkeypatch.setattr(fl, "_ov_search_find", _search_hits)
+        monkeypatch.setattr(ref, "_govern_llm_decision", _keep_all_response)
+        # graph.json 证据（空图即可：keep 决策不依赖证据值）
+        gp = tmp_path / "graph.json"
+        gp.write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
+        monkeypatch.setattr(ref, "_graph_json_path", lambda: gp)
         return _mk_probe_db(tmp_path)
 
-    def test_probe_ov_roots_incremental_enable(self, monkeypatch, tmp_path):
-        """每轮仅启用 1 个、enabled 持久化、last_seen 更新、幂等。"""
+    def test_probe_ov_roots_registers_and_keeps(self, monkeypatch, tmp_path):
+        """探测登记 + LLM keep：3 个新根入表 enabled=0；返回值 = 0（无执行语句）。"""
         conn = self._setup(monkeypatch, tmp_path)
         daemon = IdleRefinementDaemon()
 
-        # Cycle 1：登记 3 个新根 + 启用第 1 个（osaka）
-        assert daemon._probe_ov_roots(conn) == 1
+        # Cycle 1：登记 3 个新根；LLM 决策 keep → 不启用
+        assert daemon._govern_ov_roots(conn) == 0
         rows = {r[0]: r[1:] for r in conn.execute(
             "SELECT root_uri, enabled, origin, last_seen FROM ov_roots").fetchall()}
-        assert rows["viking://resources/projects/osaka"][0] == 1
+        assert rows["viking://resources/projects/osaka"][0] == 0
         assert rows["viking://resources/projects/osaka"][1] == "refine_probe"
         assert rows["viking://resources/projects/tokyo"][0] == 0
         assert rows["viking://resources/projects/kyoto"][0] == 0
@@ -116,32 +143,21 @@ class TestProbeOvRoots:
         assert all(r[2] is not None for r in rows.values())
         assert len(rows) == 6
 
-        # Cycle 2：启用第 2 个（tokyo）；osaka 不被重复启用；无重复行
-        assert daemon._probe_ov_roots(conn) == 1
+        # Cycle 2：幂等——无重复行、无新登记、仍 keep
+        assert daemon._govern_ov_roots(conn) == 0
         rows = {r[0]: r[1] for r in conn.execute(
             "SELECT root_uri, enabled FROM ov_roots").fetchall()}
-        assert rows["viking://resources/projects/osaka"] == 1
-        assert rows["viking://resources/projects/tokyo"] == 1
-        assert rows["viking://resources/projects/kyoto"] == 0
+        assert rows["viking://resources/projects/osaka"] == 0
+        assert rows["viking://resources/projects/tokyo"] == 0
         assert conn.execute(
             "SELECT COUNT(*) FROM ov_roots").fetchone()[0] == 6
 
-        # Cycle 3：无新候选可启用（kyoto 无命中）
-        assert daemon._probe_ov_roots(conn) == 0
-        rows = {r[0]: r[1] for r in conn.execute(
-            "SELECT root_uri, enabled FROM ov_roots").fetchall()}
-        assert rows["viking://resources/projects/kyoto"] == 0
+    def test_govern_keep_decision_no_auto_enable(self, monkeypatch, tmp_path):
+        """启用权移交 LLM：keep 决策 → 无自动启用（阈值 env 不再决定启用）。"""
+        monkeypatch.setenv("CA_OV_REFERENCE_THRESHOLD", "0.55")
+        conn = self._setup(monkeypatch, tmp_path)
 
-    def test_no_threshold_registers_but_not_enables(self, monkeypatch,
-                                                    tmp_path):
-        """env 未配置 CA_OV_REFERENCE_THRESHOLD → 只登记候选根，不启用。"""
-        monkeypatch.delenv("CA_OV_REFERENCE_THRESHOLD", raising=False)
-        monkeypatch.setattr(urllib.request, "urlopen",
-                            _FakeProjectsUrlopen())
-        monkeypatch.setattr(fl, "_ov_search_find", _search_hits)
-        conn = _mk_probe_db(tmp_path)
-
-        assert IdleRefinementDaemon()._probe_ov_roots(conn) == 0
+        assert IdleRefinementDaemon()._govern_ov_roots(conn) == 0
         rows = {r[0]: r[1:] for r in conn.execute(
             "SELECT root_uri, enabled, origin FROM ov_roots").fetchall()}
         assert rows["viking://resources/projects/osaka"] == (0, "refine_probe")
@@ -151,12 +167,14 @@ class TestProbeOvRoots:
             "SELECT COUNT(*) FROM ov_roots").fetchone()[0] == 6
 
     def test_ov_down_registers_nothing(self, monkeypatch, tmp_path):
-        """OV fs/tree 失败 → 探测跳过，不写表。"""
-        monkeypatch.setenv("CA_OV_REFERENCE_THRESHOLD", "0.55")
+        """OV fs/tree 失败 → 探测跳过（整体失败 keep 全部），不写表。"""
         def boom(req, timeout=None):
             raise ConnectionRefusedError("ov down")
         monkeypatch.setattr(urllib.request, "urlopen", boom)
+        monkeypatch.setattr(ref, "_govern_llm_decision",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                AssertionError("LLM 不应被调用")))
         conn = _mk_probe_db(tmp_path)
-        assert IdleRefinementDaemon()._probe_ov_roots(conn) == 0
+        assert IdleRefinementDaemon()._govern_ov_roots(conn) == 0
         assert conn.execute(
             "SELECT COUNT(*) FROM ov_roots").fetchone()[0] == 3

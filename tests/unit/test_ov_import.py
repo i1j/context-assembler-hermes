@@ -131,6 +131,19 @@ def _multi_tree():
     win = "viking://resources/projects/windows"
     robot = "viking://resources/projects/irobot"
     return {
+        # E-1（决策 44 续）：projects 根级载荷键 —— _ov_projects_roots() 依赖；
+        # 缺此键治理决策路径永不执行（T2/T8/T10/T12 必失败）。
+        "viking://resources/projects": _ok_entries([
+            {"uri": ca, "rel_path": "context-assembler", "isDir": True},
+            {"uri": win, "rel_path": "windows", "isDir": True},
+            {"uri": robot, "rel_path": "irobot", "isDir": True},
+            {"uri": "viking://resources/projects/osaka",
+             "rel_path": "osaka", "isDir": True},
+            {"uri": "viking://resources/projects/tokyo",
+             "rel_path": "tokyo", "isDir": True},
+            {"uri": "viking://resources/projects/kyoto",
+             "rel_path": "kyoto", "isDir": True},
+        ]),
         ca: _tree_payload(),
         win: _ok_entries([
             {"uri": f"{win}/comfyui-model-setup",
@@ -758,3 +771,90 @@ class TestReferencesOvLanding:
         assert all(l["target"] in ids for l in refs)
         # 边关系完整
         assert all(l["_origin"] == "fact_linking" for l in refs)
+
+
+class TestCaRootTraceGate:
+    """R6（决策 44 续）：无根豁免——CA 根 disable 时跳过 trace 建边。"""
+
+    def _disable_ca_root(self, db):
+        conn = _get_topic_conn(db)
+        conn.execute(
+            "UPDATE ov_roots SET enabled=0 WHERE root_uri=?",
+            ("viking://resources/projects/context-assembler",))
+        conn.commit()
+
+    def test_load_ov_roots_excludes_disabled_ca_root(self, tmp_path,
+                                                     monkeypatch):
+        """CA 根 disable → _load_ov_roots 不含 CA 根（无豁免）。"""
+        db = _seed_ov_roots_db(tmp_path, monkeypatch)
+        self._disable_ca_root(db)
+        roots = w2g._load_ov_roots()
+        uris = {r["root_uri"] for r in roots}
+        assert "viking://resources/projects/context-assembler" not in uris
+        assert "viking://resources/projects/windows" in uris
+
+    def test_add_trace_edges_gated_before_fetch(self, monkeypatch):
+        """_add_trace_edges(ca_root_enabled=False) → return 在 fetch 前（不 fetch 不建边）。"""
+        def boom(uri):
+            raise AssertionError("ca_root_enabled=False 时不应 fetch OV")
+        monkeypatch.setattr(w2g, "_fetch_ov_raw", boom)
+        subgraph = {"nodes": [], "edges": []}
+        w2g._add_trace_edges(subgraph, set(), ca_root_enabled=False)
+        assert subgraph["nodes"] == []
+        assert subgraph["edges"] == []
+
+    def test_bigram_gate_fs_tree_available(self, tmp_path, monkeypatch):
+        """fs/tree 可用 + nid 碰撞：CA 根 disabled → 节点存在但 trace 边不建。"""
+        db = _seed_ov_roots_db(tmp_path, monkeypatch)
+        self._disable_ca_root(db)
+        _mk_reality(db, name="Reality 重构")
+        monkeypatch.setattr(w2g, "_load_all_ov_docs", lambda: _fixture_docs())
+        monkeypatch.setattr(w2g, "_load_ov_doc_titles", lambda: [
+            {"title": "决策 37：Reality 重构", "label": "决策 37：Reality 重构",
+             "nid": "ov_doc_37-reality-restructure.md",
+             "uri": "viking://resources/projects/context-assembler/decisions/"
+                    "37-reality-restructure.md/37-reality-restructure.md",
+             "words": ["reality", "重构"]},
+        ])
+        monkeypatch.setattr(w2g, "_bigram_idf",
+                            lambda titles: {"reality": 3.0, "重构": 3.0})
+
+        sub = w2g.build_wiki_subgraph()
+        ids = {n["id"] for n in sub["nodes"]}
+        # ov_import 全量节点仍建（mock 清单）；但 CA 根 disabled → 无 trace 边
+        assert "ov_doc_37-reality-restructure.md" in ids
+        trace = [e for e in sub["edges"] if e.get("relation") == "trace"]
+        assert all(e["target"] != "ov_doc_37-reality-restructure.md"
+                   for e in trace)
+        # 对照组：CA 根 enabled → trace 边存在
+        _get_topic_conn(db).execute(
+            "UPDATE ov_roots SET enabled=1 WHERE root_uri=?",
+            ("viking://resources/projects/context-assembler",))
+        _get_topic_conn(db).commit()
+        sub2 = w2g.build_wiki_subgraph()
+        trace2 = [e for e in sub2["edges"] if e.get("relation") == "trace"]
+        assert any(e["target"] == "ov_doc_37-reality-restructure.md"
+                   for e in trace2)
+
+    def test_bigram_gate_degraded_no_crash(self, tmp_path, monkeypatch):
+        """降级（fs/tree 不可用）：CA 根 disabled → 不建 trace 节点/边，不崩。"""
+        db = _seed_ov_roots_db(tmp_path, monkeypatch)
+        self._disable_ca_root(db)
+        _mk_reality(db, name="Reality 重构")
+        monkeypatch.setattr(w2g, "_load_all_ov_docs", lambda: [])
+        monkeypatch.setattr(w2g, "_load_ov_doc_titles", lambda: [
+            {"title": "Reality 重构", "label": "Reality 重构",
+             "nid": "ov_doc_37-reality-restructure.md",
+             "uri": "viking://resources/projects/context-assembler/decisions/"
+                    "37-reality-restructure.md/37-reality-restructure.md",
+             "words": ["reality", "重构"]},
+        ])
+        monkeypatch.setattr(w2g, "_bigram_idf",
+                            lambda titles: {"reality": 3.0, "重构": 3.0})
+
+        sub = w2g.build_wiki_subgraph()
+        ids = {n["id"] for n in sub["nodes"]}
+        assert "ov_doc_37-reality-restructure.md" not in ids
+        assert not any(e.get("relation") == "trace" for e in sub["edges"])
+        # _meta 出口存在（main 读取路径）
+        assert sub.get("_meta", {}).get("ca_root_enabled") is False
