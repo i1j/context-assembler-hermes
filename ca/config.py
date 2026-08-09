@@ -222,6 +222,14 @@ class Config:
     REFINEMENT_DOC_OV_APPLY: ClassVar[bool] = os.getenv(
         "CA_REFINEMENT_DOC_OV_APPLY", "0") == "1"
 
+    # v7.1 (决策 44 续): ov_roots LLM 治理
+    OV_GOVERN: ClassVar[bool] = os.getenv("CA_OV_GOVERN", "1") == "1"
+    #   =0 跳过 LLM 决策（T13：仅探测登记）
+    OV_GOVERN_MAX_ENABLE: ClassVar[int] = int(os.getenv("CA_OV_GOVERN_MAX_ENABLE", "1"))
+    #   每轮 enable 决策上限；0 = 本轮禁止任何 enable（全部降级 keep）
+    OV_GOVERN_MAX_TOKENS: ClassVar[int] = int(os.getenv("CA_OV_GOVERN_MAX_TOKENS", "16384"))
+    #   治理决策 num_predict（全量根清单 JSON 输出上限；4096 会被 99 根截断）
+
     # 累积切割水位（Token 阈值）
     ACCUMULATED_SPLIT_START: ClassVar[int] = int(os.getenv("CA_ACCUMULATED_SPLIT_START", "5000"))
     ACCUMULATED_SPLIT_END: ClassVar[int] = int(os.getenv("CA_ACCUMULATED_SPLIT_END", "8000"))
@@ -401,6 +409,8 @@ class Config:
         pos_int("REFINEMENT_MIN_NEW_TURNS", cls.REFINEMENT_MIN_NEW_TURNS, min_v=1, max_v=1000)
         pos_float("REFINEMENT_MAX_DURATION", cls.REFINEMENT_MAX_DURATION, min_v=10)
         pos_int("REFINEMENT_MAX_ENTRIES_PER_CYCLE", cls.REFINEMENT_MAX_ENTRIES_PER_CYCLE, min_v=1, max_v=20)
+        pos_int("OV_GOVERN_MAX_ENABLE", cls.OV_GOVERN_MAX_ENABLE, min_v=0, max_v=20)
+        pos_int("OV_GOVERN_MAX_TOKENS", cls.OV_GOVERN_MAX_TOKENS, min_v=512, max_v=65536)
 
         if errors:
             raise ValueError("Configuration validation failed:\n" + "\n".join(errors))
@@ -489,6 +499,9 @@ class Config:
             cls.REFINEMENT_DOC_MAINTENANCE = os.getenv("CA_REFINEMENT_DOC_MAINTENANCE", "0") == "1"
             cls.REFINEMENT_DOC_DRY_RUN = os.getenv("CA_REFINEMENT_DOC_DRY_RUN", "1") == "1"
             cls.REFINEMENT_DOC_OV_APPLY = os.getenv("CA_REFINEMENT_DOC_OV_APPLY", "0") == "1"
+            cls.OV_GOVERN = os.getenv("CA_OV_GOVERN", "1") == "1"
+            cls.OV_GOVERN_MAX_ENABLE = int(os.getenv("CA_OV_GOVERN_MAX_ENABLE", str(cls.OV_GOVERN_MAX_ENABLE)))
+            cls.OV_GOVERN_MAX_TOKENS = int(os.getenv("CA_OV_GOVERN_MAX_TOKENS", str(cls.OV_GOVERN_MAX_TOKENS)))
 
             cls.validate()
             logger.info("Configuration reloaded and validated.")

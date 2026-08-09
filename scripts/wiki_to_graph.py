@@ -66,10 +66,18 @@ TRACE_SOURCES = [
 CA_CODE_DIR = str(Path(__file__).resolve().parent.parent)
 
 # ── ov_roots 多根配置（决策 44 前置，2026-08-08）──
-# 权威 schema/种子在 ca/store.py _SCHEMA_SQL_STRANDS + _migrate_ov_roots_seed；
-# 此处为独立脚本运行（不经 store._get_topic_conn）时的幂等兜底，保证
-# build_wiki_subgraph 在任何入口都能读 ov_roots 表。
+# 仅建表兜底；种子权威在 ca/store.py _migrate_ov_roots_seed（user_version 门控）。
+# 子进程绝不播种：否则 graphify 会把 LLM remove/disable 的根当场复活 enabled=1
+# （决策 44 续 R6/R7）。
 _OV_CA_ROOT = "viking://resources/projects/context-assembler"
+
+
+def _uri_belongs_to_root(uri: str, root_uri: str) -> bool:
+    """根边界归属：uri == 根 或 uri 在根 + "/" 前缀下（与 ca/refinement 同规则）。"""
+    base = root_uri.rstrip("/")
+    return uri == base or uri.startswith(base + "/")
+
+
 _OV_ROOTS_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS ov_roots (
     root_uri    TEXT PRIMARY KEY,
@@ -79,15 +87,6 @@ CREATE TABLE IF NOT EXISTS ov_roots (
     added_at    REAL,
     last_seen   REAL
 );
-INSERT OR IGNORE INTO ov_roots (root_uri, filters, enabled, origin, added_at)
-VALUES
- ('viking://resources/projects/context-assembler', '{}', 1, 'seed',
-  CAST(strftime('%s','now') AS REAL)),
- ('viking://resources/projects/windows',
-  '{"exclude":["/code/"]}', 1, 'seed',
-  CAST(strftime('%s','now') AS REAL)),
- ('viking://resources/projects/irobot', '{}', 0, 'seed',
-  CAST(strftime('%s','now') AS REAL));
 """
 
 
@@ -117,7 +116,10 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def _ensure_ov_roots(conn: sqlite3.Connection) -> None:
-    """ov_roots 表 + 种子幂等兜底（独立脚本入口；store 迁移已跑则无操作）。"""
+    """仅建表兜底；种子权威在 ca/store.py `_migrate_ov_roots_seed`（user_version 门控）。
+
+    独立脚本入口不播种：LLM remove/disable 的根不被子进程复活（R6/R7）。
+    """
     try:
         conn.executescript(_OV_ROOTS_SCHEMA_SQL)
         conn.commit()
@@ -461,8 +463,15 @@ def _parse_trace_frontmatter(content: str) -> dict:
     return result
 
 
-def _add_trace_edges(subgraph: dict, seen_nodes: set[str]) -> None:
-    """从 OV 设计/架构文档读取 trace: → 生成 trace 边。"""
+def _add_trace_edges(subgraph: dict, seen_nodes: set[str],
+                     ca_root_enabled: bool = True) -> None:
+    """从 OV 设计/架构文档读取 trace: → 生成 trace 边。
+
+    R6 (决策 44 续)：CA 根 disabled → 直接返回（跳过 TRACE_SOURCES frontmatter
+    trace 边；return 在 fetch 前）。缺省 True 保持旧调用方行为。
+    """
+    if not ca_root_enabled:
+        return  # CA 根 disabled → 跳过 TRACE_SOURCES frontmatter trace 边（R6）
     nodes = subgraph["nodes"]
     edges = subgraph["edges"]
 
@@ -597,6 +606,20 @@ def build_wiki_subgraph() -> dict:
     # v6.5.4: 用全部 reality 名称统计 bigram IDF（专有词加权，抑制 优化/话题 等泛词）
     all_titles = [e["name"] or "" for e in entries]
     idf = _bigram_idf(all_titles)
+
+    # R6 (决策 44 续): CA 根 trace 门控 —— 三态语义：表不可读 → True；
+    # row=None（表空/未播种/CA 根 remove）→ True（保守，保留 TRACE_SOURCES
+    # 逻辑）；仅 row 存在且 enabled=0 → False（禁用 CA 根 trace 建边）。
+    try:
+        _row = conn.execute(
+            "SELECT enabled FROM ov_roots WHERE root_uri=?",
+            (_OV_CA_ROOT,)).fetchone()
+        if _row is None:
+            ca_root_enabled = True
+        else:
+            ca_root_enabled = bool(_row["enabled"] == 1)
+    except sqlite3.Error:
+        ca_root_enabled = True
     conn.close()
 
     nodes: list[dict] = []
@@ -689,6 +712,10 @@ def build_wiki_subgraph() -> dict:
             _doc_nid = ov_nid_by_uri.get(_doc_uri) or _doc.get("nid")
             if not _doc_label or not _doc_uri or not _doc_nid:
                 continue
+            # R6 (B-2): CA 根 disabled → 该文档不建节点也不建边
+            # （覆盖建节点 + edges.append 双出口）
+            if not ca_root_enabled and _uri_belongs_to_root(_doc_uri, _OV_CA_ROOT):
+                continue
             _doc_words = _doc.get("words") or set(_extract_bigrams(_doc.get("title", "")))
             _overlap = _wiki_words & set(_doc_words)
             if not _overlap:
@@ -758,7 +785,10 @@ def build_wiki_subgraph() -> dict:
             })
 
     # 不跨 entry 建边（先只保留单 entry 内部结构）
-    return {"nodes": nodes, "edges": edges}
+    # R6: _meta.ca_root_enabled 供 main 决定是否追加 TRACE_SOURCES trace 边；
+    # _meta 不进主图（merge_into_main_graph 只遍历 nodes/edges）。
+    return {"nodes": nodes, "edges": edges,
+            "_meta": {"ca_root_enabled": ca_root_enabled}}
 
 
 # 第三轮 T2：strand-topic 节点正则（topic_{session_id}_S{strand_id}）。
@@ -922,9 +952,10 @@ def main():
     os.makedirs(GRAPHIFY_OUT, exist_ok=True)
     subgraph = build_wiki_subgraph()
 
-    # 追加 trace 边（决策↔代码追溯）
+    # 追加 trace 边（决策↔代码追溯；CA 根 disabled → 门控跳过，R6）
     seen_nodes = {n["id"] for n in subgraph["nodes"]}
-    _add_trace_edges(subgraph, seen_nodes)
+    _add_trace_edges(subgraph, seen_nodes,
+                     ca_root_enabled=subgraph.get("_meta", {}).get("ca_root_enabled", True))
 
     # 写子图文件
     with open(WIKI_GRAPH_FILE, "w") as f:

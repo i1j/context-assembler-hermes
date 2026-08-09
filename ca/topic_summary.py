@@ -214,6 +214,8 @@ def call_llm_raw(
     num_predict: Optional[int] = None,
     temperature: Optional[float] = None,
     max_retries: Optional[int] = None,
+    priority: str = "normal",
+    format: Optional[str] = None,
 ) -> Optional[str]:
     """4B 原始调用（通用）：返回响应文本，不做 JSON 解析。
 
@@ -223,6 +225,11 @@ def call_llm_raw(
     max_retries: 覆盖 Config.LLM_MAX_RETRIES 的重试次数。
         用户消息热路径（reality 注入 4B 拣选，BUG-08）传 1：
         单次不重试，失败快速降级（余弦/jaccard 兜底或空注入）。
+    priority: ollama-priority-proxy 队列优先级（high/normal/low），
+        v7.1 (2026-08-08, BUG-08 根治)：注入 4B 传 "high" 抢占队列，
+        避免被后台话题摘要（normal）阻塞用户消息路径。
+    format: 非 None 时 req_body["format"]=format（如 "json"）；None 缺省不发送
+        （向后兼容）。决策 44 续：治理决策透传 format="json"。
     """
     import urllib.request
 
@@ -241,6 +248,10 @@ def call_llm_raw(
         },
         "keep_alive": -1,
     }
+    if format is not None:
+        # v7.1 (2026-08-10): ollama 0.32.5 顶层 format 被当 JSON Schema 严格校验，
+        # 4B 输出对象必失败；format 须置于 options 内（宽松 JSON 模式）。
+        req_body["options"]["format"] = format
     req_body["think"] = Config.LLM_THINK if Config.LLM_THINK is not None else False
     payload = json.dumps(req_body).encode()
 
@@ -252,7 +263,10 @@ def call_llm_raw(
             req = urllib.request.Request(
                 f"{Config.LLM_ENDPOINT.rstrip('/')}/api/generate",
                 data=payload,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Queue-Priority": priority,
+                },
             )
             with urllib.request.urlopen(req, timeout=Config.LLM_TIMEOUT) as resp:
                 data = json.loads(resp.read())
@@ -276,8 +290,13 @@ def call_llm_raw(
     return response_text
 
 
-def call_llm_for_summary(prompt: str) -> Optional[Dict[str, Any]]:
-    """调用 LLM (4B) 生成话题摘要，返回解析后的 JSON dict。"""
+def call_llm_for_summary(prompt: str, priority: str = "normal") -> Optional[Dict[str, Any]]:
+    """调用 LLM (4B) 生成话题摘要，返回解析后的 JSON dict。
+
+    priority: ollama-priority-proxy 队列优先级（high/normal/low），
+        v7.1 (2026-08-08, BUG-08 根治)：话题摘要默认 normal；
+        精炼轮传 "low"（空闲任务，可无限等待）。
+    """
     import urllib.request
 
     llm_start = time.monotonic()
@@ -285,12 +304,14 @@ def call_llm_for_summary(prompt: str) -> Optional[Dict[str, Any]]:
         "model": Config.LLM_MODEL,
         "prompt": prompt,
         "stream": False,
-        "format": "json",
         "options": {
             # v6.4.1: 独立 num_predict——L1_MAX_TOKENS=2048 是 F-stage 参数，
             # 多 strand 输出会被 2048 截断（stop=length → JSON parse 失败 → fallback）
             "num_predict": Config.TOPIC_SUMMARY_MAX_TOKENS,
             "temperature": Config.L1_TEMPERATURE,
+            # v7.1 (2026-08-10): format 置于 options 内（ollama 0.32.5 兼容；
+            # 顶层 format 被当 JSON Schema 严格校验会拒）
+            "format": "json",
         },
         "keep_alive": -1,
     }
@@ -303,7 +324,10 @@ def call_llm_for_summary(prompt: str) -> Optional[Dict[str, Any]]:
             req = urllib.request.Request(
                 f"{Config.LLM_ENDPOINT.rstrip('/')}/api/generate",
                 data=payload,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Queue-Priority": priority,
+                },
             )
             with urllib.request.urlopen(req, timeout=Config.LLM_TIMEOUT) as resp:
                 data = json.loads(resp.read())

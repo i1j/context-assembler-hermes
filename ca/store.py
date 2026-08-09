@@ -611,16 +611,105 @@ VALUES
 """
 
 
-def _migrate_ov_roots_seed(conn: sqlite3.Connection) -> None:
-    """ov_roots 种子迁移：INSERT OR IGNORE 幂等，不覆盖已有行。
+# user_version 位语义: 0=未初始化, 1=已初始化（高位留空，供后续迁移使用）
+_OV_ROOTS_UV_INITIALIZED = 1
 
-    失败静默跳过（表结构/权限异常时不影响主流程）。
+
+def _migrate_ov_roots_seed(conn: sqlite3.Connection) -> None:
+    """ov_roots 种子迁移（user_version 门控，决策 44 续 R7）。
+
+    仅「未初始化」（PRAGMA user_version=0）执行：
+      - 表为空（全新库）→ INSERT 种子 3 行 + 置位 user_version=1（同一 executescript）
+      - 表非空（存量库）→ 仅置位 user_version=1，不播种不改写
+    user_version>=1 → 直接返回（remove 后不再以 enabled=1 复活）。
+    置位/执行失败 → warning（不静默）。
     """
     try:
-        conn.executescript(_OV_ROOTS_SEED_SQL)
+        row = conn.execute("PRAGMA user_version").fetchone()
+        uv = int(row[0]) if row else 0
+        if uv >= _OV_ROOTS_UV_INITIALIZED:
+            return
+        count = conn.execute("SELECT COUNT(*) FROM ov_roots").fetchone()[0]
+        if count == 0:
+            # 全新库：播种 + 置位（同一 executescript，尽力原子）
+            sql = _OV_ROOTS_SEED_SQL + f"\nPRAGMA user_version = {_OV_ROOTS_UV_INITIALIZED};"
+        else:
+            # 存量库（user_version=0 且表有行）→ 仅置位不播种
+            sql = f"PRAGMA user_version = {_OV_ROOTS_UV_INITIALIZED};"
+        conn.executescript(sql)
         conn.commit()
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as exc:
+        logger.warning("[CA_STORE] ov_roots 种子迁移失败: %s", exc)
+
+def set_ov_root_filters(root_uri: str, filters: dict) -> bool:
+    """手动设置根 filters（决策 44 续 R5；LLM 不写 filters）。
+
+    校验: filters 为 dict 且 include/exclude 均 list[str]（可空）；
+    非法 → False 拒绝（不写）。root_uri 不在表 → False + warning。
+    合法 → UPDATE filters=json.dumps(filters)，commit，True。
+    """
+    if not isinstance(filters, dict):
+        logger.warning("[CA_STORE] set_ov_root_filters: filters 非 dict，拒绝")
+        return False
+    for key in ("include", "exclude"):
+        v = filters.get(key, [])
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            logger.warning(
+                "[CA_STORE] set_ov_root_filters: %s 必须为 list[str]，拒绝",
+                key)
+            return False
+    conn = _get_topic_conn()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM ov_roots WHERE root_uri=?", (root_uri,)
+        ).fetchone()
+        if row is None:
+            logger.warning(
+                "[CA_STORE] set_ov_root_filters: root_uri 不在 ov_roots 表: %s",
+                root_uri)
+            return False
+        conn.execute(
+            "UPDATE ov_roots SET filters=? WHERE root_uri=?",
+            (json.dumps(filters, ensure_ascii=False), root_uri))
+        conn.commit()
+        return True
+    except sqlite3.Error as exc:
+        logger.warning("[CA_STORE] set_ov_root_filters: 写入失败: %s", exc)
+        return False
+
+
+def list_ov_roots() -> list[dict]:
+    """全表行 → [{root_uri, filters(dict), enabled, origin, added_at, last_seen}]。
+
+    filters JSON 容错（非法 JSON → {}，不崩、不丢根）。
+    """
+    conn = _get_topic_conn()
+    try:
+        rows = conn.execute(
+            "SELECT root_uri, filters, enabled, origin, added_at, last_seen "
+            "FROM ov_roots ORDER BY root_uri"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        logger.warning("[CA_STORE] list_ov_roots: 读取失败: %s", exc)
+        return []
+    out: list[dict] = []
+    for r in rows:
+        try:
+            flt = json.loads(r[1] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            flt = {}
+        if not isinstance(flt, dict):
+            flt = {}
+        out.append({
+            "root_uri": r[0],
+            "filters": flt,
+            "enabled": r[2],
+            "origin": r[3],
+            "added_at": r[4],
+            "last_seen": r[5],
+        })
+    return out
+
 
 # ═══════════════════════════════════════════════════════════
 # v6.4 — strand 读写 API（strand_summaries / wiki_strand_map）

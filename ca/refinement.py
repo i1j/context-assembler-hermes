@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -34,6 +35,7 @@ from .store import (
     write_refinement_meta,
     get_last_refinement_meta,
 )
+from .topic_summary import call_llm_raw
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,353 @@ def _ov_probe_threshold() -> Optional[float]:
         return None
 
 
+# ═══════════════════════════════════════════════════════════
+# ov_roots LLM 治理（决策 44 续：keep/enable/disable/remove）
+# ═══════════════════════════════════════════════════════════
+
+OV_GOVERN_MODEL = "local"  # 字面常量，无 env 读取（"固定" = 不提供可切换配置）
+
+_DECISION_ACTIONS = {"keep", "enable", "disable", "remove"}
+
+
+def _is_local_model(model_name: str) -> bool:
+    """本地 4B 判定矩阵（§3.3；属性名实证 Config.LLM_ENDPOINT，非 LLM_API_BASE）。
+
+    本地（AND 组合，端点为主判据）：
+      - qwen3-4b 前缀模型名 AND LLM_ENDPOINT 主机 ∈ {localhost, 127.0.0.1} → 本地
+      - 任意模型名 + 非本地端点 → 非本地（拒）
+      - qwen3-4b 前缀 + 远程端点（网关代理）→ 非本地（拒）
+      - 本地端点 + 非 qwen3-4b 模型名 → 非本地（拒，保守）
+    """
+    name = (model_name or "").strip().lower()
+    if not name.startswith("qwen3-4b"):
+        return False
+    endpoint = str(Config.LLM_ENDPOINT or "").strip()
+    if not endpoint:
+        return False
+    if "://" not in endpoint:
+        endpoint = "http://" + endpoint
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(endpoint).hostname or "").lower()
+    except Exception:
+        return False
+    return host in ("localhost", "127.0.0.1")
+
+
+def _govern_llm_decision(prompt: str, priority: str = "low") -> Optional[str]:
+    """治理决策 4B raw 调用。返回响应文本（JSON 字符串），None = 调用失败/模型非本地。
+
+    num_predict=Config.OV_GOVERN_MAX_TOKENS：全量根清单 JSON 输出上限——
+    默认 4096 会在根数多时截断 JSON 数组（实测 99 根 ~12K 字符被截断 → 解析失败降级 keep）。
+    """
+    if not _is_local_model(Config.LLM_MODEL):
+        logger.warning(
+            "[CA_L4] govern 决策模型 %s 非本地 4B，跳过本轮 LLM 决策（降级 keep）",
+            Config.LLM_MODEL)
+        return None
+    return call_llm_raw(prompt, num_predict=Config.OV_GOVERN_MAX_TOKENS,
+                        priority=priority, format="json")
+
+
+def parse_decision_array(response_text: str) -> tuple[list[dict], int]:
+    """解析 LLM 决策 JSON 数组。返回 (合法项列表, 非法项数)。
+
+    1. 剥围栏（```json ... ``` / 杂音，对齐 cloud_llm.lenient_parse）
+    2. 取首 '[' 至末 ']' 子串 → json.loads → 顶层必须为 list
+    3. 逐项校验（非法项剔除不抛异常）:
+       - 项必须为 dict；root_uri 非空 str
+       - action ∈ {keep, enable, disable, remove}（白名单）
+       - reason 任意（缺省补 ""）
+       - 多余字段（filters 等）→ 忽略，不构成非法（R3 ⑨）
+    4. 解析失败 → ([], n)，调用方走护栏降级（不崩、不误写）
+    """
+    if not response_text:
+        return [], 0
+    t = re.sub(r"```(?:json)?", "", response_text).strip()
+    i, j = t.find("["), t.rfind("]")
+    if i < 0 or j <= i:
+        return [], 1
+    try:
+        data = json.loads(t[i:j + 1])
+    except (json.JSONDecodeError, TypeError):
+        return [], 1
+    if not isinstance(data, list):
+        return [], 1
+    valid: list[dict] = []
+    invalid = 0
+    for item in data:
+        if not isinstance(item, dict):
+            invalid += 1
+            continue
+        uri = item.get("root_uri")
+        if not isinstance(uri, str) or not uri.strip():
+            invalid += 1
+            continue
+        action = item.get("action")
+        if action not in _DECISION_ACTIONS:
+            invalid += 1
+            continue
+        reason = item.get("reason")
+        if not isinstance(reason, str):
+            reason = ""
+        valid.append({"root_uri": uri.strip(), "action": action, "reason": reason})
+    return valid, invalid
+
+
+def _uri_belongs_to_root(uri: str, root_uri: str) -> bool:
+    """根边界归属：uri == 根 或 uri 在根 + "/" 前缀下（避免 osaka 匹配 osaka2）。"""
+    base = root_uri.rstrip("/")
+    return uri == base or uri.startswith(base + "/")
+
+
+def _graph_json_path() -> Path:
+    """graph.json 路径：复用 GRAPHIFY_OUT env，默认 ca_assembler 根/graphify-out/graph.json。"""
+    out = os.getenv(
+        "GRAPHIFY_OUT",
+        str(Path(__file__).resolve().parent.parent / "graphify-out"),
+    )
+    return Path(out) / "graph.json"
+
+
+def _load_govern_graph() -> Optional[dict]:
+    """读 graph.json（ref_edges 证据源；缺失/不可读 → None = 整体失败）。
+
+    不在此处打 warning（整体失败轮由 _govern_ov_roots 统一发一条 keep 全部）。
+    """
+    try:
+        with open(_graph_json_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _count_ref_edges(graph: dict, root_uri: str) -> int:
+    """graph.json **links** 键中 relation=references_ov 的边数。
+
+    两跳归属：edge.target → nodes[] 中 id 匹配 → metadata.uri →
+    _uri_belongs_to_root（跨根同名 nid 按 uri 归属，不按 nid）。
+    """
+    by_id: dict[str, dict] = {}
+    for n in graph.get("nodes", []):
+        if isinstance(n, dict) and n.get("id") is not None:
+            by_id[str(n["id"])] = n
+    count = 0
+    for e in graph.get("links", []):
+        if not isinstance(e, dict):
+            continue
+        if e.get("relation") != "references_ov":
+            continue
+        node = by_id.get(str(e.get("target") or ""))
+        if node is None:
+            continue
+        meta = node.get("metadata")
+        uri = str((meta or {}).get("uri") or "")
+        if uri and _uri_belongs_to_root(uri, root_uri):
+            count += 1
+    return count
+
+
+def _fetch_tree_level(uri: str) -> Optional[list[dict]]:
+    """单层 fs/tree 拉取（对齐 _ov_projects_roots 模式；D-2 不 import w2g._fetch_tree）。
+
+    网络失败/超时 → None（调用方按单层失败跳过该子目录；根级失败 → 证据缺失）。
+    成功但空列表 = 该层为空（区别于失败）。
+    """
+    import urllib.parse
+    import urllib.request
+    url = (f"{OV_API.rstrip('/')}/api/v1/fs/tree?"
+           + urllib.parse.urlencode({"uri": uri}))
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    return IdleRefinementDaemon._extract_probe_entries(payload)
+
+
+def _ov_tree_docs(root_uri: str, filters: dict) -> tuple[int, bool]:
+    """递归 fs/tree 统计根下文档数（应用 filters + 对齐入图规则）。
+
+    返回 (计数, 根级 fs/tree 是否成功)。max_depth=6、seen 去环、isDir 字符串
+    大小写不敏感（"true"/"1"）、单层失败跳过该子目录。入图口径对齐
+    _load_all_ov_docs：rel 非空 + _uri_ov_doc_nid 非 None + 同根最短 rel_path 去重。
+    """
+    from scripts.wiki_to_graph import _apply_filters, _rel_from_uri, _uri_ov_doc_nid
+
+    root_ok = True
+    files: list[dict] = []
+    seen: set[str] = set()
+
+    def _walk(uri: str, depth: int) -> None:
+        nonlocal root_ok
+        if depth > 6 or uri in seen:
+            return
+        seen.add(uri)
+        entries = _fetch_tree_level(uri)
+        if entries is None:
+            if depth == 0:
+                root_ok = False
+            return  # 单层失败跳过该子目录
+        for e in entries:
+            entry = dict(e)
+            entry_uri = str(entry.get("uri") or "").strip()
+            rel = _rel_from_uri(entry_uri, root_uri) if entry_uri else None
+            if rel:
+                entry["rel_path"] = rel
+            if str(entry.get("isDir", "false")).strip().lower() in ("true", "1"):
+                if entry_uri:
+                    _walk(entry_uri, depth + 1)
+            else:
+                files.append(entry)
+
+    _walk(root_uri, 0)
+    best: dict[str, str] = {}
+    for e in _apply_filters(files, filters, root_uri):
+        uri = str(e.get("uri") or "").strip()
+        rel = str(e.get("rel_path") or "").strip()
+        if not uri or not rel or not rel.endswith(".md"):
+            continue
+        nid = _uri_ov_doc_nid(uri)
+        if not nid:
+            continue
+        cur = best.get(nid)
+        if cur is None or len(rel) < len(cur):
+            best[nid] = rel
+    return len(best), root_ok
+
+
+def _collect_top_score(conn, root_uri: str,
+                       is_candidate: bool) -> tuple[Optional[float], bool]:
+    """OV search/find 最高命中分（D3 裁剪：仅 enabled=0 候选根 + 新探测根查询）。
+
+    每根最多 3 个 query（成本控制）。返回 (最高分, 查询是否成功)；非候选根 →
+    (None, True)（不查询，标注 skipped）。失败/超时 → (0.0, False)（证据缺失）。
+    """
+    if not is_candidate:
+        return None, True
+    try:
+        from .fact_linking import _hit_score, _ov_search_find
+    except Exception:
+        _hit_score = None
+        _ov_search_find = None
+    if _ov_search_find is None:
+        return 0.0, False
+    try:
+        reality_rows = conn.execute(
+            "SELECT name, hdl FROM realities ORDER BY reality_id"
+        ).fetchall()
+    except sqlite3.Error:
+        return 0.0, False
+    queries = [
+        " ".join(filter(None, [str(r[0] or ""), str(r[1] or "")]))[:200]
+        for r in reality_rows
+    ]
+    queries = [q for q in queries if q.strip()]
+    top_score = 0.0
+    for query in queries[:3]:
+        try:
+            top = _ov_search_find(query)
+        except Exception:
+            return 0.0, False
+        if top is None:
+            return 0.0, False  # search/find 失败/超时 → 该项证据缺失
+        for hit in top:
+            hit_uri = str(hit.get("uri") or hit.get("title")
+                          or hit.get("name") or "")
+            if not _uri_belongs_to_root(hit_uri, root_uri):
+                continue
+            if _hit_score is not None:
+                try:
+                    top_score = max(top_score, _hit_score(hit))
+                except Exception:
+                    pass
+    return top_score, True
+
+
+def _collect_root_evidence(conn, row, root_uris: set[str],
+                           new_uris: set[str], graph: dict) -> dict:
+    """单根证据收集（R2）。row: (root_uri, filters, enabled, origin, last_seen)。"""
+    root_uri = str(row[0])
+    try:
+        flt = json.loads(row[1] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        flt = {}
+    if not isinstance(flt, dict):
+        flt = {}
+    is_candidate = int(row[2]) == 0
+    ref_edges = _count_ref_edges(graph, root_uri)
+    doc_count, doc_ok = _ov_tree_docs(root_uri, flt)
+    top_score, top_ok = _collect_top_score(conn, root_uri, is_candidate)
+    return {
+        "root_uri": root_uri,
+        "enabled": int(row[2]),
+        "filters": flt,
+        "origin": str(row[3] or ""),
+        "last_seen": row[4],
+        "is_new": root_uri in new_uris,
+        "ov_exists": root_uri in root_uris,
+        "ref_edges": ref_edges,
+        "doc_count": doc_count,
+        "top_score": top_score if is_candidate else "skipped",
+        "evidence_available": bool(doc_ok and top_ok),
+    }
+
+
+def _build_govern_prompt(evidence_rows: list[dict],
+                         threshold: Optional[float]) -> str:
+    """构建治理决策 prompt（每根状态 + 证据表 + 字段清单 + D3 裁剪标注）。"""
+    lines = [
+        "你是 ov_roots 表（OV 项目根治理配置）的决策器。对表中每个根给出一个动作。",
+        "",
+        "动作白名单（必须且只能选一个）:",
+        "  keep   = 保持现状（enabled 不变）",
+        "  enable = 启用该根（enabled=1，文档入图）",
+        "  disable = 停用该根（enabled=0，文档不入图）",
+        "  remove = 删除该根登记（下轮若 OV 仍存在会被重新探测登记 enabled=0）",
+        "",
+        "每根证据字段清单:",
+        "  root_uri: 根 URI",
+        "  enabled: 当前启用状态（1=启用 / 0=停用）",
+        "  filters: 过滤配置（include/exclude；仅手动修改，你不输出 filters 字段）",
+        "  origin: 登记来源（seed / manual / refine_probe）",
+        "  last_seen: 最近探测时间戳（unix）",
+        "  is_new: 本轮新探测登记（true/false）",
+        "  ov_exists: 根是否仍存在于 OV projects（true/false）",
+        "  ref_edges: graph.json 中 references_ov 边指向该根文档的边数（两跳：边 target → 节点 metadata.uri → 根前缀归属）",
+        "  doc_count: 递归 fs/tree 文档数（应用该根 filters，对齐入图口径）",
+        "  top_score: OV search/find 最高命中分；D3 裁剪：仅 enabled=0 候选根与新探测根查询，已启用根为 skipped",
+        "  evidence_available: 证据完整性（false = 该项证据缺失，保守处理）",
+        "",
+    ]
+    if threshold is not None:
+        lines.append(f"参考阈值（非强制）: CA_OV_REFERENCE_THRESHOLD={threshold:.3f}")
+    else:
+        lines.append("参考阈值: 未配置（无强制阈值）")
+    lines.append("")
+    lines.append("根清单:")
+    for i, ev in enumerate(evidence_rows, 1):
+        last_seen = ev["last_seen"]
+        if isinstance(last_seen, (int, float)):
+            last_seen_s = f"{last_seen:.0f}"
+        else:
+            last_seen_s = str(last_seen)
+        lines.append(
+            f"{i}. root_uri={ev['root_uri']} enabled={ev['enabled']} "
+            f"filters={json.dumps(ev['filters'], ensure_ascii=False)} "
+            f"origin={ev['origin']} last_seen={last_seen_s} "
+            f"is_new={ev['is_new']} ov_exists={ev['ov_exists']} "
+            f"ref_edges={ev['ref_edges']} doc_count={ev['doc_count']} "
+            f"top_score={ev['top_score']} "
+            f"evidence_available={ev['evidence_available']}")
+    lines.append("")
+    lines.append("输出严格 JSON 数组（不要输出其它内容），每项: "
+                 '{"root_uri": "...", "action": "keep|enable|disable|remove", '
+                 '"reason": "..."}')
+    return "\n".join(lines)
+
+
 # ═══════════════════════════════════════════════════════════════
 # 空闲守护线程
 # ═══════════════════════════════════════════════════════════════
@@ -77,6 +426,8 @@ class IdleRefinementDaemon:
         self._stop_event = threading.Event()
         # plugin_ref: CAContextAssemblerPlugin 实例引用，用于获取 embed_client
         self._plugin_ref = plugin_ref
+        # R8: graphify 同步 in-flight 去重（cycle 开始复位；Step 5 + 治理双触发源共享）
+        self._graphify_inflight = False
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -172,6 +523,7 @@ class IdleRefinementDaemon:
 
     def _run_refinement_cycle(self) -> None:
         """执行一轮完整精炼。"""
+        self._graphify_inflight = False  # R8: 每轮复位
         t0 = time.monotonic()
         tasks_run: List[str] = []
         entries_reviewed = 0
@@ -216,14 +568,15 @@ class IdleRefinementDaemon:
                 scored = self._run_health_score(conn)
                 entries_reviewed += scored
 
-            # Step 4.5: OV 根探测（决策 44：多根逐步启用；Step 5 之前）
+            # Step 4.5: OV 根治理（决策 44 续：LLM 每轮决策 keep/enable/disable/remove）
             try:
-                probe_enabled = self._probe_ov_roots(conn)
-                if probe_enabled:
-                    tasks_run.append("ov_root_probe")
-                    logger.info("[CA_L4] ov_roots probe: 本轮启用 1 个新根")
+                govern_changes = self._govern_ov_roots(conn)
+                if govern_changes:
+                    tasks_run.append("ov_root_govern")
+                    logger.info("[CA_L4] ov_roots govern: %d 行决策已执行",
+                                govern_changes)
             except Exception as exc:
-                logger.warning("[CA_L4] ov_roots probe failed: %s", exc)
+                logger.warning("[CA_L4] ov_roots govern failed: %s", exc)
 
             # Step 5: Graphify 增量同步
             if Config.REFINEMENT_GRAPHIFY_SYNC and entries_modified > 0:
@@ -797,129 +1150,179 @@ class IdleRefinementDaemon:
 
         return round(min(max(score, 0), 1), 3)
 
-    # ── Step 5: Graphify 增量同步 ──
+    # ── Step 4.5: OV 根治理（决策 44 续；Step 5 之前）──
 
-    def _probe_ov_roots(self, conn=None) -> int:
-        """探测外部 OV 项目根并逐步启用（决策 44；Step 5 前每次 cycle 执行）。
+    def _govern_ov_roots(self, conn=None) -> int:
+        """OV 根 LLM 治理（决策 44 续：每轮 4B 决策 keep/enable/disable/remove）。
 
-        1. fs/tree 探测 viking://resources/projects 根级项目目录
-        2. 未在 ov_roots 表 → INSERT OR IGNORE enabled=0（origin='refine_probe'）
-        3. 对 enabled=0 候选根：复用 OV search/find 统计 realities 语义命中
-           （每根最多 3 个 query，控制成本）；命中≥1 且 top-1 score ≥
-           CA_OV_REFERENCE_THRESHOLD → 启用该根
-        4. 每轮最多启用 1 个新根（防一轮全开 → 图爆炸）
-        5. 幂等：已存在根只更新 last_seen；已启用根不重复启用
-        6. env 未配置 CA_OV_REFERENCE_THRESHOLD → 只登记不启用（保守）
+        7 步流程：
+          1. 探测（保留现有机制）：fs/tree 探测 projects 根；新根 INSERT enabled=0
+             （origin='refine_probe'）；已存在根 UPDATE last_seen（幂等）。
+             CA_OV_GOVERN=0 → 仅本步，return 0（T13）。
+          2. 证据收集：每根 {ref_edges, doc_count, top_score, is_new, ov_exists,
+             evidence_available}（R2；D3 裁剪：top_score 仅候选根查询）。
+          3. LLM 决策：构建 prompt → _govern_llm_decision(prompt, priority="low")
+             → parse_decision_array → 逐项校验。
+          4. 执行（单事务）：全部决策行一个事务内 UPDATE/DELETE。
+          5. 护栏：本轮 enable 决策数 > CA_OV_GOVERN_MAX_ENABLE → 超出降级 keep。
+          6. 触发：表快照 diff（enabled 列 + 行集合）> 0 → in-flight 去重触发
+             _run_graphify_sync（探测登记/last_seen 不计入 diff）。
+          7. 失败降级：4B 失败/解析失败/证据整体失败 → keep 全部 + warning 一条。
 
         Returns:
-            本轮启用根数（0 或 1）。
+            本轮实际执行的 UPDATE/DELETE 语句数（rowcount 累计；keep/幻影跳过/
+            护栏降级不计入；探测登记与 last_seen 更新不计入）。
         """
-        threshold = _ov_probe_threshold()
         if conn is None:
             conn = _get_topic_conn()
         now = time.time()
 
-        # 1. 探测 projects 根级项目目录
+        # Step 1: 探测 projects 根级项目目录（保留现有机制）
         try:
             root_uris = self._ov_projects_roots()
         except Exception as exc:
-            logger.warning("[CA_L4] ov_roots probe: fs/tree failed: %s", exc)
-            return 0
-        if not root_uris:
-            logger.info("[CA_L4] ov_roots probe: projects 根探测为空（OV 不可用），跳过")
+            logger.warning("[CA_L4] ov_roots govern: fs/tree failed: %s", exc)
+            root_uris = []
+        probe_failed = not root_uris
+
+        # 新根入表 enabled=0；已存在根更新 last_seen（幂等）
+        new_uris: set[str] = set()
+        if root_uris:
+            try:
+                known = {r[0] for r in conn.execute(
+                    "SELECT root_uri FROM ov_roots").fetchall()}
+                for uri in root_uris:
+                    if uri in known:
+                        conn.execute(
+                            "UPDATE ov_roots SET last_seen=? WHERE root_uri=?",
+                            (now, uri))
+                    else:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO ov_roots "
+                            "(root_uri, filters, enabled, origin, added_at, last_seen) "
+                            "VALUES (?, '{}', 0, 'refine_probe', ?, ?)",
+                            (uri, now, now))
+                        new_uris.add(uri)
+                        logger.info("[CA_L4] ov_roots govern: 新根登记 %s (enabled=0)",
+                                    uri)
+                conn.commit()
+            except sqlite3.Error as exc:
+                logger.warning("[CA_L4] ov_roots govern: DB 写入失败: %s", exc)
+                return 0
+
+        # CA_OV_GOVERN=0 → 仅探测登记，不做 LLM 决策（T13）
+        if not Config.OV_GOVERN:
             return 0
 
-        # 2. 新根入表 enabled=0；已存在根更新 last_seen（幂等）
+        # 整体失败判定（优先于单项标记；整体失败轮不构建 prompt）
+        graph = _load_govern_graph()
+        if graph is None:
+            logger.warning("[CA_L4] ov_roots govern: graph.json 缺失/不可读，"
+                           "本轮 keep 全部（不触发 build）")
+            return 0
+        if probe_failed:
+            logger.warning("[CA_L4] ov_roots govern: OV projects 根级探测失败，"
+                           "本轮 keep 全部（不触发 build）")
+            return 0
+
+        # Step 2: 证据收集（ov_roots 表当前存在的每一行）
+        rows = conn.execute(
+            "SELECT root_uri, filters, enabled, origin, last_seen FROM ov_roots "
+            "ORDER BY root_uri").fetchall()
+        root_set = set(root_uris)
+        evidence_rows = [
+            _collect_root_evidence(conn, r, root_set, new_uris, graph)
+            for r in rows
+        ]
+
+        # Step 3: LLM 决策
+        prompt = _build_govern_prompt(evidence_rows, _ov_probe_threshold())
+        response = _govern_llm_decision(prompt, priority="low")
+        if response is None:
+            logger.warning("[CA_L4] ov_roots govern: LLM 决策失败，"
+                           "本轮 keep 全部（不执行任何变更）")
+            return 0
+        decisions, _invalid = parse_decision_array(response)
+        if not decisions:
+            logger.warning("[CA_L4] ov_roots govern: 决策解析无合法项，"
+                           "本轮 keep 全部（不执行任何变更）")
+            return 0
+
+        # 表快照 before：步骤 1 探测 commit 之后、步骤 4 决策事务之前
+        # （探测登记 enabled=0 行已在 before 内 → 不计入 diff）
+        before = {(r[0], r[1]) for r in conn.execute(
+            "SELECT root_uri, enabled FROM ov_roots").fetchall()}
+
+        # Step 4: 单事务执行（按 LLM 输出顺序；任一行失败 → ROLLBACK 全部）
+        # 护栏：enable 决策数 > CA_OV_GOVERN_MAX_ENABLE → 超出降级 keep
+        # （按实际执行的 enable 计数；幻影根不消耗预算）
+        max_enable = Config.OV_GOVERN_MAX_ENABLE
+        applied_enables = 0
+        statement_count = 0
+        logs: list[dict] = []
+        log_idx_by_uri: dict[str, int] = {}
         try:
-            known = {r[0] for r in conn.execute(
-                "SELECT root_uri FROM ov_roots").fetchall()}
-            for uri in root_uris:
-                if uri in known:
-                    conn.execute(
-                        "UPDATE ov_roots SET last_seen=? WHERE root_uri=?",
-                        (now, uri))
-                else:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO ov_roots "
-                        "(root_uri, filters, enabled, origin, added_at, last_seen) "
-                        "VALUES (?, '{}', 0, 'refine_probe', ?, ?)",
-                        (uri, now, now))
-                    logger.info("[CA_L4] ov_roots probe: 新根登记 %s (enabled=0)",
-                                uri)
+            conn.execute("BEGIN")
+            for d in decisions:
+                uri = d["root_uri"]
+                action = d["action"]
+                reason = str(d.get("reason") or "")
+                # 幻影检测：先 SELECT 存在性 → 不存在 → 跳过（不发出语句）
+                exists = conn.execute(
+                    "SELECT 1 FROM ov_roots WHERE root_uri=?", (uri,)
+                ).fetchone()
+                if exists is None:
+                    logs.append({"root_uri": uri, "action": action,
+                                 "reason": "root not in table",
+                                 "executed": False})
+                    continue
+                if action == "enable" and applied_enables >= max_enable:
+                    action = "keep"
+                    reason = "护栏降级"
+                elif action == "enable":
+                    applied_enables += 1
+                if uri in log_idx_by_uri:
+                    # 重复 root_uri：前项被后项覆盖（前项若已执行仍计入语句数，
+                    # 前项日志 executed=false，后项 executed=true）
+                    logs[log_idx_by_uri[uri]]["executed"] = False
+                if action == "enable":
+                    cur = conn.execute(
+                        "UPDATE ov_roots SET enabled=1 WHERE root_uri=?", (uri,))
+                    statement_count += cur.rowcount
+                elif action == "disable":
+                    cur = conn.execute(
+                        "UPDATE ov_roots SET enabled=0 WHERE root_uri=?", (uri,))
+                    statement_count += cur.rowcount
+                elif action == "remove":
+                    cur = conn.execute(
+                        "DELETE FROM ov_roots WHERE root_uri=?", (uri,))
+                    statement_count += cur.rowcount
+                # keep / 护栏降级 → 无 SQL
+                logs.append({"root_uri": uri, "action": action,
+                             "reason": reason, "executed": True})
+                log_idx_by_uri[uri] = len(logs) - 1
             conn.commit()
         except sqlite3.Error as exc:
-            logger.warning("[CA_L4] ov_roots probe: DB 写入失败: %s", exc)
-            return 0
-
-        # 3. 评估 enabled=0 候选根（阈值未配置 → 保守不启用）
-        if threshold is None:
-            logger.info("[CA_L4] ov_roots probe: CA_OV_REFERENCE_THRESHOLD 未配置，"
-                        "只登记候选根不启用")
-            return 0
-        try:
-            candidates = [r[0] for r in conn.execute(
-                "SELECT root_uri FROM ov_roots WHERE enabled=0 "
-                "ORDER BY root_uri").fetchall()]
-            reality_rows = conn.execute(
-                "SELECT name, hdl FROM realities ORDER BY reality_id"
-            ).fetchall()
-        except sqlite3.Error as exc:
-            logger.warning("[CA_L4] ov_roots probe: 候选读取失败: %s", exc)
-            return 0
-        queries = [
-            " ".join(filter(None, [str(r[0] or ""), str(r[1] or "")]))[:200]
-            for r in reality_rows
-        ]
-        queries = [q for q in queries if q.strip()]
-
-        try:
-            from .fact_linking import _hit_score, _ov_search_find
-        except Exception:
-            _hit_score = None
-            _ov_search_find = None
-
-        enabled_uri: Optional[str] = None
-        for uri in candidates:
-            if enabled_uri is not None:
-                break  # 每轮最多启用 1 个
-            hit_count = 0
-            top_score = 0.0
-            for query in queries[:3]:  # 每根最多 3 个 query（成本控制）
-                if _ov_search_find is None:
-                    break
-                top = _ov_search_find(query)
-                if not top:
-                    continue
-                for hit in top:
-                    hit_uri = str(hit.get("uri") or hit.get("title")
-                                  or hit.get("name") or "")
-                    # 根边界：uri 本身或 uri + "/" 前缀（避免 osaka 匹配 osaka2）
-                    if not (hit_uri == uri
-                            or hit_uri.startswith(uri.rstrip("/") + "/")):
-                        continue
-                    hit_count += 1
-                    if _hit_score is not None:
-                        try:
-                            top_score = max(top_score, _hit_score(hit))
-                        except Exception:
-                            pass
-            if hit_count >= 1 and top_score >= threshold:
-                enabled_uri = uri
-                logger.info(
-                    "[CA_L4] ov_roots probe: 启用根 %s (hits=%d top_score=%.3f "
-                    "threshold=%.3f)", uri, hit_count, top_score, threshold)
-
-        if enabled_uri is not None:
             try:
-                conn.execute(
-                    "UPDATE ov_roots SET enabled=1, last_seen=? "
-                    "WHERE root_uri=?", (now, enabled_uri))
-                conn.commit()
-                return 1
-            except sqlite3.Error as exc:
-                logger.warning("[CA_L4] ov_roots probe: 启用写入失败: %s", exc)
-                return 0
-        return 0
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            logger.warning("[CA_L4] ov_roots govern: 决策事务失败，回滚全部: %s",
+                           exc)
+            return 0
+
+        # 决策日志（事务提交成功后统一发出；逐行单行 JSON）
+        for log in logs:
+            logger.info("[CA_L4] ov_roots govern decision: %s",
+                        json.dumps(log, ensure_ascii=False))
+
+        # Step 6: 变化（表快照 diff: enabled 列 + 行集合）> 0 → 触发 build
+        after = {(r[0], r[1]) for r in conn.execute(
+            "SELECT root_uri, enabled FROM ov_roots").fetchall()}
+        if before != after:
+            self._run_graphify_sync()
+
+        return statement_count
 
     @staticmethod
     def _ov_projects_roots() -> list[str]:
@@ -970,7 +1373,13 @@ class IdleRefinementDaemon:
         return []
 
     def _run_graphify_sync(self) -> None:
-        """触发 wiki_to_graph.py 全量同步。"""
+        """触发 wiki_to_graph.py 全量同步。
+
+        R8: in-flight 去重——cycle 内 Step 5 与治理触发共享，无论顺序同轮仅 1 次。
+        """
+        if getattr(self, "_graphify_inflight", False):
+            return
+        self._graphify_inflight = True
         try:
             import subprocess
             import sys
