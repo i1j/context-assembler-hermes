@@ -1,7 +1,7 @@
 """ca/e_stage.py — E-stage 写即落盘 + 代码级摘要 (v5.10)
 
 设计决策: Fct 摘要重构 (PDD 哲学)
-  viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-l1-摘要重构-v470-pdd-哲学
+  viking://resources/projects/context-assembler/decisions/decision-points-wiki.md#toc-l1-摘要重构-v470-pdd-哲学
   5 个写入点: post_api_request → pre_tool_call → post_tool_call → pre_llm_call → post_llm_call
   核心原则：写即落盘，不经过 buffer。turn_stream(turn, seq) 主键保证每行唯一。
 

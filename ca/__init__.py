@@ -1,7 +1,7 @@
 """ca/__init__.py — ContextAssembler 主引擎薄壳 (v5.10)
 
 设计决策: C-010 (A-stage 解耦), E-stage (写即落盘)
-  viking://resources/projects/context-assembler/design/decision-points-wiki.md
+  viking://resources/projects/context-assembler/decisions/decision-points-wiki.md
   - A-stage: topic-aware 三级替换 (ca/a_stage.py)
   - E-stage: 5 钩子同步写入 turn_stream (ca/e_stage.py)
   - F-stage: daemon 异步 LLM 摘要 (ca/f_stage.py)

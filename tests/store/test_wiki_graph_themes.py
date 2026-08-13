@@ -105,10 +105,22 @@ class TestWikiToGraphBuildSubgraph:
             assert e["source_file"] == "realities"
 
     def test_build_subgraph_empty_db(self, theme_db, monkeypatch):
-        """空库不崩溃，返回空子图。"""
+        """空库不崩溃。新语义（2026-08-08 OV 全量入图）：
+        DB 空时无 reality/merged_into，但 OV 全量节点独立入图（mock 2 个文档）。
+        """
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
         from scripts import wiki_to_graph as w2g
+
+        # mock fs/tree 全量清单（2 个文档）——测试不依赖真实网络
+        monkeypatch.setattr(w2g, "_load_all_ov_docs", lambda: [
+            {"uri": "viking://resources/projects/context-assembler/decisions/15-fingerprint-dedup/15-fingerprint-dedup.md",
+             "rel_path": "decisions/15-fingerprint-dedup/15-fingerprint-dedup.md",
+             "nid": "ov_doc_15-fingerprint-dedup.md"},
+            {"uri": "viking://resources/projects/context-assembler/architecture/tool-summarizer-architecture.md",
+             "rel_path": "architecture/tool-summarizer-architecture.md",
+             "nid": "ov_doc_tool-summarizer-architecture.md"},
+        ])
 
         orig = w2g.CA_TOPICS_DB
         w2g.CA_TOPICS_DB = str(theme_db)
@@ -117,8 +129,13 @@ class TestWikiToGraphBuildSubgraph:
         finally:
             w2g.CA_TOPICS_DB = orig
 
-        assert sub["nodes"] == []
-        assert sub["edges"] == []
+        ids = [n["id"] for n in sub["nodes"]]
+        # 空库：无 reality、无 strand-topic、无 merged_into
+        assert not any(i.startswith("reality_") for i in ids)
+        assert not any(e.get("relation") == "merged_into" for e in sub["edges"])
+        # OV 全量节点独立入图（不受 DB 空影响）
+        assert "ov_doc_15-fingerprint-dedup.md" in ids
+        assert "ov_doc_tool-summarizer-architecture.md" in ids
 
 
 class TestWikiAssociationsThemes:
@@ -127,7 +144,7 @@ class TestWikiAssociationsThemes:
     def _write_graph(self, theme_db, tmp_path):
         """构造最小 graph.json：英文 code 节点 + 中文 document 节点 + knowledge 节点。
 
-        真实主图匹配主要靠 document 节点（中文标题，如 docs/wiki/*.md），
+        真实主图匹配主要靠 document 节点（中文标题，如 docs/decisions/*/*.md），
         code 节点 label 为英文函数名，与中文 theme 标题天然难匹配。
         """
         graph = {
@@ -137,7 +154,7 @@ class TestWikiAssociationsThemes:
                  "community": 1},
                 {"id": "doc_conn_pool", "label": "连接池配置优化方案",
                  "file_type": "document",
-                 "source_file": "docs/wiki/decisions/conn-pool.md",
+                 "source_file": "docs/decisions/conn-pool/conn-pool.md",
                  "community": 2},
                 {"id": "theme_1", "label": "[知识] 连接池优化",
                  "file_type": "knowledge", "_origin": "wiki"},
@@ -311,6 +328,16 @@ class TestTraceMatchStrategy:
         }
         monkeypatch.setattr(w2g, "_fetch_ov_raw",
                             lambda uri: fake_docs.get(uri, ""))
+        # mock fs/tree 全量清单（含 TRACE_SOURCES 两个文档的 URI 文件段 nid）——
+        # 2026-08-08 命名统一后 trace 边 target 用 URI 文件段命名，与 _ov_doc_nid 一致
+        monkeypatch.setattr(w2g, "_load_all_ov_docs", lambda: [
+            {"uri": w2g.TRACE_SOURCES[0],
+             "rel_path": "decisions/topic-summarization-decision.md/话题摘要化设计_v3_取代_OV_VLM_摘要.md",
+             "nid": "ov_doc_topic-summarization-decision.md"},
+            {"uri": w2g.TRACE_SOURCES[1],
+             "rel_path": "architecture/ca-ov-topic-submit.md",
+             "nid": "ov_doc_ca-ov-topic-submit.md"},
+        ])
         # mock IDF：模拟真实库分布（话题=泛词中偏高，摘要/提交=专有词）
         monkeypatch.setattr(w2g, "_bigram_idf", lambda titles: {
             "话题": 2.55, "摘要": 3.62, "提交": 4.41, "设计": 2.80,
@@ -333,14 +360,14 @@ class TestTraceMatchStrategy:
         trace = [e for e in edges if e.get("relation") == "trace"]
         assert len(trace) >= 2, f"期望 ≥2 条 trace 边，实际 {len(trace)}"
 
-        # 提交主题 → 提交文档
+        # 提交主题 → 提交文档（URI 文件段命名，2026-08-08 命名统一）
         assert any(
-            e["source"] == "reality_1" and "提交" in e["target"]
+            e["source"] == "reality_1" and "ca-ov-topic-submit" in e["target"]
             for e in trace
         )
-        # 摘要主题 → 摘要文档
+        # 摘要主题 → 摘要文档（URI 文件段命名）
         assert any(
-            e["source"] == "reality_2" and "摘要" in e["target"]
+            e["source"] == "reality_2" and "topic-summarization-decision" in e["target"]
             for e in trace
         )
         # 连接池优化不产生 trace（'连接'+'优化' 无 doc 重叠词）

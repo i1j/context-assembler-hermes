@@ -54,13 +54,13 @@ flowchart LR
 | 02 | [存储模型](architecture/02-store/02-store.md) | v5.10 | `ca/store.py` | turn_stream 表结构、WAL |
 | 03 | [E-stage 写入](architecture/03-e-stage/03-e-stage.md) | v5.0 | `ca/e_stage.py` | 5 Hook 写即落盘协议 |
 | 04 | [F-stage 摘要](architecture/04-f-stage/04-f-stage.md) | v5.2 | `ca/f_stage.py` | 异步 LLM 摘要（fin 粒度） |
-| 05 | [A-stage 装配](architecture/05-a-stage/05-a-stage.md) | v6.0 | `ca/a_stage.py` | direction B：DB 重建 conv_history（含 tail-protection） |
-| 06 | [话题管理](architecture/06-topic-management/06-topic-management.md) | v5.5 | `topic_manager.py` | TopicGradeManager 检测+定级（含 OV 话题提交） |
-| 07 | [检索](architecture/07-retrieval/07-retrieval.md) | v4.0 | `ca/retrieval.py` | BM25+向量双路+RRF |
-| 08 | [缓存](architecture/08-cache/08-cache.md) | v4.0 | `ca/cache.py` | AssemblyCache 内存缓存 |
-| 09 | [工具摘要](architecture/09-tool-summarizer/09-tool-summarizer.md) | v4.3 | `ca/tool_summarizer.py` | 工具调用摘要引擎 |
+| 05 | [A-stage 装配](architecture/05-a-stage/05-a-stage.md) | v6.0 | `ca/a_stage.py` | direction B：DB 重建 conv_history（含 tail-protection）；⚠️ 生产未激活（仅 CE 壳 compress() 可达，CE 壳注册 2026-08-13 暂停，见决策 20 修订） |
+| 06 | [话题管理](architecture/06-topic-management/06-topic-management.md) | v5.5 | `topic_manager.py` | TopicGradeManager 检测+定级 |
+| 07 | [检索](architecture/07-retrieval/07-retrieval.md) | v4.0 | `ca/retrieval.py` | BM25+向量双路+RRF；⚠️ 死代码（无生产调用方，文档自标） |
+| 08 | [缓存](architecture/08-cache/08-cache.md) | v4.0 | `ca/cache.py` | AssemblyCache；⚠️ 部分接入（semantic_fct_embeddings 由 topic_manager 消费，四字典其余死代码；无 SHA256 指纹，2026-08-13 修订） |
+| 09 | [工具摘要](architecture/09-tool-summarizer/09-tool-summarizer.md) | v4.3 | `ca/tool_summarizer.py` | 工具调用摘要引擎（11 handler） |
 | 10 | [嵌入](architecture/10-embedding/10-embedding.md) | v4.0 | `ca/embedding.py` | Ollama / ST 多后端 |
-| 11 | [L-stage 引擎生命周期](architecture/11-l-stage/11-l-stage.md) | v4.4 | `ca/lstage.py` | 生命周期管理 + L4 空闲精炼管线（v5.14 新增） |
+| 11 | [L-stage 引擎生命周期](architecture/11-l-stage/11-l-stage.md) | v4.4 | `ca/lstage.py` | 引擎生命周期管理（L4 空闲精炼已移至 14-idle-refinement，v5.14） |
 | 12 | [配置体系](architecture/12-config/12-config.md) | v5.0 | `ca/config.py` | 配置加载+优先级 |
 | 13 | [测试策略](testing/13-test-strategy.md) | v5.0 | `tests/` | 分层测试体系 |
 | 14 | [空闲精炼管线](architecture/14-idle-refinement/14-idle-refinement.md) | v5.14→v2 | `ca/refinement.py` | L4 精炼轮：归并审查（宁并不分）+内精炼+交叉验证（reality 化，决策 41） |
@@ -74,23 +74,23 @@ flowchart LR
 | 03 | [SQLite WAL](decisions/03-sqlite-wal/03-sqlite-wal.md) | v4.2 | 存储 | store |
 | 04 | [E-stage 写即落盘](decisions/04-e-stage-on-receive/04-e-stage-on-receive.md) | v5.0 | 数据协议 | e-stage |
 | 05 | [F-stage 异步摘要](decisions/05-f-stage-async/05-f-stage-async.md) | v5.2 | 管线 | f-stage |
-| 06 | [方向 B](decisions/06-direction-b/06-direction-b.md) | v6.0 | 架构重写 | a-stage, topic mgmt |
+| 06 | [方向 B](decisions/06-direction-b/06-direction-b.md) | v6.0 | 架构重写 | a-stage, topic mgmt（⚠️ 生产未激活，2026-08-13 修订） |
 | 07 | [话题定级管理器](decisions/07-topic-grade-manager/07-topic-grade-manager.md) | v5.5 | 话题 | topic_manager |
-| 08 | [双路检索 RRF](decisions/08-dual-retrieval/08-dual-retrieval.md) | v4.0 | 检索 | retrieval |
-| 09 | [AssemblyCache](decisions/09-assembly-cache/09-assembly-cache.md) | v4.0 | 缓存 | cache |
+| 08 | [双路检索 RRF](decisions/08-dual-retrieval/08-dual-retrieval.md) | v4.0 | 检索 | retrieval（死代码，无生产调用方） |
+| 09 | [AssemblyCache](decisions/09-assembly-cache/09-assembly-cache.md) | v4.0 | 缓存 | cache（部分接入） |
 | 10 | [工具摘要规则](decisions/10-tool-summarizer/10-tool-summarizer.md) | v4.3 | 工具 | tool_summarizer |
 | 11 | [嵌入多后端](decisions/11-embedding-multi-backend/11-embedding-multi-backend.md) | v4.0 | 嵌入 | embedding |
 | 12 | [LLM 降级链](decisions/12-llm-fallback/12-llm-fallback.md) | v4.3 | LLM | f-stage |
 | 13 | [尾巴保护](decisions/13-tail-protection/13-tail-protection.md) | v5.3 | A-stage | a-stage |
 | 14 | [bg_review 同步](decisions/14-bg-review-sync/14-bg-review-sync.md) | v5.5 | 审计 | hooks |
-| 15 | [指纹去重](decisions/15-fingerprint-dedup/15-fingerprint-dedup.md) | v4.1 | 数据 | store |
+| 15 | [指纹去重](decisions/15-fingerprint-dedup/15-fingerprint-dedup.md) | v4.1 | 数据 | store（⚠️ 未落地：代码无 SHA256 指纹，2026-08-13 修订） |
 | 16 | [预算闸门](decisions/16-budget-gate/16-budget-gate.md) | v4.2 | A-stage | a-stage (legacy) |
 | 17 | [L-stage 守护线程](decisions/17-l-stage-daemon/17-l-stage-daemon.md) | v4.4→v5.10 | 守护→取代 | l-stage（v5.10 被 F-stage 取代） |
 | 18 | [术语统一](decisions/18-naming-unification/18-naming-unification.md) | v5.5 | 命名 | 全系统 |
 | 19 | [Schema v5](decisions/19-schema-v5/19-schema-v5.md) | v5.0 | 存储 | store |
-| 20 | [CE 壳注册](decisions/20-ce-shell-registration/20-ce-shell-registration.md) | v5.10 | 插件 | plugin |
+| 20 | [CE 壳注册](decisions/20-ce-shell-registration/20-ce-shell-registration.md) | v5.10 | 插件 | plugin（⚠️ 注册暂停 2026-08-13，原 2 参调用致插件加载失败） |
 | 21 | [引擎 TTL 恢复](decisions/21-engine-ttl-recovery/21-engine-ttl-recovery.md) | v6+ | 稳定性 | plugin |
-| 22 | [State DB 去重](decisions/22-state-db-dedup/22-state-db-dedup.md) | v6.1 | 修复 | plugin |
+| 22 | [State DB 去重](decisions/22-state-db-dedup/22-state-db-dedup.md) | v6.1 | 修复 | plugin（⚠️ 未落地：代码无 on_session_finalize，2026-08-13 修订） |
 | **23** | **[已拒绝方案](decisions/23-rejected-approaches/23-rejected-approaches.md)** | v0-v6 | 汇总 | — |
 | **28** | **[话题摘要 v4](decisions/28-topic-summarization-v4/28-topic-summarization-v4.md)** | v6.0 | 摘要 | f-stage, topic_summarizer |
 | **34** | **[空闲精炼管线](decisions/34-idle-refinement/34-idle-refinement.md)** | **v5.14→v2** | **自我维护** | **l-stage, realities, store（reality 化，2026-08-07）** |

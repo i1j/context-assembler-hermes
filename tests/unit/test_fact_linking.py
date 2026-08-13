@@ -12,6 +12,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 import ca.fact_linking as fl
 
 
@@ -310,3 +312,466 @@ class TestProfileFilter:
         hits = fl._ov_search_find("test")
         assert len(hits) == 1
         assert hits[0]["uri"].startswith("viking://resources/projects/")
+
+
+class TestSignalCLayered:
+    """信号 C 分层（2026-08-08）：P0 导航排除 + P1 先代码后 4B + P2 top-K。"""
+
+    @staticmethod
+    def _graph_with(gp, ov_ids):
+        nodes = [{"id": nid, "label": f"[知识] {nid}"} for nid in ov_ids]
+        gp.write_text(json.dumps({"nodes": nodes, "links": []}),
+                      encoding="utf-8")
+
+    def test_top1_auto_layer_no_jaccard_no_4b(self, tmp_path, monkeypatch):
+        """top-1 score ≥ 0.60 → 自动落图，零 token（不调 jaccard/4B）。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_a.md"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(fl, "OV_AUTO_THRESHOLD", 0.60)
+        monkeypatch.setattr(fl, "OV_JACCARD_MIN", 0.05)
+        monkeypatch.setattr(
+            fl, "_ov_search_find",
+            lambda q: [{"uri": "viking://resources/projects/x/a.md",
+                        "score": 0.9}])
+        calls = []
+        monkeypatch.setattr(
+            fl, "_doc_title_jaccard",
+            lambda rt, hit: calls.append("jaccard") or 0.0)
+        monkeypatch.setattr(
+            fl, "_judge_ov_reference_4b",
+            lambda r, hit: calls.append("4b") or "none")
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 1
+        assert calls == []
+
+    def test_top1_boundary_jaccard_above_min_lands(self, tmp_path, monkeypatch):
+        """0.55 ≤ score < 0.60 且 jaccard ≥ 0.05 → 词面放行落图（不上 4B）。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_b.md"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(fl, "OV_AUTO_THRESHOLD", 0.60)
+        monkeypatch.setattr(fl, "OV_JACCARD_MIN", 0.05)
+        monkeypatch.setattr(
+            fl, "_ov_search_find",
+            lambda q: [{"uri": "viking://resources/projects/x/b.md",
+                        "score": 0.58}])
+        monkeypatch.setattr(fl, "_doc_title_jaccard", lambda rt, hit: 0.3)
+        calls = []
+        monkeypatch.setattr(
+            fl, "_judge_ov_reference_4b",
+            lambda r, hit: calls.append("4b") or "none")
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 1
+        assert calls == []
+
+    def test_top1_boundary_jaccard_low_4b_references_lands(
+            self, tmp_path, monkeypatch):
+        """0.55-0.60 且 jaccard < 0.05 → 4B 判 references → 落图。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_b.md"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(fl, "OV_AUTO_THRESHOLD", 0.60)
+        monkeypatch.setattr(fl, "OV_JACCARD_MIN", 0.05)
+        monkeypatch.setattr(
+            fl, "_ov_search_find",
+            lambda q: [{"uri": "viking://resources/projects/x/b.md",
+                        "score": 0.58}])
+        monkeypatch.setattr(fl, "_doc_title_jaccard", lambda rt, hit: 0.0)
+        monkeypatch.setattr(fl, "_judge_ov_reference_4b",
+                            lambda r, hit: "references")
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 1
+        g = json.loads(gp.read_text(encoding="utf-8"))
+        refs = [l for l in g["links"] if l["relation"] == "references_ov"]
+        assert len(refs) == 1
+        assert refs[0]["target"] == "ov_doc_b.md"
+
+    def test_top1_boundary_jaccard_low_4b_none_skips(
+            self, tmp_path, monkeypatch):
+        """0.55-0.60 且 jaccard < 0.05 → 4B 判 none → 跳过不落图。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_b.md"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(fl, "OV_AUTO_THRESHOLD", 0.60)
+        monkeypatch.setattr(fl, "OV_JACCARD_MIN", 0.05)
+        monkeypatch.setattr(
+            fl, "_ov_search_find",
+            lambda q: [{"uri": "viking://resources/projects/x/b.md",
+                        "score": 0.58}])
+        monkeypatch.setattr(fl, "_doc_title_jaccard", lambda rt, hit: 0.0)
+        monkeypatch.setattr(fl, "_judge_ov_reference_4b",
+                            lambda r, hit: "none")
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 0
+        g = json.loads(gp.read_text(encoding="utf-8"))
+        assert g["links"] == []
+
+    def test_top1_boundary_4b_failure_skips(self, tmp_path, monkeypatch):
+        """边界区 4B 解析失败（None）→ 跳过候选不崩。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_b.md"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(fl, "OV_AUTO_THRESHOLD", 0.60)
+        monkeypatch.setattr(fl, "OV_JACCARD_MIN", 0.05)
+        monkeypatch.setattr(
+            fl, "_ov_search_find",
+            lambda q: [{"uri": "viking://resources/projects/x/b.md",
+                        "score": 0.58}])
+        monkeypatch.setattr(fl, "_doc_title_jaccard", lambda rt, hit: 0.0)
+        monkeypatch.setattr(fl, "_judge_ov_reference_4b",
+                            lambda r, hit: None)
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 0
+        g = json.loads(gp.read_text(encoding="utf-8"))
+        assert g["links"] == []
+
+    def test_below_floor_no_edge_no_4b(self, tmp_path, monkeypatch):
+        """score < 0.55 → 不落图，且不调 jaccard/4B。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_a.md"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(fl, "OV_AUTO_THRESHOLD", 0.60)
+        monkeypatch.setattr(
+            fl, "_ov_search_find",
+            lambda q: [{"uri": "viking://resources/projects/x/a.md",
+                        "score": 0.50}])
+        calls = []
+        monkeypatch.setattr(
+            fl, "_doc_title_jaccard",
+            lambda rt, hit: calls.append("jaccard") or 0.0)
+        monkeypatch.setattr(
+            fl, "_judge_ov_reference_4b",
+            lambda r, hit: calls.append("4b") or "none")
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 0
+        assert calls == []
+
+    def test_topk_multiple_hits_multiple_edges(self, tmp_path, monkeypatch):
+        """同 reality 多命中（score 全 ≥ 0.60）→ 每个不同 target 建边。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_a.md", "ov_doc_b.md", "ov_doc_c.md"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(fl, "OV_AUTO_THRESHOLD", 0.60)
+        monkeypatch.setattr(fl, "OV_TOP_K_MIN_SCORE", 0.60)
+        monkeypatch.setattr(
+            fl, "_ov_search_find",
+            lambda q: [
+                {"uri": "viking://resources/projects/x/a.md", "score": 0.9},
+                {"uri": "viking://resources/projects/x/b.md", "score": 0.85},
+                {"uri": "viking://resources/projects/x/c.md", "score": 0.8},
+            ])
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 3
+        g = json.loads(gp.read_text(encoding="utf-8"))
+        targets = {l["target"] for l in g["links"]
+                   if l["relation"] == "references_ov"}
+        assert targets == {"ov_doc_a.md", "ov_doc_b.md", "ov_doc_c.md"}
+
+    def test_topk_same_nid_dedup(self, tmp_path, monkeypatch):
+        """碎片与主文档同 nid → 只建 1 条边。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_34-idle-refinement.md"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(fl, "OV_AUTO_THRESHOLD", 0.60)
+        monkeypatch.setattr(
+            fl, "_ov_search_find",
+            lambda q: [
+                {"uri": "viking://resources/projects/context-assembler/decisions/"
+                        "34-idle-refinement/34-idle-refinement.md/背景.md",
+                 "score": 0.9},
+                {"uri": "viking://resources/projects/context-assembler/decisions/"
+                        "34-idle-refinement/34-idle-refinement.md/.overview.md",
+                 "score": 0.88},
+            ])
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 1
+        g = json.loads(gp.read_text(encoding="utf-8"))
+        refs = [l for l in g["links"] if l["relation"] == "references_ov"]
+        assert len(refs) == 1
+        assert refs[0]["target"] == "ov_doc_34-idle-refinement.md"
+
+    def test_topk_low_rank2_3_skip_4b_count_limited(self, tmp_path, monkeypatch):
+        """top-2/3 score < 0.60 → 跳过不上 4B；4B 仅 top-1 边界区调用 1 次。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_a.md", "ov_doc_b.md", "ov_doc_c.md"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(fl, "OV_AUTO_THRESHOLD", 0.60)
+        monkeypatch.setattr(fl, "OV_JACCARD_MIN", 0.05)
+        monkeypatch.setattr(fl, "OV_TOP_K_MIN_SCORE", 0.60)
+        monkeypatch.setattr(
+            fl, "_ov_search_find",
+            lambda q: [
+                {"uri": "viking://resources/projects/x/a.md", "score": 0.58},
+                {"uri": "viking://resources/projects/x/b.md", "score": 0.57},
+                {"uri": "viking://resources/projects/x/c.md", "score": 0.56},
+            ])
+        monkeypatch.setattr(fl, "_doc_title_jaccard", lambda rt, hit: 0.0)
+        calls = []
+
+        def fake_4b(reality, hit):
+            calls.append(hit["uri"])
+            return "references"
+
+        monkeypatch.setattr(fl, "_judge_ov_reference_4b", fake_4b)
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 1
+        assert len(calls) == 1
+        assert calls == ["viking://resources/projects/x/a.md"]
+        g = json.loads(gp.read_text(encoding="utf-8"))
+        refs = [l for l in g["links"] if l["relation"] == "references_ov"]
+        assert [l["target"] for l in refs] == ["ov_doc_a.md"]
+
+    def test_topk_constant_limits_hits(self, tmp_path, monkeypatch):
+        """OV_TOP_K=2 → 只遍历前 2 个命中（第 3 个不处理）。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_a.md", "ov_doc_b.md", "ov_doc_c.md"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(fl, "OV_TOP_K", 2)
+        monkeypatch.setattr(
+            fl, "_ov_search_find",
+            lambda q: [
+                {"uri": "viking://resources/projects/x/a.md", "score": 0.9},
+                {"uri": "viking://resources/projects/x/b.md", "score": 0.85},
+                {"uri": "viking://resources/projects/x/c.md", "score": 0.8},
+            ])
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 2
+        g = json.loads(gp.read_text(encoding="utf-8"))
+        targets = {l["target"] for l in g["links"]
+                   if l["relation"] == "references_ov"}
+        assert targets == {"ov_doc_a.md", "ov_doc_b.md"}
+
+    def test_navigation_doc_excluded_even_high_score(self, tmp_path,
+                                                     monkeypatch):
+        """INDEX.md 命中 score 0.9（图内已有节点）→ 仍排除（P0 泛文档）。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_index.md"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(
+            fl, "_ov_search_find",
+            lambda q: [{"uri": "viking://resources/projects/"
+                               "context-assembler/INDEX.md",
+                        "score": 0.9}])
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 0
+        g = json.loads(gp.read_text(encoding="utf-8"))
+        assert g["links"] == []
+
+    def test_tail_not_exact_kept(self, tmp_path, monkeypatch):
+        """01-overview.md（尾段 01-overview）→ 精确匹配不误伤，正常落图。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_01-overview.md"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(
+            fl, "_ov_search_find",
+            lambda q: [{"uri": "viking://resources/projects/"
+                               "context-assembler/architecture/01-overview.md",
+                        "score": 0.9}])
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 1
+
+    def test_hidden_overview_fragment_excluded_by_nid(self, tmp_path,
+                                                      monkeypatch):
+        """缺陷场景：uri 尾段 .overview.md（nid 解析为 ov_doc_overview.md）
+        → 导航排除用 tgt 命中，不落图（2026-08-08 修复）。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_overview.md"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(
+            fl, "_ov_search_find",
+            lambda q: [{"uri": "viking://resources/projects/context-assembler/"
+                               "overview.md/.overview.md",
+                        "score": 0.9}])
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 0
+        g = json.loads(gp.read_text(encoding="utf-8"))
+        assert g["links"] == []
+
+    def test_title_form_hit_boundary_uses_title(self, tmp_path, monkeypatch):
+        """title 形态命中（无 uri）→ 导航判定用 title；边界区走 4B。"""
+        gp = tmp_path / "graph.json"
+        self._graph_with(gp, ["ov_doc_连接池配置优化方案"])
+        monkeypatch.setattr(fl, "_graph_path", lambda: gp)
+        monkeypatch.setattr(fl, "OV_REFERENCE_THRESHOLD", 0.55)
+        monkeypatch.setattr(fl, "OV_AUTO_THRESHOLD", 0.60)
+        monkeypatch.setattr(fl, "_ov_search_find",
+                            lambda q: [{"title": "连接池配置优化方案",
+                                        "score": 0.58}])
+        monkeypatch.setattr(fl, "_doc_title_jaccard", lambda rt, hit: 0.0)
+        monkeypatch.setattr(fl, "_judge_ov_reference_4b",
+                            lambda r, hit: "references")
+        realities = [_mk_reality(1, "连接池优化", "连接池上限调优")]
+        assert fl.run_fact_linking(None, realities) == 1
+
+
+class TestIsNavigationDoc:
+    """P0 导航排除精确性：尾段集合精确匹配（8 组 + title 形态）。"""
+
+    def test_navigation_uris_excluded(self):
+        nav = [
+            "viking://resources/projects/x/INDEX.md",
+            "viking://resources/projects/x/docs/README.md",
+            "viking://resources/projects/x/changelog.md",
+            "viking://resources/projects/x/overview.md",
+        ]
+        for uri in nav:
+            assert fl._is_navigation_doc({"uri": uri}), uri
+
+    def test_non_navigation_uris_kept(self):
+        kept = [
+            "viking://resources/projects/x/01-overview.md",
+            "viking://resources/projects/x/C-INDEX.md",
+            "viking://resources/projects/x/H-INDEX.md",
+            "viking://resources/projects/x/AGENTS.md",
+        ]
+        for uri in kept:
+            assert not fl._is_navigation_doc({"uri": uri}), uri
+
+    def test_title_form_fallback(self):
+        assert fl._is_navigation_doc({"title": "INDEX.md"})
+        assert fl._is_navigation_doc({"title": "readme"})
+        assert not fl._is_navigation_doc({"title": "连接池配置优化方案"})
+        assert not fl._is_navigation_doc({"title": "01-overview.md"})
+        assert not fl._is_navigation_doc({})
+        assert not fl._is_navigation_doc({"uri": ""})
+
+
+class TestDocTitleJaccard:
+    """词面 Jaccard：frontmatter → H1 → 文件名 fallback + 缓存 + 退化。"""
+
+    def test_frontmatter_title(self, monkeypatch):
+        monkeypatch.setattr(fl, "_OV_TITLE_CACHE", {})
+        monkeypatch.setattr(
+            fl, "_fetch_ov_raw",
+            lambda uri: "---\ntitle: \"连接池配置优化方案\"\n---\n# 正文\n")
+        hit = {"uri": "viking://resources/projects/x/conn-pool.md",
+               "score": 0.58}
+        # reality "连接池优化" ∩ title "连接池配置优化方案" = 3 / 并集 9
+        assert fl._doc_title_jaccard("连接池优化", hit) == pytest.approx(3 / 9)
+
+    def test_h1_fallback(self, monkeypatch):
+        monkeypatch.setattr(fl, "_OV_TITLE_CACHE", {})
+        monkeypatch.setattr(fl, "_fetch_ov_raw",
+                            lambda uri: "# 工具摘要引擎设计\n\n正文")
+        hit = {"uri": "viking://resources/projects/x/t.md", "score": 0.58}
+        assert fl._doc_title_jaccard("工具摘要引擎", hit) > 0
+
+    def test_filename_fallback(self, monkeypatch):
+        monkeypatch.setattr(fl, "_OV_TITLE_CACHE", {})
+        monkeypatch.setattr(fl, "_fetch_ov_raw",
+                            lambda uri: "无 frontmatter 无 H1")
+        hit = {"uri": "viking://resources/projects/x/conn-pool.md",
+               "score": 0.58}
+        # title = "conn-pool.md" → 英文 token conn/pool/md
+        assert fl._doc_title_jaccard("conn pool config", hit) > 0
+
+    def test_cache_prevents_refetch(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(fl, "_OV_TITLE_CACHE", {})
+        monkeypatch.setattr(
+            fl, "_fetch_ov_raw",
+            lambda uri: calls.append(uri) or "---\ntitle: 连接池配置优化方案\n---\n")
+        hit = {"uri": "viking://resources/projects/x/a.md"}
+        fl._doc_title_jaccard("连接池优化", hit)
+        fl._doc_title_jaccard("连接池优化", hit)
+        assert len(calls) == 1
+
+    def test_fetch_failure_returns_zero(self, monkeypatch):
+        monkeypatch.setattr(fl, "_OV_TITLE_CACHE", {})
+        monkeypatch.setattr(fl, "_fetch_ov_raw", lambda uri: "")
+        hit = {"uri": "viking://resources/projects/x/a.md"}
+        assert fl._doc_title_jaccard("连接池优化", hit) == 0.0
+
+    def test_no_uri_returns_zero(self):
+        hit = {"title": "连接池配置优化方案"}
+        assert fl._doc_title_jaccard("连接池优化", hit) == 0.0
+
+
+class TestOverseerJudge4B:
+    """边界区 4B 复核：verdict 解析 / 重试一次 / 失败跳过 / 调用参数。"""
+
+    @staticmethod
+    def _reality():
+        return _mk_reality(1, "连接池优化", "连接池上限调优")
+
+    @staticmethod
+    def _hit():
+        return {"uri": "viking://resources/projects/x/a.md",
+                "title": "连接池配置优化方案", "score": 0.58}
+
+    def test_verdict_references(self, monkeypatch):
+        import ca.topic_summary as ts
+        monkeypatch.setattr(ts, "call_llm_raw",
+                            lambda prompt, **kw: '{"verdict": "references"}')
+        assert fl._judge_ov_reference_4b(self._reality(), self._hit()) \
+            == "references"
+
+    def test_parse_fail_retry_once_then_verdict(self, monkeypatch):
+        import ca.topic_summary as ts
+        responses = iter(["not json", '{"verdict": "none"}'])
+        monkeypatch.setattr(ts, "call_llm_raw",
+                            lambda prompt, **kw: next(responses))
+        assert fl._judge_ov_reference_4b(self._reality(), self._hit()) == "none"
+
+    def test_parse_fail_twice_returns_none(self, monkeypatch):
+        import ca.topic_summary as ts
+        monkeypatch.setattr(ts, "call_llm_raw",
+                            lambda prompt, **kw: "garbage")
+        assert fl._judge_ov_reference_4b(self._reality(), self._hit()) is None
+
+    def test_call_exception_returns_none(self, monkeypatch):
+        import ca.topic_summary as ts
+
+        def boom(prompt, **kw):
+            raise RuntimeError("llm down")
+
+        monkeypatch.setattr(ts, "call_llm_raw", boom)
+        assert fl._judge_ov_reference_4b(self._reality(), self._hit()) is None
+
+    def test_call_params(self, monkeypatch):
+        import ca.topic_summary as ts
+        seen = {}
+
+        def fake_llm(prompt, **kw):
+            seen.update(kw)
+            return '{"verdict": "references"}'
+
+        monkeypatch.setattr(ts, "call_llm_raw", fake_llm)
+        fl._judge_ov_reference_4b(self._reality(), self._hit())
+        assert seen["priority"] == "low"
+        assert seen["temperature"] == 0.2
+        assert seen["max_retries"] == 1
+
+    def test_prompt_contains_reality_and_doc(self, monkeypatch):
+        monkeypatch.setattr(fl, "_OV_TITLE_CACHE",
+                            {"viking://resources/projects/x/a.md": "连接池配置优化方案"})
+        prompt = fl.build_ov_reference_judge_prompt(self._reality(),
+                                                    self._hit())
+        assert "连接池优化" in prompt
+        assert "连接池上限调优" in prompt
+        assert "连接池配置优化方案" in prompt
+        assert "viking://resources/projects/x/a.md" in prompt
+
+    def test_parse_ov_verdict(self):
+        assert fl._parse_ov_verdict('{"verdict": "references"}') == "references"
+        assert fl._parse_ov_verdict('```json\n{"verdict": "none"}\n```') == "none"
+        assert fl._parse_ov_verdict("none") == "none"
+        assert fl._parse_ov_verdict("references") == "references"
+        assert fl._parse_ov_verdict("random") is None
+        assert fl._parse_ov_verdict('{"relation": "none"}') is None
+        assert fl._parse_ov_verdict(None) is None
+        assert fl._parse_ov_verdict("") is None

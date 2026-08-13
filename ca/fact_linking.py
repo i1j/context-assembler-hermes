@@ -6,8 +6,13 @@ references_ov（reality↔OV 项目数据）。本轮实现：
     与有文本关联的另一 reality 成对 → 4B 判定 depends_on / continues / 无关联
     （解析失败重试一次，仍败跳过该候选并记日志；信号 B 不上 L3）
   - 信号 C（L1 OV 语义检索）：name/hdl → POST /api/v1/search/find →
-    top-1 命中且相似度 ≥ 阈值 → references_ov 边（target 命名对齐
-    build_wiki_subgraph 的 ov_doc_{label} 约定，U-6）
+    top-K 命中 → references_ov 边（target 命名对齐 build_wiki_subgraph
+    的 ov_doc_{label} 约定，U-6）。
+    2026-08-08 分层（先代码后 4B）：score < OV_REFERENCE_THRESHOLD(0.55)
+    不落图；top-1 ≥ OV_AUTO_THRESHOLD(0.60) 自动落图，0.55-0.60 边界区看词面
+    Jaccard（≥ OV_JACCARD_MIN 放行，否则 4B 复核 references/none）；top-2/3
+    仅自动层（≥ OV_TOP_K_MIN_SCORE 才落图）；导航类文档（uri 尾段
+    index/readme/changelog/overview）不做 target（P0 泛文档排除）。
     相似度阈值无先验（34 v2.7）：默认探测模式（跑 10 reality 小样本记录命中
     分布到日志，不落图）；CA_OV_REFERENCE_THRESHOLD 配置后才按阈值落图。
 关联层不上 L3。新增边数记 refinement_meta.associations_added。
@@ -46,6 +51,41 @@ OV_PROBE_SAMPLE = 10
 OV_PROBE_FAIL_LIMIT = 3
 # OV 检索超时（实测 8s 超时，这里放宽并允许 env 覆盖）
 OV_SEARCH_TIMEOUT = float(os.getenv("CA_OV_SEARCH_TIMEOUT", "15"))
+
+# ── 信号 C 分层阈值（2026-08-08 先代码后 4B，均允许 env 覆盖）──
+# OV_REFERENCE_THRESHOLD（0.55）语义不变：仍是「低于此不落图」。
+
+
+def _env_int(name: str, default: int) -> int:
+    """读取 int 型 env（空/非法 → 默认值，不崩）。"""
+    raw = os.getenv(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        logger.warning("[CA_L4] fact_linking env %s 非法值 %r，回退默认 %d",
+                       name, raw, default)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """读取 float 型 env（空/非法 → 默认值，不崩）。"""
+    raw = os.getenv(name, "").strip()
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        logger.warning("[CA_L4] fact_linking env %s 非法值 %r，回退默认 %.3f",
+                       name, raw, default)
+        return default
+
+
+# 每个 reality 遍历的检索命中数（P2 top-K 截断护栏）
+OV_TOP_K = _env_int("CA_OV_TOP_K", 3)
+# top-2/3 仅自动层：低于此分数直接跳过（不上 4B，控制成本）
+OV_TOP_K_MIN_SCORE = _env_float("CA_OV_TOP_K_MIN_SCORE", 0.60)
+# top-1 自动落图层阈值（≥ 直接落图，零 token）
+OV_AUTO_THRESHOLD = _env_float("CA_OV_AUTO_THRESHOLD", 0.60)
+# 边界区词面放行阈值（reality vs 文档 title 的 bigram Jaccard）
+OV_JACCARD_MIN = _env_float("CA_OV_JACCARD_MIN", 0.05)
 
 # graph.json 写锁（硬约束 5：读写加锁）
 _GRAPH_LOCK = threading.Lock()
@@ -304,7 +344,8 @@ def _judge_link_relation(src: dict, tgt: dict) -> Optional[str]:
     for attempt in range(2):
         try:
             raw = call_llm_raw(prompt, temperature=0.2 if attempt == 0 else 0.1,
-                               max_retries=1)
+                               max_retries=1,
+                               priority="low")  # v7.1: 精炼轮空闲任务
         except Exception as exc:
             logger.warning("[CA_L4] fact_linking 4B call failed: %s", exc)
             return None
@@ -423,12 +464,194 @@ def _ov_search_find(query: str) -> Optional[List[dict]]:
     return hits
 
 
+# ── 信号 C P0/P1：导航排除 + 词面 Jaccard + 4B 复核（2026-08-08）──
+
+# uri → 文档 title 缓存（同轮/进程内防重复 WebDAV 拉取）
+_OV_TITLE_CACHE: Dict[str, str] = {}
+
+
+def _fetch_ov_raw(uri: str) -> str:
+    """通过 OV WebDAV API 获取资源原始内容（含 frontmatter）。
+
+    复用 scripts/wiki_to_graph._fetch_ov_raw 的路径转换逻辑
+    （viking://resources/... → /webdav/resources/...，逐段编码）。
+    失败/超时 → 空串（title 拉取失败降级，不阻塞主流程）。
+    """
+    import urllib.parse
+    import urllib.request
+
+    resource_path = uri.replace("viking://resources/", "")
+    if resource_path == uri:
+        return ""  # 非 resources URI，跳过
+    encoded_path = "/".join(
+        urllib.parse.quote(s, safe="") for s in resource_path.split("/"))
+    url = f"{OV_API.rstrip('/')}/webdav/resources/{encoded_path}"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.read().decode("utf-8")
+    except Exception as exc:
+        logger.warning("[CA_L4] fact_linking OV title fetch failed: %s", exc)
+        return ""
+
+
+def _ov_doc_title(uri: str) -> str:
+    """拉取 OV 文档 title（带缓存）：frontmatter title → H1 → 文件名 fallback。
+
+    提取逻辑对齐 scripts/wiki_to_graph._load_ov_doc_titles：
+    frontmatter 的 title: 字段优先，其次第一个 H1，最后 uri 尾段（文件名）。
+    拉取失败/为空 → 空串（调用方按 0.0 退化）。
+    """
+    uri = uri.strip()
+    if uri in _OV_TITLE_CACHE:
+        return _OV_TITLE_CACHE[uri]
+    title = ""
+    content = _fetch_ov_raw(uri)
+    if content.startswith("---"):
+        end = content.find("---", 3)
+        if end != -1:
+            for line in content[3:end].split("\n"):
+                if line.strip().startswith("title:"):
+                    title = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    break
+    if not title:
+        m = re.search(r"^#\s+(.+)", content, re.MULTILINE)
+        if m:
+            title = m.group(1).strip()
+    if not title:
+        title = uri.rstrip("/").split("/")[-1]
+    _OV_TITLE_CACHE[uri] = title
+    return title
+
+
+def _is_navigation_doc(hit: dict) -> bool:
+    """P0 导航类文档排除：uri 尾段（最后一个 / 后，去 .md）小写精确匹配。
+
+    排除集 {index, readme, changelog, overview}——导航/索引类文档不做
+    references_ov target。**精确匹配尾段**（非前缀）：01-overview / C-INDEX /
+    H-INDEX / AGENTS 不命中（有实质关联，保留）。title 形态命中（无 uri）
+    用 title 段同样规则。
+    """
+    seg = str(hit.get("uri") or hit.get("title") or "").strip()
+    if not seg:
+        return False
+    tail = seg.rstrip("/").split("/")[-1].lower()
+    if tail.endswith(".md"):
+        tail = tail[:-3]
+    return tail in {"index", "readme", "changelog", "overview"}
+
+
+def _doc_title_jaccard(reality_text: str, hit: dict) -> float:
+    """词面 Jaccard：reality_text vs 文档 title（frontmatter → H1 → 文件名）。
+
+    uri 缺失 / title 拉取失败或为空 → 0.0 退化（纯 score 判断，不阻塞主流程）。
+    结果仅作「低分放行」的正信号（噪声 index 系 ≤0.067，合理边可达 0.105+）。
+    """
+    uri = str(hit.get("uri") or "").strip()
+    if not uri:
+        return 0.0
+    title = _ov_doc_title(uri)
+    if not title.strip():
+        return 0.0
+    a = _bigrams(reality_text or "")
+    b = _bigrams(title)
+    if not a or not b:
+        return 0.0
+    union = a | b
+    return len(a & b) / len(union) if union else 0.0
+
+
+OV_REFERENCE_JUDGE_PROMPT = """你是 OV 文档关联判定助手。判断一个现实工作对象（reality）是否真正参考了给定的 OV 文档。
+
+【reality 定义】现实工作对象（工作线）：多个语义独立但工作中有关联的 strand 的集合，跨话题块持续演进。current_status 四段：current_state（现状）/ key_facts（持久事实）/ goals（进行中目标）/ context（相关资源）。
+
+【判定规则】
+1. references：reality 的工作内容与文档主题有实质关联（实现参考/决策依据/设计沿用/状态依赖）
+2. none：无实质关联（如同领域不同任务、泛导航/索引文档）
+
+【reality】
+name: {name}
+hdl: {hdl}
+current_status: {cs}
+
+【OV 文档】
+title: {title}
+uri: {uri}
+
+【输出格式】（严格 JSON，不要其他文字）
+{{"verdict": "references" | "none"}}"""
+
+
+def build_ov_reference_judge_prompt(reality: dict, hit: dict) -> str:
+    """边界区 4B 复核 prompt：reality name/hdl/current_status + 文档 title/uri。"""
+    uri = str(hit.get("uri") or "")
+    title = str(hit.get("title") or _OV_TITLE_CACHE.get(uri) or "")
+    return OV_REFERENCE_JUDGE_PROMPT.format(
+        name=json.dumps(reality.get("name") or "", ensure_ascii=False),
+        hdl=json.dumps(reality.get("hdl") or "", ensure_ascii=False),
+        cs=json.dumps(reality.get("current_status") or {}, ensure_ascii=False),
+        title=json.dumps(title, ensure_ascii=False),
+        uri=json.dumps(uri, ensure_ascii=False),
+    )
+
+
+def _parse_ov_verdict(text: Optional[str]) -> Optional[str]:
+    """宽松解析 4B 复核输出 → references/none。"""
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[-1] if "\n" in t else t.replace("```", "")
+        t = t.rsplit("```", 1)[0].strip()
+    i, j = t.find("{"), t.rfind("}")
+    if i < 0 or j <= i:
+        for v in ("references", "none"):
+            if v in t:
+                return v
+        return None
+    try:
+        data = json.loads(t[i:j + 1])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    v = data.get("verdict") if isinstance(data, dict) else None
+    if v in ("references", "none"):
+        return v
+    return None
+
+
+def _judge_ov_reference_4b(reality: dict, hit: dict) -> Optional[str]:
+    """边界区 4B 复核：判 references/none（复用 call_llm_raw 模式）。
+
+    priority="low"（精炼轮空闲任务），temperature 0.2，max_retries 1；
+    解析失败重试一次，仍败 → None（跳过候选不崩）。
+    """
+    from .topic_summary import call_llm_raw
+
+    prompt = build_ov_reference_judge_prompt(reality, hit)
+    for attempt in range(2):
+        try:
+            raw = call_llm_raw(prompt, temperature=0.2, max_retries=1,
+                               priority="low")
+        except Exception as exc:
+            logger.warning("[CA_L4] fact_linking OV 4B call failed: %s", exc)
+            return None
+        verdict = _parse_ov_verdict(raw)
+        if verdict is not None:
+            return verdict
+        logger.warning("[CA_L4] fact_linking OV 4B parse failed (attempt %d/2), "
+                       "skip candidate", attempt + 1)
+    return None
+
+
 def _run_ov_references(realities: List[dict]) -> int:
     """信号 C 主流程：探测模式（默认）或按阈值落图（配置后）。
 
     阈值无先验（34 v2.7）：先跑 OV_PROBE_SAMPLE(10) reality 小样本，记录 top-1
     命中与相似度分布到日志（供人工判合理性）；CA_OV_REFERENCE_THRESHOLD 配置后
-    对全部 reality 检索并按阈值建 references_ov 边。
+    对全部 reality 检索并按分层逻辑建 references_ov 边（2026-08-08）：
+    每个 reality 遍历 top-OV_TOP_K 命中（同 nid 去重）；导航类文档直接排除；
+    top-1 走完整分层（≥0.60 自动落 / 0.55-0.60 词面 Jaccard → 4B 复核），
+    top-2/3 仅自动层（≥0.60 才落，低分跳过不上 4B）。
     """
     if OV_REFERENCE_THRESHOLD is None:
         # 探测模式：不落图
@@ -485,28 +708,62 @@ def _run_ov_references(realities: List[dict]) -> int:
         top = _ov_search_find(query)
         if not top:
             continue
-        score = _hit_score(top[0])
-        if score < OV_REFERENCE_THRESHOLD:
-            continue
-        tgt = _ov_doc_nid(top[0])
-        if not tgt:
-            continue
-        if tgt not in known_ov:
-            # 命中文档未入图 → 不建悬挂边（宁缺勿错）
-            logger.debug("[CA_L4] fact_linking OV 命中未入图，跳过: %s → %s",
-                         r.get("reality_id"), tgt)
-            continue
-        edges.append({
-            "source": f"reality_{r.get('reality_id')}",
-            "target": tgt,
-            "relation": "references_ov",
-            "confidence": "MEDIUM",
-            "confidence_score": round(min(score, 0.95), 3),
-            "source_file": "realities",
-            "source_location": f"ov_search:{r.get('reality_id')}",
-            "_origin": "fact_linking",
-            "weight": round(min(score, 0.95), 3),
-        })
+        reality_text = _reality_text(r)
+        seen_nids: set = set()
+        for rank, hit in enumerate(top[:OV_TOP_K]):
+            tgt = _ov_doc_nid(hit)
+            if not tgt:
+                continue
+            # P0：导航/索引类文档排除改用 tgt（落图节点名）。uri 尾段可能是
+            # 隐藏摘要碎片（.../overview.md/.overview.md → 尾段 .overview.md
+            # 命中不到排除集），但 nid 解析到主文档 ov_doc_overview.md →
+            # 用 tgt 判断才能排除（2026-08-08 修复，reality_199/200 漏网边）
+            tail = tgt[len("ov_doc_"):]
+            if tail.endswith(".md"):
+                tail = tail[:-3]
+            if tail.lower() in {"index", "readme", "changelog", "overview"}:
+                continue
+            # 同 nid 去重：碎片/隐藏摘要与主文档同 nid 的重复命中只处理第一个
+            if tgt in seen_nids:
+                continue
+            seen_nids.add(tgt)
+            if tgt not in known_ov:
+                # 命中文档未入图 → 不建悬挂边（宁缺勿错）
+                logger.debug("[CA_L4] fact_linking OV 命中未入图，跳过: %s → %s",
+                             r.get("reality_id"), tgt)
+                continue
+            score = _hit_score(hit)
+            # OV_REFERENCE_THRESHOLD 语义不变：低于此不落图（全部位次）
+            if score < OV_REFERENCE_THRESHOLD:
+                continue
+            if rank == 0:
+                # top-1 完整分层：自动层 / 边界区（词面 Jaccard → 4B 复核）
+                if score < OV_AUTO_THRESHOLD:
+                    j = _doc_title_jaccard(reality_text, hit)
+                    if j < OV_JACCARD_MIN:
+                        verdict = _judge_ov_reference_4b(r, hit)
+                        if verdict != "references":
+                            logger.debug(
+                                "[CA_L4] fact_linking OV 边界区 4B 复核跳过: "
+                                "%s → %s (score=%.3f verdict=%s)",
+                                r.get("reality_id"), tgt, score, verdict)
+                            continue
+            else:
+                # top-2/3 仅自动层：低于 OV_TOP_K_MIN_SCORE 跳过（不上 4B，
+                # 控制成本；噪声多在低分 top-K）
+                if score < OV_TOP_K_MIN_SCORE:
+                    continue
+            edges.append({
+                "source": f"reality_{r.get('reality_id')}",
+                "target": tgt,
+                "relation": "references_ov",
+                "confidence": "MEDIUM",
+                "confidence_score": round(min(score, 0.95), 3),
+                "source_file": "realities",
+                "source_location": f"ov_search:{r.get('reality_id')}",
+                "_origin": "fact_linking",
+                "weight": round(min(score, 0.95), 3),
+            })
     return _add_edges(edges)
 
 

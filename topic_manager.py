@@ -1,7 +1,7 @@
 """plugins/ca_assembler/topic_manager.py — 话题管理模块 (v5.10)。
 
 设计决策: TP-001 (话题分割), TP-002 (话题定级)
-  viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-话题拣选重构-v460-已实现
+  viking://resources/projects/context-assembler/decisions/decision-points-wiki.md#toc-话题拣选重构-v460-已实现
   - Jaccard 增量分割 + 强制短语 + 水位压力
   - 半径定级: ACT/REL/FAR
   - TopicGradeManager: 切换检测 + 首次 embedding 定级 + 冻结缓存
@@ -274,7 +274,7 @@ class TopicGradeManager:
     """话题等级管理器。
 
     设计决策: TP-001 (话题分割), TP-002 (话题定级)
-      viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-话题拣选重构-v460-已实现
+      viking://resources/projects/context-assembler/decisions/decision-points-wiki.md#toc-话题拣选重构-v460-已实现
       switch → grade_on_switch embedding 定级 → 冻结直到下次 switch
 
     职责：
@@ -297,9 +297,13 @@ class TopicGradeManager:
         grade = mgr.get_turn_grade(turn_num)
     """
 
-    def __init__(self, store: Any, embed_client: Any, session_id: str = '') -> None:
+    def __init__(self, store: Any, embed_client: Any, session_id: str = '',
+                 cache: Any = None) -> None:
         self._store = store
         self._embed_client = embed_client
+        # v7.1 (2026-08-08, BUG-08 根治): 复用 F-stage 算好的 Fct 语义 embedding，
+        # 切换路径 _compute_centroids 免重算（0 embed 网络调用）。
+        self._cache = cache
         # session_id 优先用显式参数，回退到 store.session_id（动态读取）
         self._explicit_session_id: str = session_id
 
@@ -615,17 +619,29 @@ class TopicGradeManager:
                 if not fct_text:
                     logger.debug("[CA] _compute_centroids: turn=%d topic=%d no user Fct, skipped from centroid", turn, tid)
                     continue
-                try:
-                    # 剥 Fct JSON 键名 + 跳过元数据（TP-001 同源缺陷族：公共键名抬高
-                    # 无关话题的 centroid 相似度 → 半径定级失真；与 _extract_turn_fct 一致）
-                    vec = self._embed_client.embed(_extract_fct_semantic_text(fct_text))
-                    if vec:
-                        vectors.append(vec)
-                except Exception as e:
-                    # 覆盖 ConnectionError/TimeoutError/urllib3 HTTPError 等
-                    # 嵌入服务异常（BUG-02）：跳过该 turn，不中断 hook
-                    logger.warning("[CA] _compute_centroids: embed failed for turn %d (topic %d): %s", turn, tid, e)
-                    continue
+                # v7.1 (2026-08-08, BUG-08 根治): 优先复用 F-stage 算好的语义 embedding
+                # （cache.semantic_fct_embeddings，与 _extract_fct_semantic_text 输入一致），
+                # 切换路径免重算；cache 缺失（旧 turn/异常）→ 回退现有重算路径。
+                cached_vec = None
+                if self._cache is not None:
+                    try:
+                        cached_vec = self._cache.semantic_fct_embeddings.get(turn)
+                    except Exception:
+                        cached_vec = None
+                if cached_vec is not None:
+                    vec = cached_vec
+                else:
+                    try:
+                        # 剥 Fct JSON 键名 + 跳过元数据（TP-001 同源缺陷族：公共键名抬高
+                        # 无关话题的 centroid 相似度 → 半径定级失真；与 _extract_turn_fct 一致）
+                        vec = self._embed_client.embed(_extract_fct_semantic_text(fct_text))
+                    except Exception as e:
+                        # 覆盖 ConnectionError/TimeoutError/urllib3 HTTPError 等
+                        # 嵌入服务异常（BUG-02）：跳过该 turn，不中断 hook
+                        logger.warning("[CA] _compute_centroids: embed failed for turn %d (topic %d): %s", turn, tid, e)
+                        continue
+                if vec:
+                    vectors.append(vec)
 
             if vectors:
                 td["centroid"] = _compute_centroid(vectors)

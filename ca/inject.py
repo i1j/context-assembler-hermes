@@ -223,7 +223,8 @@ def pick_injection_themes(
         from ca.topic_summary import call_llm_raw
         prompt = build_inject_prompt(query, cands)
         raw = call_llm_raw(prompt, num_predict=INJECT_MAX_TOKENS,
-                           temperature=0.1, max_retries=1)
+                           temperature=0.1, max_retries=1,
+                           priority="high")  # v7.1 BUG-08: 热路径抢队列
     except Exception as exc:
         logger.warning("[CA_INJECT] LLM call failed: %s", exc)
         raw = None
@@ -526,7 +527,8 @@ def _pick_by_4b(query: str, budget: list[dict], limit: int) -> Optional[list]:
         from ca.topic_summary import call_llm_raw
         prompt = build_inject_prompt_reality(query, budget)
         raw = call_llm_raw(prompt, num_predict=INJECT_MAX_TOKENS,
-                           temperature=0.1, max_retries=1)
+                           temperature=0.1, max_retries=1,
+                           priority="high")  # v7.1 BUG-08: 热路径抢队列
     except Exception as exc:
         logger.warning("[CA_INJECT] reality 4B call failed: %s", exc)
         return None

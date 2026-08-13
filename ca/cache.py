@@ -128,6 +128,9 @@ class AssemblyCache:
         self.fct_texts: Dict[int, str] = {}
         self.hdl_embeddings: Dict[int, List[float]] = {}
         self.fct_embeddings: Dict[int, List[float]] = {}
+        # v7.1 (2026-08-08, BUG-08 根治): Fct 语义文本 embedding（剥键名），
+        # 供 topic_manager._compute_centroids 直接读取（切换路径 0 embed）。
+        self.semantic_fct_embeddings: Dict[int, List[float]] = {}
 
         self._snapshot: Optional[BM25Snapshot] = None
         self._snapshot_lock = threading.RLock()
@@ -145,7 +148,8 @@ class AssemblyCache:
 
         self._destroyed = False
 
-    def add_turn(self, turn_index, hdl_text, fct_text, hdl_emb=None, fct_emb=None):
+    def add_turn(self, turn_index, hdl_text, fct_text, hdl_emb=None, fct_emb=None,
+                 semantic_fct_emb=None):
         with self._lock:
             self.hdl_texts[turn_index] = hdl_text
             self.fct_texts[turn_index] = fct_text
@@ -153,6 +157,8 @@ class AssemblyCache:
                 self.hdl_embeddings[turn_index] = hdl_emb
             if fct_emb is not None:
                 self.fct_embeddings[turn_index] = fct_emb
+            if semantic_fct_emb is not None:
+                self.semantic_fct_embeddings[turn_index] = semantic_fct_emb
             self._dirty = True
         self._submit_rebuild()
 

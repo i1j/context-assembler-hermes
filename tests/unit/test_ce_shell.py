@@ -83,7 +83,14 @@ class TestCachePreservation:
         result = eng.compress([])
         assert isinstance(result, list)
 
-    def test_register_context_engine_called(self):
+    def test_register_context_engine_paused(self):
+        """CE 壳注册已暂停（2026-08-13 修复）：register() 不再调用 register_context_engine。
+
+        背景：旧代码传 2 参 vs Hermes 1 参签名 → 必抛 TypeError；Hermes commit
+        22af80bcf（08-01）起 register() 抛异常会 dispose 全部 hooks → 插件加载失败。
+        修补：暂停 CE 壳注册（hooks 恢复、engine 回退内置 compressor）。
+        恢复路径见 __init__.py register() 注释（1 参注册 / 纯占位两种）。
+        """
         calls = []
 
         class MockCtx:
@@ -95,9 +102,10 @@ class TestCachePreservation:
 
         register(MockCtx())
         engine_regs = [c for c in calls if c[0] == "engine"]
-        assert len(engine_regs) == 1
-        assert engine_regs[0][1] == "ca_assembler"
-        assert isinstance(engine_regs[0][2], CAContextEngine)
+        assert len(engine_regs) == 0, (
+            "CE 壳注册应暂停（engine_regs=%r）。若你正在恢复 CE 壳，请同步更新本测试"
+            "与 AGENTS.md 'CE 壳注册已暂停' 约束" % engine_regs
+        )
 
     def test_register_still_registers_8_hooks(self):
         calls = []

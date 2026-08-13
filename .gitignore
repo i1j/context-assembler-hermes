@@ -36,3 +36,22 @@ ca-graph.html
 # OpenViking 自动生成元数据（OV 侧生成，本地工作副本不跟踪）
 .abstract.md
 .overview.md
+
+# 一次性实验/审计脚本（2026-08-14 基线冻结：不纳入版本控制）
+scripts/exp_*.py
+scripts/exp_*.json
+scripts/exp_*.txt
+scripts/audit_*.py
+scripts/debug_*.py
+scripts/evaluate_pipeline.py
+scripts/fix_timeline_seq.py
+scripts/flash_*.py
+scripts/refine_*.py
+scripts/replay_*.py
+scripts/reprocess_old_sessions.py
+scripts/reprocess_old_sessions.py.bak*
+scripts/test_cooccurrence_smoke.py
+scripts/test_reprocess_single.py
+
+# 误生成的 profile 骨架（插件目录内 tester/，勿提交）
+tester/

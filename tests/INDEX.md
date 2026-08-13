@@ -2,8 +2,8 @@
 
 > 上下文汇编器（Context Assembler）测试体系文档。
 > 代码位置: `~/.hermes/profiles/tester/plugins/ca_assembler/`
-> 决策树主入口（OV）: `design/decision-points-wiki.md`
-> 节点索引（OV）: `design/decision-points/INDEX.md`
+> 决策树主入口（OV）: `decisions/decision-points-wiki.md`
+> 节点索引（OV）: `decisions/decision-points/INDEX.md`
 
 ---
 
@@ -115,14 +115,14 @@ DOA 自防御: 3 个运行时自检测试防止死胎测试悄然进入代码库
 
 ## 7. 相关文档
 
-- `design/decision-points-wiki.md` — 决策树主入口（OV）
-- `design/decision-points/INDEX.md` — 节点索引（OV）
+- `decisions/decision-points-wiki.md` — 决策树主入口（OV）
+- `decisions/decision-points/INDEX.md` — 节点索引（OV）
 - `viking://resources/TP-001` — 话题分割（OV，最新版）
 - `viking://resources/TP-002` — 三级话题定级（OV，最新版）
 - `viking://resources/TP-004` — topic_boost（OV，最新版）
 - `viking://resources/TP-006` — 水位压力（OV，最新版）
 - `viking://resources/TP-007` — 故障安全降级（OV，最新版）
 - `AGENTS.md` — 项目开发指南（测试跑法）
-- `viking://resources/projects/context-assembler/design/decision-points/TP-008.md` — 死代码清理（v5.10，最新版）
+- `viking://resources/projects/context-assembler/decisions/decision-points/TP-008.md` — 死代码清理（v5.10，最新版）
 - `tests/conftest.py` — 测试配置（sys.path + re-export fixtures）
 - `tests/audit/test_cross_ref_wiki_audit.py` — 交叉验证审计脚本

@@ -1,9 +1,9 @@
 """ca/f_stage.py — F-stage 异步摘要 (v5.10, 纯 LLM 路径)
 
 设计决策: Fct-001~Fct-012 (Fct 摘要重构, PDD 哲学), D-033 (多话题 OODA 分治摘要)
-  viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-l1-摘要重构-v470-pdd-哲学
+  viking://resources/projects/context-assembler/decisions/decision-points-wiki.md#toc-l1-摘要重构-v470-pdd-哲学
   - daemon 线程读取 DB Elm → 调 LLM → 解析 → 写 LLM 版 Fct/Hdl
-  - 多 OODA：已知话题逐一提取 → 剩余新话题检测（docs/wiki/decisions/28-topic-summarization-v4.md）
+  - 多 OODA：已知话题逐一提取 → 剩余新话题检测（docs/decisions/28-topic-summarization-v4/28-topic-summarization-v4.md）
   - 覆盖 E-stage 代码级摘要
   - 截断检测双重校验 (finish_reason + endswith)
 
@@ -184,15 +184,27 @@ class FStageMixin:
 
             fct_str = json.dumps(cleaned, ensure_ascii=False)
             hdl_text = self._extract_hdl(cleaned, turn_index)
+            # v7.1 (2026-08-08, BUG-08 根治): 直接算语义文本 embedding——
+            # 剥 Fct JSON 键名（TP-001 键名污染），与 topic_manager._compute_centroids
+            # 的输入一致，切换路径读 cache 免重算。不再 embed 完整 JSON：
+            # fct_embeddings 仅被死代码 BM25Snapshot/retrieval.py 消费（D8），纯浪费。
             try:
-                fct_emb = self.embed_client.embed(fct_str)
+                from topic_manager import _extract_fct_semantic_text
+                semantic_text = _extract_fct_semantic_text(fct_str)
+                semantic_fct_emb = (
+                    self.embed_client.embed(semantic_text)
+                    if semantic_text else None
+                )
+            except Exception:
+                semantic_fct_emb = None
+            try:
                 hdl_emb = self.embed_client.embed(hdl_text)
             except Exception:
-                fct_emb = None
                 hdl_emb = None
 
             self._update_fct_v5(session_id, turn_index, fin_seq, fct_str, hdl_text)
-            self.cache.add_turn(turn_index, hdl_text, fct_str, hdl_emb, fct_emb)
+            self.cache.add_turn(turn_index, hdl_text, fct_str, hdl_emb,
+                                semantic_fct_emb=semantic_fct_emb)
 
         except Exception as e:
             logger.error("F-stage crash turn %d fin_seq %d: %s", turn_index, fin_seq, e, exc_info=True)
@@ -238,10 +250,15 @@ class FStageMixin:
         finish_reason = "error"
         for attempt in range(Config.LLM_MAX_RETRIES):
             try:
+                # v7.1 (2026-08-08, BUG-08 根治): 轮次摘要走 high 优先级，
+                # 与注入 4B 同档，确保不被后台话题摘要（normal）阻塞。
                 req = urllib.request.Request(
                     f"{Config.LLM_ENDPOINT.rstrip('/')}/api/generate",
                     data=payload,
-                    headers={"Content-Type": "application/json"},
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Queue-Priority": "high",
+                    },
                 )
                 with urllib.request.urlopen(req, timeout=Config.LLM_TIMEOUT) as resp:
                     data = json.loads(resp.read())

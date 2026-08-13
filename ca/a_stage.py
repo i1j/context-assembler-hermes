@@ -3,7 +3,7 @@
 方向 B 取代了旧的方向 A 原地 mutation（_simple_mutation_mode_v5 / _incremental_mutation），
 已于 2026-06-28 CE 管线停用时清理。
 
-viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-a-stage-同步上下文组装
+viking://resources/projects/context-assembler/decisions/decision-points-wiki.md#toc-a-stage-同步上下文组装
 """
 
 from __future__ import annotations

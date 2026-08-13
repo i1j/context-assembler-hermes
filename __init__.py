@@ -1,7 +1,7 @@
 """plugins/ca_assembler/__init__.py — Hermes 插件适配 (v5.10)
 
 设计决策: P-001 (Plugin 层职责分离)
-  viking://resources/projects/context-assembler/design/decision-points-wiki.md#toc-plugin-适配-amp-断路器
+  viking://resources/projects/context-assembler/decisions/decision-points-wiki.md#toc-plugin-适配-amp-断路器
   - 注册 8 hooks (5 生命周期 + 3 工具轮 hook)
   - pre_llm_call_v5: E-stage 写入 + topic 检测 + A-stage 替换
   - post_llm_call_v5: E-stage final 写入 + F-stage 触发
@@ -178,7 +178,17 @@ def is_available() -> bool:
 
 
 def register(ctx) -> None:
-    """注册 CA 插件 v5.0 hooks 和 ContextEngine ABC。"""
+    """注册 CA 插件 v5.0 hooks 和 ContextEngine ABC。
+
+    注意：CE 壳注册已暂停（2026-08-13 修复，见 docs/migration-research-dsh.md §1.5）。
+    - Hermes 签名是 register_context_engine(self, engine)（1 参），旧代码传 2 参必抛 TypeError；
+    - Hermes commit 22af80bcf（2026-08-01）起，register() 抛异常会 dispose 该插件全部
+      registration（含 8 个 hooks）→ 整个插件加载失败、CA 停摆；
+    - 激活 CE 壳（改 1 参）会使 context.engine: ca_assembler 选中本引擎并每轮触发
+      should_compress=True → compress()（A-stage 从 turn_stream DB 重建 conv_history），
+      该路径从未在生产运行过，且前检压缩先于 pre_llm_call 写 seq 0，存在当前轮用户消息
+      缺失的轮序风险 —— 属设计决策，待用户明确后再按需恢复（恢复方式见下方注释）。
+    """
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("on_session_end",   _on_session_end)
     ctx.register_hook("on_session_reset", _on_session_reset)
@@ -187,8 +197,14 @@ def register(ctx) -> None:
     ctx.register_hook("post_api_request", _on_post_api_request_v5)
     ctx.register_hook("pre_tool_call",    _on_pre_tool_call_v5)
     ctx.register_hook("post_tool_call",   _on_post_tool_call_v5)
-    # CE 壳注册 — 允许 context.engine: ca_assembler 配置选用
-    ctx.register_context_engine("ca_assembler", _ce_engine)
+    # ── CE 壳注册（当前禁用，见上方 docstring）──
+    # 恢复 A-stage 激活（未经验证，风险自负）：
+    #   ctx.register_context_engine(_ce_engine)          # 1 参签名，不再抛异常
+    # 恢复"纯占位"（注册但不触发 compress_context，需同时把 should_compress 改 False）：
+    #   ctx.register_context_engine(_ce_engine)
+    # 保持现状（hooks 驱动一切，engine 回退内置 compressor）：
+    #   （不注册）
+    pass
 
 
 # ── Hook 分发函数 ──
@@ -472,6 +488,7 @@ class CAContextAssemblerPlugin:
             self._engine.store,
             self._engine.embed_client,
             session_id=session_id,
+            cache=getattr(self._engine, "cache", None),  # v7.1 BUG-08: 复用 Fct 语义 embedding
         )
         logger.info("CA plugin started for session %s (model=%s context_length=%d)",
                     session_id, model or "?", self._context_length)
@@ -1030,17 +1047,19 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
     # 话题切换时的跨会话 recall（仅 FAR 切换触发）
     recall_str: Optional[str] = None
 
-    # ── 首轮 recall（等待 on_session_start 清账完成 → 从 wiki 语义检索）──
-    if turn == 1 and not plugin._session_recall_done and user_message and Config.TOPIC_SUMMARIZE_ENABLED:
+    # ── 首轮 recall（依赖 on_session_start 清账完成 → 从 wiki 语义检索）──
+    # 设计依据 CR-6（docs/current-code-state-2026-08-06.md:180-186）：
+    # 清账已在建立新会话时（on_session_start）后台触发（补缺摘要→run_reality_merge
+    # 写 realities），首轮 recall 读 realities 表依赖清账完成（有写-读依赖）。
+    # v7.1 (2026-08-08) 实测：清账 67-120ms 内完成（无 backfill 时）→ 去掉 5s 轮询，
+    # 直接检查 _cleanup_done：已完成→注入（零阻塞）；未完成（罕见 backfill）→
+    # 立即跳过 recall（非阻塞，延后到下次 FAR 切换）。
+    # REALITY_INJECT_ENABLED=0 时短路整个注入管道（v7.1 总闸）。
+    if (turn == 1 and not plugin._session_recall_done and user_message
+            and Config.TOPIC_SUMMARIZE_ENABLED and Config.REALITY_INJECT_ENABLED):
         try:
-            # 短超时等待 on_session_start 的后台清账（补缺摘要 + wiki merge + graphify）。
-            # 后台清账含 LLM 调用可能超过 5s——超时则跳过 recall，不阻塞用户消息路径（CR-6）。
-            deadline = time.time() + 5  # CR-6: 120s → 5s 短超时
-            while not plugin._cleanup_done and time.time() < deadline:
-                time.sleep(0.5)
-
             if not plugin._cleanup_done:
-                logger.warning("[CA_WIKI] session-start cleanup not done within 5s; "
+                logger.warning("[CA_WIKI] session-start cleanup not done; "
                                "skipping recall injection (non-blocking)")
             else:
                 # 注入拣选——embed 首条用户消息 → 提问云形心散度距离范围 → 4B 拣选（决策 41 §2.4b）
@@ -1104,7 +1123,9 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
             # ── 跨会话 recall：仅当旧话题被判定为 FAR（强断开）时才注入 ──
             # v7 (决策 38/41): 与首轮 recall 对齐，走提问云形心 4B 拣选（pick_injection_realities），
             # 替代 v6.5 余弦 top-N（query_themes_by_semantics）。
-            if old_topic_id is not None and Config.TOPIC_SUMMARIZE_ENABLED:
+            # BUG-08 止血 (v7.1): REALITY_INJECT_ENABLED=0 时短路，FAR 切换不再阻塞用户消息路径。
+            if (old_topic_id is not None and Config.TOPIC_SUMMARIZE_ENABLED
+                    and Config.REALITY_INJECT_ENABLED):
                 try:
                     tg = plugin._topic_mgr.get_topic_grades()
                     if tg.get(old_topic_id) == TopicGrade.FAR:

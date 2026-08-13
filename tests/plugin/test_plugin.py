@@ -615,6 +615,19 @@ class TestBgReview:
 class TestPreLlmCallSessionRecall:
     """首轮会话 recall 注入行为。"""
 
+    @pytest.fixture(autouse=True)
+    def _force_reality_inject(self, monkeypatch):
+        """注入开关显式置 True（测试自包含，不依赖外部环境）。
+
+        v7.1 (BUG-08)：REALITY_INJECT_ENABLED 由环境变量控制，shell/gateway
+        继承的 .env 可能置 0 导致测试短路——测试必须自己控制 Config 状态。
+        """
+        monkeypatch.setenv("CA_REALITY_INJECT_ENABLED", "1")
+        from ca.config import Config
+        Config.REALITY_INJECT_ENABLED = True
+        yield
+        Config.REALITY_INJECT_ENABLED = os.getenv("CA_REALITY_INJECT_ENABLED", "1") == "1"
+
     def _setup_plugin(self, session_id: str, turn: int = 1) -> tuple:
         """创建插件 + 真实引擎，注册到 _engines。"""
         plugin = CAContextAssemblerPlugin()
@@ -725,6 +738,15 @@ class TestPreLlmCallSessionRecall:
 
 class TestTopicSwitchRecall:
     """话题切换时 FAR/REL 守卫行为。"""
+
+    @pytest.fixture(autouse=True)
+    def _force_reality_inject(self, monkeypatch):
+        """注入开关显式置 True（同 TestPreLlmCallSessionRecall，v7.1 BUG-08）。"""
+        monkeypatch.setenv("CA_REALITY_INJECT_ENABLED", "1")
+        from ca.config import Config
+        Config.REALITY_INJECT_ENABLED = True
+        yield
+        Config.REALITY_INJECT_ENABLED = os.getenv("CA_REALITY_INJECT_ENABLED", "1") == "1"
 
     def _setup_plugin(self, session_id: str) -> tuple:
         """创建插件 + 真实引擎 + mock topic_mgr。"""
