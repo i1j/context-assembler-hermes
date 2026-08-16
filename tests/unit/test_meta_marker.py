@@ -49,12 +49,38 @@ class TestExtractUsageTokens:
 
 class TestExtractReasoningText:
     def test_provider_data_reasoning_content_first(self):
+        """reasoning_content 与顶层 reasoning 双源去重合并（不互相覆盖）。"""
         msg = SimpleNamespace(reasoning="归一化推理", provider_data={"reasoning_content": "原始推理"}, content="表面")
-        assert extract_reasoning_text(msg) == "原始推理"
+        assert extract_reasoning_text(msg) == "原始推理\n\n归一化推理"
 
     def test_top_level_reasoning_fallback(self):
         msg = SimpleNamespace(reasoning="归一化推理", provider_data={}, content="表面")
         assert extract_reasoning_text(msg) == "归一化推理"
+
+    def test_reasoning_details_summary(self):
+        msg = SimpleNamespace(reasoning=None,
+                              provider_data={"reasoning_details": [
+                                  {"type": "reasoning.summary", "summary": "步骤一"},
+                                  {"type": "reasoning.summary", "summary": "步骤二"},
+                              ]},
+                              content="表面")
+        assert extract_reasoning_text(msg) == "步骤一\n\n步骤二"
+
+    def test_codex_and_anthropic_containers(self):
+        msg = SimpleNamespace(reasoning=None,
+                              provider_data={
+                                  "codex_reasoning_items": [{"text": "codex think"}],
+                                  "anthropic_content_blocks": [{"type": "thinking", "thinking": "claude think"}],
+                              },
+                              content="表面")
+        text = extract_reasoning_text(msg)
+        assert "codex think" in text
+        assert "claude think" in text
+
+    def test_inline_think_tags_last_resort(self):
+        msg = SimpleNamespace(reasoning=None, provider_data={},
+                              content="<think>先想一下</think>答案")
+        assert extract_reasoning_text(msg) == "先想一下"
 
     def test_no_content_fallback(self):
         msg = SimpleNamespace(reasoning=None, provider_data={}, content="表面")

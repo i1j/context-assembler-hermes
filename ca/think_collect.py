@@ -1,9 +1,11 @@
 """ca/think_collect.py — DSH ca-v7 think-collect.js 的 Hermes 移植（决策 44）。
 
-对齐 DSH 7.2 K0：
+对齐 DSH 7.2 K0，并按 Hermes 事务边界补一类用户裁定优先级卡：
 - L2 原文 = turn_stream THINKING 行 Elm；think_trace 只存 raw_len 指针，
   preview 仅调试展示（≤160 字符），不复制 reasoning 全文。
 - decision 卡：含 tool_calls 的 reasoning（任意长度）。
+- orient 卡（决策 44 增补）：**事务内首段 think 且无 tool_calls → 零门槛入卡**——
+  提问后首轮 think 是事务划分的关键线索，宁多勿少。
 - conclusion 卡：事务 fin 轮 reasoning 且（raw_len≥800 或 修正词表命中
   或 同 turn 存在工具错误）。
 - 其余短/非 fin reasoning 不入卡（捡选纪律，宁缺勿错）。
@@ -17,6 +19,7 @@ THINK_MIN_REASONING_CHARS = 800
 THINK_PREVIEW_CHARS = 160
 THINK_TOOL_NAME_MAX = 5
 THINK_SOURCE_KIND = "cloud_think"
+THINK_CARD_KIND_ORIENT = "orient"
 
 THINK_CORRECTION_RE = (
     r"(修正|纠正|更正|推翻|误解|误判|不对|错误诊断|失败原因|根因|修复|"
@@ -56,8 +59,14 @@ def classify_card_kind(
     is_fin: bool,
     tool_error: bool = False,
     reasoning_text: str = "",
+    is_first_think: bool = False,
 ) -> Optional[str]:
-    """DSH thinkCardFromEvent 门槛：decision > conclusion > None。"""
+    """入卡门槛：decision > conclusion > orient > None。
+
+    orient（决策 44 增补）：事务内首段 think 且无 tool_calls 时零门槛入卡。
+    长首段 fin think 仍优先归 conclusion（信息更完整），短首段 fin think
+    不再被 800 字门槛丢弃。
+    """
     if raw_len <= 0:
         return None
     if tool_calls:
@@ -68,6 +77,8 @@ def classify_card_kind(
         or has_correction_signal(reasoning_text)
     ):
         return "conclusion"
+    if is_first_think:
+        return THINK_CARD_KIND_ORIENT
     return None
 
 

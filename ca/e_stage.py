@@ -432,21 +432,47 @@ class EStageMixin:
             status="completed",
         )
 
-        # ── decision 思考卡（reasoning + tool_calls，任意长度）──
-        if reasoning_text and tool_defs and thinking_seq is not None:
+        # ── 思考卡：decision / orient（决策 44 增补：事务首 think 零门槛）──
+        if reasoning_text and thinking_seq is not None:
+            is_first_think = False
+            try:
+                existing = read_turn_thinking_rows_v1(
+                    self.store, self._session_id, turn)
+                is_first_think = not any(r.get("seq") and r["seq"] < thinking_seq
+                                         for r in existing)
+            except Exception:
+                is_first_think = False
             question = read_turn_user_question_v1(self.store, self._session_id, turn)
-            card = make_think_card(
-                session_id=self._session_id,
-                turn=turn,
-                seq=thinking_seq,
-                reasoning_text=reasoning_text,
-                tool_calls=tool_defs,
-                card_kind="decision",
-                question_text=question,
-                step=api_call_count or pending_req.get("api_call_count"),
-            )
-            write_think_card_v1(self.store, card)
-            logger.info("[CA_v7] think decision card written turn=%d seq=%d", turn, thinking_seq)
+            if tool_defs:
+                card = make_think_card(
+                    session_id=self._session_id,
+                    turn=turn,
+                    seq=thinking_seq,
+                    reasoning_text=reasoning_text,
+                    tool_calls=tool_defs,
+                    card_kind="decision",
+                    question_text=question,
+                    step=api_call_count or pending_req.get("api_call_count"),
+                )
+                write_think_card_v1(self.store, card)
+                logger.info("[CA_v7] think decision card written turn=%d seq=%d",
+                            turn, thinking_seq)
+            elif is_first_think:
+                # 提问后首段 think（无工具）→ orient 卡，不套 800 字门槛。
+                # 该段 think 是事务划分线索，宁可多存，不可丢。
+                card = make_think_card(
+                    session_id=self._session_id,
+                    turn=turn,
+                    seq=thinking_seq,
+                    reasoning_text=reasoning_text,
+                    tool_calls=[],
+                    card_kind="orient",
+                    question_text=question,
+                    step=api_call_count or pending_req.get("api_call_count"),
+                )
+                write_think_card_v1(self.store, card)
+                logger.info("[CA_v7] think orient card written turn=%d seq=%d",
+                            turn, thinking_seq)
 
     def _on_final_response_v7(
         self,

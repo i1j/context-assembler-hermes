@@ -115,6 +115,41 @@ class TestOnApiResponseV7:
         )
         assert read_turn_stream_all(ca_engine.store, "test") == []
 
+    def test_first_plain_think_gets_orient_card(self, ca_engine):
+        """提问后首轮 think（无工具、短）→ THINKING 行 + orient 卡零门槛。"""
+        ca_engine._seq_counter = {1: 0}
+        ca_engine._on_api_response_v7(
+            api_request_id="r6",
+            assistant_message=_msg(content="直接答复", reasoning="先分析问题再回答"),
+            api_call_count=1, turn_index=1, finish_reason="stop",
+            provider="deepseek", model="deepseek-v4",
+        )
+        rows = read_turn_stream_all(ca_engine.store, "test")
+        assert rows[0]["block_type"] == "thinking"
+        cards = read_think_cards_v1(ca_engine.store, "test")
+        assert len(cards) == 1
+        assert cards[0]["card_kind"] == "orient"
+        assert cards[0]["raw_len"] > 0
+
+    def test_second_plain_think_in_same_turn_not_orient(self, ca_engine):
+        """事务内第二段无工具短 think 不重复入 orient 卡（宁缺勿错）。"""
+        ca_engine._seq_counter = {1: 0}
+        ca_engine._on_api_response_v7(
+            api_request_id="r7",
+            assistant_message=_msg(content="先答一句", reasoning="首段分析"),
+            api_call_count=1, turn_index=1, finish_reason="stop",
+            provider="deepseek", model="deepseek-v4",
+        )
+        ca_engine._on_api_response_v7(
+            api_request_id="r8",
+            assistant_message=_msg(content="补充一句", reasoning="补充说明"),
+            api_call_count=2, turn_index=1, finish_reason="stop",
+            provider="deepseek", model="deepseek-v4",
+        )
+        cards = read_think_cards_v1(ca_engine.store, "test")
+        assert len(cards) == 1
+        assert cards[0]["card_kind"] == "orient"
+
 
 class TestOnPostToolCallV7:
     def test_result_block_metadata(self, ca_engine):

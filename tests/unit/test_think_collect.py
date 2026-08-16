@@ -54,6 +54,18 @@ class TestClassifyCardKind:
         assert classify_card_kind(raw_len=20, tool_calls=[], is_fin=True) is None
         assert classify_card_kind(raw_len=20, tool_calls=[], is_fin=False) is None
 
+    def test_first_think_orient_zero_threshold(self):
+        """决策 44 增补：事务首 think 无工具 → orient 卡，不受 800 字门槛限制。"""
+        assert classify_card_kind(raw_len=20, tool_calls=[], is_fin=False,
+                                  is_first_think=True) == "orient"
+        assert classify_card_kind(raw_len=20, tool_calls=[], is_fin=True,
+                                  is_first_think=True) == "orient"
+
+    def test_long_first_think_fin_still_conclusion(self):
+        """长首段 fin think 优先 conclusion（信息更完整）。"""
+        assert classify_card_kind(raw_len=THINK_MIN_REASONING_CHARS, tool_calls=[],
+                                  is_fin=True, is_first_think=True) == "conclusion"
+
 
 class TestMakeThinkCard:
     def test_preview_bound_and_pointer(self):

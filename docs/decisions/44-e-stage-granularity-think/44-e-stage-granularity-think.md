@@ -24,10 +24,12 @@
 
 ### R4 think（云端 reasoning）录入（迁移 DSH think_trace K0）
 - R4.1 新增 `think_trace` 表，`UNIQUE(session_id, turn, seq)` 指向 turn_stream 的 THINKING 行；只存 `raw_len` 指针 + preview（≤160 字符，仅供调试），**不复制 reasoning 全文**（turn_stream.Elm 即 L2 权威）。
-- R4.2 采集规则与 DSH K0 对齐：
+- R4.2 采集规则（DSH K0 + 用户裁定增补）：
   - 含 tool_calls 的 reasoning → `card_kind='decision'`；
-  - fin 轮 reasoning 且（raw_len≥800 或命中修正词表 或 同 turn 存在工具错误）→ `card_kind='conclusion'`；
+  - **事务内首段 think 且无 tool_calls → `card_kind='orient'`，零门槛入卡**（提问后首轮 think 是事务划分的关键线索，不套 800 字门槛；同一事务第二段及以后的无工具短 think 不入 orient）；
+  - fin 轮 reasoning 且（raw_len≥800 或命中修正词表 或 同 turn 存在工具错误）→ `card_kind='conclusion'`（长首段 fin think 仍优先 conclusion）；
   - 其余短/非 fin reasoning 不入卡（捡选纪律）。
+- R4.2a reasoning 提取全字段：`provider_data.reasoning_content` → 顶层 `.reasoning` → `provider_data.reasoning_details`（OpenRouter `summary/thinking/content/text`）/ `codex_reasoning_items` / `codex_message_items` / `anthropic_content_blocks` → 最后才扫 content 内联 `<think>/<thinking>/<thought>/<reasoning>` 标签；双源去重合并，绝不把普通 content 当 reasoning。
 - R4.3 `l1_json/l0_abstract/entities_json/embedding_json` 预留，`status='raw'`；L1 提炼后续走 7.2 模式（每次最多 1 次本地调用、失败保持 raw、fail-open），本轮 E 阶段不调 LLM。
 
 ### R5 Fct 多事务 OODA 支撑
@@ -45,7 +47,7 @@
 
 - A1 新 hook 全部注册（13 个）；`hermes plugin list` 无 TypeError。
 - A2 旧库迁移：预置 18 列旧 schema 的 DB，打开后自动补列，旧数据可读。
-- A3 E 阶段测试：reasoning+content 双块各落一行、块类型与 ooda_stage 正确、llm_calls 全字段落库、think_trace decision/conclusion 门槛正确、纯对话不产生 THINKING 空行。
+- A3 E 阶段测试：reasoning+content 双块各落一行、块类型与 ooda_stage 正确、llm_calls 全字段落库、think_trace decision/orient/conclusion 门槛正确、纯对话不产生 THINKING 空行。
 - A4 全量 pytest 基线 1008 passed 之外新增用例全绿，既有用例除「hook 计数 8→13」契约更新外零新增失败。
 - A5 Fct 帧格式化纯函数：多事务输入按事务/阶段分组输出，历史行回退 legacy。
 - A6 `tsc` 不适用（Python 项目）；`python -m py_compile` 全部新文件通过。
@@ -60,7 +62,7 @@ on_stream_*  ─────┤  (旁路计数, fail-open)
                   ▼
 post_api_request ─→ MetaMarker.extract ─→ write llm_calls
                   └─→ E-stage 拆块 ──→ turn_stream(thinking/agent_reply/tool_call_request)
-                                      └─→ think_trace(decision)
+                                      └─→ think_trace(decision | orient)
 post_tool_call ──→ turn_stream(tool_call_result) + result_chars/error_text
 post_llm_call  ──→ turn_stream(agent_reply fin) + think_trace(conclusion) + F-stage
 ```

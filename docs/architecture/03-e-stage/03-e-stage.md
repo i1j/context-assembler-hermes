@@ -21,7 +21,7 @@ Hermes 对话系统的 Hook 生命周期包含 5 个阶段。需要确定每个 
 | `pre_llm_call` | `(n, 0)` | `role='user', Elm, block_type=user_message, ooda_stage=orient` | LLM 调用前 |
 | `pre_api_request` | — | 内存 pending 请求元数据（model/provider/input_chars 等） | 每次 API 尝试前 |
 | `on_stream_start/delta/end` | — | 内存流式计数（reasoning/text/chunk），end 时 UPSERT 补丁 llm_calls | 流式 token 旁路（异步 worker） |
-| `post_api_request` | `(n, k)` | THINKING/AGENT_REPLY 拆块 + `tool_call_request` 占位；`block_type/ooda_stage/request_id/provider/model/usage`；llm_calls 一行；decision 思考卡 | API 响应后（每次 API 调用，非每轮） |
+| `post_api_request` | `(n, k)` | THINKING/AGENT_REPLY 拆块 + `tool_call_request` 占位；`block_type/ooda_stage/request_id/provider/model/usage`；llm_calls 一行；decision/orient 思考卡 | API 响应后（每次 API 调用，非每轮） |
 | `api_request_error` | — | llm_calls `status=failed, finish_kind=error` | 每次失败尝试 |
 | `pre_tool_call` | — | **no-op** | 占位行已写入 |
 | `post_tool_call` | `(n, m)` | `role='tool', Elm, per-tool Fct, block_type=tool_call_result, ooda_stage=observe, result_chars/error_text` | 工具执行后回填 |

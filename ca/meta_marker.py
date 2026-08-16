@@ -66,24 +66,90 @@ def extract_usage_tokens(usage: Any) -> Tuple[Optional[int], Optional[int]]:
             completion if isinstance(completion, int) else None)
 
 
-def extract_reasoning_text(assistant_message: Any) -> str:
-    """从 NormalizedResponse 提取全量 reasoning。
+_REASONING_DETAIL_TEXT_KEYS = ("thinking", "text", "summary", "content")
 
-    优先 provider_data["reasoning_content"]（DeepSeek/Moonshot 原始字段，
-    保持 E-stage v5 契约），再取顶层 `.reasoning`（Hermes transport 归一化）。
-    绝不回退到 content（EFLR THINKING 块语义，决策 44 R2.3）。
+_INLINE_REASONING_PATTERNS = (
+    re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE),
+    re.compile(r"<thinking>(.*?)</thinking>", re.DOTALL | re.IGNORECASE),
+    re.compile(r"<thought>(.*?)</thought>", re.DOTALL | re.IGNORECASE),
+    re.compile(r"<reasoning>(.*?)</reasoning>", re.DOTALL | re.IGNORECASE),
+    re.compile(r"<REASONING_SCRATCHPAD>(.*?)</REASONING_SCRATCHPAD>",
+               re.DOTALL | re.IGNORECASE),
+)
+
+
+def _reasoning_text_from_provider_value(value: Any) -> str:
+    """从 provider_data 的 reasoning_details/codex_reasoning_items/
+    anthropic_content_blocks 等异构容器中提取文本。
+
+    覆盖：
+    - str 直接返回；
+    - dict → [dict]；
+    - list 元素 str 拼接；list 元素 dict 按 thinking/text/summary/content 提取。
+    """
+    parts: List[str] = []
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        value = [value]
+    if isinstance(value, (list, tuple)):
+        for part in value:
+            if isinstance(part, str):
+                if part:
+                    parts.append(part)
+            elif isinstance(part, dict):
+                for key in _REASONING_DETAIL_TEXT_KEYS:
+                    text = part.get(key)
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+                        break
+    return "\n".join(parts)
+
+
+def extract_reasoning_text(assistant_message: Any) -> str:
+    """从 NormalizedResponse 提取全量 reasoning（Hermes extract_reasoning 全字段版）。
+
+    顺序：
+    1. provider_data["reasoning_content"]（DeepSeek/Moonshot，保持 E-stage v5 契约）
+    2. 顶层 .reasoning（Hermes transport 归一化全量文本）
+    3. provider_data 异构容器：reasoning_details / codex_reasoning_items /
+       codex_message_items / anthropic_content_blocks
+    4. 仅在以上全空时，扫描 content 内联 <think>/<thinking>/... 标签
+    绝不把普通 content 当 reasoning（EFLR THINKING 块语义，决策 44 R2.3）。
     """
     if assistant_message is None:
         return ""
     pd = getattr(assistant_message, "provider_data", None) or {}
+    parts: List[str] = []
+
+    def _append(text: Any) -> None:
+        if isinstance(text, str) and text and text not in parts:
+            parts.append(text)
+
     if isinstance(pd, dict):
-        raw = pd.get("reasoning_content")
-        if isinstance(raw, str) and raw:
-            return raw
-    top = getattr(assistant_message, "reasoning", None)
-    if isinstance(top, str) and top:
-        return top
-    return ""
+        _append(pd.get("reasoning_content"))
+    _append(getattr(assistant_message, "reasoning", None))
+    if isinstance(pd, dict):
+        for key in ("reasoning_details", "codex_reasoning_items",
+                    "codex_message_items", "anthropic_content_blocks"):
+            text = _reasoning_text_from_provider_value(pd.get(key))
+            if text:
+                for block in text.split("\n"):
+                    _append(block)
+
+    if parts:
+        return "\n\n".join(parts)
+
+    content = getattr(assistant_message, "content", None)
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "thinking":
+                _append(block.get("thinking") or block.get("text"))
+    elif isinstance(content, str) and content:
+        for pattern in _INLINE_REASONING_PATTERNS:
+            for block in pattern.findall(content):
+                _append(block.strip())
+    return "\n\n".join(parts)
 
 
 def extract_content_text(assistant_message: Any) -> str:
