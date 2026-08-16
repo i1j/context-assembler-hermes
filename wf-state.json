@@ -4,8 +4,8 @@
     "object": "ca-e-stage-v7-granularity-think",
     "current_state": "交付部署",
     "created": "2026-08-17T00:00:00",
-    "task_line": "参考 DSH 版 CA 与 EFLR，改进 Hermes 版 E 阶段：近源细颗粒度数据+元数据+think 录入，支撑 Fct 多事务 OODA 摘要",
-    "accept_line": "新增 5 hook 注册（13 总）；旧库幂等迁移；turn_stream 块级+元数据列；llm_calls/think_trace 落库；Fct 事务帧输入；全量 pytest（基线 1008+新增）全绿"
+    "task_line": "参考 DSH 版 CA 与 EFLR 改进 Hermes E 阶段；增补：提问后首轮 think（orient 卡）零门槛入卡",
+    "accept_line": "13 hooks；旧库幂等迁移；turn_stream 块级+元数据列；llm_calls/think_trace（decision/orient/conclusion）；Fct 事务帧；全量 pytest 1131 passed"
   },
   "transitions": [
     {
@@ -47,6 +47,46 @@
       "rating": "完整",
       "ts": "2026-08-16T22:39:58",
       "note": "git commit 0c8fa2c + 文档/plugin.yaml 同步"
+    },
+    {
+      "from": "交付部署",
+      "to": "需求开发",
+      "type": "bounce",
+      "rating": "",
+      "ts": "2026-08-16T22:49:17",
+      "note": "用户补充：提问后首轮 think 直接划分事务，必须入卡"
+    },
+    {
+      "from": "需求开发",
+      "to": "技术方案",
+      "type": "forward",
+      "rating": "纯代码",
+      "ts": "2026-08-16T22:49:17",
+      "note": "orient 卡规则 + reasoning 全字段提取"
+    },
+    {
+      "from": "技术方案",
+      "to": "代码构建",
+      "type": "forward",
+      "rating": "需验证",
+      "ts": "2026-08-16T22:49:17",
+      "note": "TDD 补 7 用例"
+    },
+    {
+      "from": "代码构建",
+      "to": "验证诊断",
+      "type": "forward",
+      "rating": "完整",
+      "ts": "2026-08-16T22:49:17",
+      "note": "1131 passed"
+    },
+    {
+      "from": "验证诊断",
+      "to": "交付部署",
+      "type": "forward",
+      "rating": "完整",
+      "ts": "2026-08-16T22:49:17",
+      "note": "commit c2cd1cb"
     }
   ],
   "counters": {
@@ -58,7 +98,7 @@
     "last": {
       "state": "验证诊断",
       "result": "PASS",
-      "ts": "2026-08-16T22:39:58"
+      "ts": "2026-08-16T22:49:17"
     }
   }
 }
