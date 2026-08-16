@@ -357,6 +357,26 @@ class FStageMixin:
     def _extract_hdl(self, fct_dict: dict, turn_index: int) -> str:
         """从 fct_dict 提取 Hdl 文本。"""
         from .post_process import _safe_truncate
+        # 决策 45：多事务 Fct 的 Hdl 首选首个事务 hdl（事务名即候选 strand）
+        affairs = fct_dict.get("affairs")
+        if isinstance(affairs, list) and affairs:
+            for affair in affairs:
+                if not isinstance(affair, dict):
+                    continue
+                hdl = str(affair.get("hdl") or "").strip()
+                if hdl:
+                    return _safe_truncate(hdl, 100) or "无"
+            # hdl 为空时退回该事务 OODA 阶段首条记录
+            for affair in affairs:
+                if not isinstance(affair, dict):
+                    continue
+                ooda = affair.get("ooda") if isinstance(affair.get("ooda"), dict) else {}
+                for key in ("决策与方案", "现象与问题", "后续行动", "背景与约束"):
+                    items = ooda.get(key) or []
+                    if items:
+                        result = _safe_truncate(str(items[0]).strip(), 100)
+                        if result:
+                            return result
         changes = fct_dict.get("changes", [])
         if changes:
             core = "；".join(c.get("core_change", "") for c in changes)
@@ -397,6 +417,23 @@ class FStageMixin:
                 if pat in fct_text:
                     return ""
             return fct_text
+        # 决策 45：多事务 Fct 直接按事务 hdl + OODA 阶段渲染（无状态标签）
+        affairs = data.get("affairs")
+        if isinstance(affairs, list) and affairs:
+            display_lines: List[str] = []
+            for idx, affair in enumerate(affairs, start=1):
+                if not isinstance(affair, dict):
+                    continue
+                hdl = str(affair.get("hdl") or f"事务{idx}").strip()
+                display_lines.append(f"{idx}. {hdl}")
+                ooda = affair.get("ooda") if isinstance(affair.get("ooda"), dict) else {}
+                for label in ("现象与问题", "背景与约束", "决策与方案", "后续行动"):
+                    items = ooda.get(label) or []
+                    real_items = [str(i).strip() for i in items if str(i).strip()]
+                    if real_items:
+                        display_lines.append(f"  {label}: {'; '.join(real_items)}")
+            if display_lines:
+                return "\n".join(display_lines)
         core = data.get("core_change", "")
         if not core:
             for pat in self._FCT_DEBUG_PATTERNS:
@@ -405,7 +442,11 @@ class FStageMixin:
             return fct_text
         changes = data.get("changes", [])
         if changes:
-            lines = [f"【{c['stage_tag']}】{c['core_change']}" for c in changes]
+            lines = []
+            for c in changes:
+                stag = str(c.get("stage_tag") or "").strip()
+                core_c = str(c.get("core_change") or "").strip()
+                lines.append(f"【{stag}】{core_c}" if stag else core_c)
         else:
             lines = [core]
         for key in ("new_materials", "objective_facts"):
@@ -426,6 +467,15 @@ class FStageMixin:
             return False
         try:
             data = json.loads(fct_text)
+            # 决策 45：多事务 Fct 只要有任一事务的 OODA 阶段内容即视为有效
+            affairs = data.get("affairs")
+            if isinstance(affairs, list):
+                for affair in affairs:
+                    if not isinstance(affair, dict):
+                        continue
+                    ooda = affair.get("ooda") if isinstance(affair.get("ooda"), dict) else {}
+                    if any(ooda.get(key) for key in ("现象与问题", "背景与约束", "决策与方案", "后续行动")):
+                        return True
             changes = data.get("changes", [])
             if changes:
                 return True

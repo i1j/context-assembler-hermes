@@ -144,12 +144,17 @@ class TestFormatPreviousSummary:
     """format_previous_summary_for_prompt — previous_summary 输入转换"""
 
     def test_empty_returns_descriptive_message(self):
-        """空输入 → 返回含语义指令的占位符（不再返回裸"无"）"""
+        """空输入 → 返回含语义指令的占位符（不再返回裸"无"）
+
+        决策 45：占位符不再点名旧 stage_tag/core_change 格式，
+        多事务模式无状态标签，输出格式由各自 FCT prompt 约束。
+        """
         from ca.store import format_previous_summary_for_prompt
         result = format_previous_summary_for_prompt("")
         assert "无历史回顾" in result
-        assert "stage_tag" in result
-        assert "core_change" in result
+        assert "首次出现" in result
+        assert "stage_tag" not in result
+        assert "core_change" not in result
         assert result != "无"
 
     def test_none_returns_descriptive_message(self):
@@ -186,3 +191,19 @@ class TestFormatPreviousSummary:
         )
         assert "修复bug" in result
         assert "日志分析" in result
+
+    def test_v3_affairs_previous_summary_by_hdl_and_stage(self):
+        """决策 45：多事务 Fct 历史摘要 = 事务 hdl + OODA 阶段记录，无状态标签"""
+        from ca.store import format_previous_summary_for_prompt
+        result = format_previous_summary_for_prompt(
+            '{"affairs":['
+            '{"hdl":"连接池扩容","turns":[7],'
+            '"ooda":{"现象与问题":["池耗尽"],"背景与约束":[],'
+            '"决策与方案":["扩容到200"],"后续行动":[]}}]}'
+        )
+        assert "事务1：连接池扩容" in result
+        assert "现象与问题：池耗尽" in result
+        assert "决策与方案：扩容到200" in result
+        assert "已实施" not in result
+        assert "stage_tag" not in result
+        assert "changes" not in result

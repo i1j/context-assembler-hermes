@@ -89,20 +89,58 @@ class SQLiteStore:
             except Exception:
                 pass
             self._local.conn = None
+def _format_affairs_for_previous_summary(data: dict) -> str:
+    """决策 45：多事务 Fct 的历史摘要直接按事务 hdl + OODA 阶段渲染。
+
+    OODA 阶段项即变更记录；不渲染 stage_tag/【已完成】等状态标签
+    （v2 旧记录携带的 changes 在历史摘要中不重复输出，避免双轨）。
+    """
+    affairs = data.get("affairs")
+    if not isinstance(affairs, list) or not affairs:
+        return ""
+    lines: list[str] = []
+    for idx, affair in enumerate(affairs, start=1):
+        if not isinstance(affair, dict):
+            continue
+        ooda = affair.get("ooda") if isinstance(affair.get("ooda"), dict) else {}
+        body: list[str] = []
+        for label in ("现象与问题", "背景与约束", "决策与方案", "后续行动"):
+            items = ooda.get(label)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                item_text = str(item).strip()
+                if item_text:
+                    body.append(f"- {label}：{item_text}")
+        if not body:
+            # 空事务不构成历史摘要，避免把「事务1：事务1」空壳喂给 4B
+            continue
+        hdl = str(affair.get("hdl") or f"事务{idx}").strip()
+        lines.append(f"## 事务{idx}：{hdl}")
+        lines.extend(body)
+    return "\n".join(lines)
+
+
 def format_previous_summary_for_prompt(l1_text_from_db: str) -> str:
     """将 DB 中历史 Fct 统一转换为新提示词期望的 Markdown 格式。
 
     - None/空/"无" → "无"
+    - 多事务 Fct（含 affairs）→ 事务 hdl + OODA 阶段记录（决策 45）
     - JSON (旧 5 类) → 调用 _json_to_v1_markdown() 转换
     - 纯文本 → 原样返回
     """
     if not l1_text_from_db or l1_text_from_db.strip() in ("无", "null"):
-        return "【无历史回顾】——本轮所有内容相对空历史均为首次出现，必须选取核心发现输出 &lt;stage_tag&gt;/&lt;core_change&gt; 对"
+        # 决策 45：不再点名旧 stage_tag/core_change 输出格式——
+        # 多事务模式无状态标签，具体输出格式由各自 FCT prompt 约束。
+        return "【无历史回顾】——本轮所有内容相对空历史均为首次出现，必须全部提取为新增内容"
 
     stripped = l1_text_from_db.strip()
     try:
         data = json.loads(stripped)
         if isinstance(data, dict):
+            affairs_summary = _format_affairs_for_previous_summary(data)
+            if affairs_summary:
+                return affairs_summary
             from .post_process import _json_to_v1_markdown as _legacy_json_to_v1_markdown
             result = _legacy_json_to_v1_markdown(data)
             if result:
@@ -1935,8 +1973,8 @@ def collect_turn_fcts(
                 new_mat = fct_data.get("new_materials")
                 if isinstance(new_mat, list):
                     entry["new_materials"] = [str(x).strip() for x in new_mat if x]
-                # 决策 44：多事务 Fct —— affairs 直接进入 strand 输入（效率优先，
-                # 避免再从 legacy changes 反推事务边界）
+                # 决策 44/45：多事务 Fct —— affairs 直接进入 strand 输入（效率优先，
+                # 避免再从 legacy changes 反推事务边界）；v3 的 OODA 阶段项即变更
                 raw_affairs = fct_data.get("affairs")
                 if isinstance(raw_affairs, list) and raw_affairs:
                     affairs = []

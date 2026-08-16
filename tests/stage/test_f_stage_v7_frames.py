@@ -80,11 +80,9 @@ def test_format_transaction_frames_multi_affair():
 
 MULTI_AFFAIR_JSON = """{"affairs":[
 {"hdl":"事务A","turns":[1],
- "ooda":{"现象与问题":["问题A"],"背景与约束":[],"决策与方案":["方案A"],"后续行动":[]},
- "changes":[{"stage_tag":"已实施","core_change":"方案A落地"}]},
+ "ooda":{"现象与问题":["问题A"],"背景与约束":[],"决策与方案":["方案A落地"],"后续行动":[]}},
 {"hdl":"事务B","turns":[1],
- "ooda":{"现象与问题":["问题B"],"背景与约束":[],"决策与方案":["方案B"],"后续行动":["跟进B"]},
- "changes":[{"stage_tag":"计划","core_change":"方案B将实施"}]}
+ "ooda":{"现象与问题":["问题B"],"背景与约束":[],"决策与方案":["方案B将实施"],"后续行动":["跟进B"]}}
 ]}"""
 
 
@@ -108,9 +106,14 @@ class TestFStageMultiAffairOutput:
             ca_engine._run_f_stage("test", 3, 1)
 
         data = _json.loads(read_fct_v5(ca_engine.store, "test", 3, 1))
-        assert data["_fct_format"] == "v2-multi-affair"
+        assert data["_fct_format"] == "v3-multi-affair-ooda"
         assert [a["hdl"] for a in data["affairs"]] == ["事务A", "事务B"]
-        assert [c["core_change"] for c in data["changes"]] == ["方案A落地", "方案B将实施"]
+        # 决策 45：affairs 本身不再带 changes/stage_tag
+        assert all("changes" not in a for a in data["affairs"])
+        # legacy 扁平字段由 OODA 阶段项派生，无状态标签
+        assert [c["core_change"] for c in data["changes"]] == [
+            "问题A", "方案A落地", "问题B", "方案B将实施", "跟进B"]
+        assert all("stage_tag" not in c for c in data["changes"])
         assert "跟进B" in data["todo"]
 
     def test_orient_card_injected_into_fct_input(self, ca_engine):

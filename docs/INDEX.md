@@ -105,6 +105,7 @@ flowchart LR
 | **42** | **[Hindsight 借鉴：检索图路/时序路 + 心智模型层](decisions/42-hindsight-borrowed-retrieval/42-hindsight-borrowed-retrieval.md)** | v7 | 检索增强 | retrieval, graphify, refinement |
 | **43** | **[删除 OV wiki/ 镜像](decisions/43-ov-wiki-mirror-sync/43-ov-wiki-mirror-sync.md)** | v7 | 文档工程 | OV wiki/ 镜像删除（OV decisions/architecture/AGENTS 为权威源，本地 docs/wiki 为工作副本） |
 | **44** | **[E 阶段细颗粒度采集 + think 录入 + Fct 多事务 OODA 支撑](decisions/44-e-stage-granularity-think/44-e-stage-granularity-think.md)** | v6.1 | E/F 管线 | e_stage, store, blocks, meta_marker, think_collect, f_stage, plugin（13 hooks） |
+| **45** | **[多事务 OODA 记录单一化（v3：去掉【已完成】等标签）](decisions/45-multi-affair-ooda-record/45-multi-affair-ooda-record.md)** | v6.1 | F/strand | prompts, fct_multi_affair, topic_summary, store, f_stage, a_stage |
 
 ## 相关资源
 

@@ -447,6 +447,22 @@ class TestExtractHdl:
         hdl = ca_engine._extract_hdl({"core_change": "本轮无新内容"}, turn_index=0)
         assert hdl == "无"
 
+    def test_hdl_prefers_first_affair_hdl(self, ca_engine):
+        """决策 45：多事务 Fct 的 Hdl 取首个事务 hdl，而不是 legacy 拼接"""
+        hdl = ca_engine._extract_hdl({
+            "core_change": "问题A；方案A",
+            "changes": [{"core_change": "问题A", "ooda": "现象与问题"}],
+            "affairs": [{"hdl": "连接池扩容", "ooda": {"决策与方案": ["扩容到200"]}}],
+        }, turn_index=0)
+        assert hdl == "连接池扩容"
+
+    def test_hdl_affair_without_hdl_falls_back_to_ooda(self, ca_engine):
+        """决策 45：事务 hdl 为空时退回该事务 OODA 阶段首条记录"""
+        hdl = ca_engine._extract_hdl({
+            "affairs": [{"hdl": "", "ooda": {"决策与方案": ["扩容到200"]}}],
+        }, turn_index=0)
+        assert hdl == "扩容到200"
+
 
 class TestFormatFctForDisplay:
     """_format_fct_for_display — Fct JSON 格式化为可读文本"""
@@ -486,6 +502,27 @@ class TestFormatFctForDisplay:
         result = ca_engine._format_fct_for_display(fct)
         assert "new_materials" in result  # 原文返回
 
+    def test_v3_affairs_display_hdl_and_stage(self, ca_engine):
+        """决策 45：多事务 Fct 展示 = hdl + 阶段关键字，无状态标签"""
+        fct = json.dumps({"affairs": [{
+            "hdl": "连接池扩容", "turns": [7],
+            "ooda": {"现象与问题": ["池耗尽"], "背景与约束": [],
+                     "决策与方案": ["扩容到200"], "后续行动": []},
+        }]}, ensure_ascii=False)
+        result = ca_engine._format_fct_for_display(fct)
+        assert "1. 连接池扩容" in result
+        assert "现象与问题: 池耗尽" in result
+        assert "决策与方案: 扩容到200" in result
+        assert "已实施" not in result
+
+    def test_change_without_stage_tag_no_empty_brackets(self, ca_engine):
+        """决策 45 派生 changes 无 stage_tag → 不渲染空【】"""
+        fct = json.dumps({"core_change": "扩容到200",
+                          "changes": [{"core_change": "扩容到200", "ooda": "决策与方案"}]})
+        result = ca_engine._format_fct_for_display(fct)
+        assert "扩容到200" in result
+        assert "【】" not in result
+
 
 class TestIsValidFct:
     """_is_valid_fct — Fct 有效性验证"""
@@ -501,6 +538,16 @@ class TestIsValidFct:
 
     def test_missing_core_key(self, ca_engine):
         assert not ca_engine._is_valid_fct(json.dumps({"other": "data"}))
+
+    def test_v3_affairs_with_ooda_content_is_valid(self, ca_engine):
+        """决策 45：仅含 affairs（OODA 阶段有内容）也算有效 Fct"""
+        assert ca_engine._is_valid_fct(json.dumps({"affairs": [{
+            "hdl": "连接池扩容", "ooda": {"决策与方案": ["扩容到200"]}}]}))
+
+    def test_v3_affairs_empty_ooda_is_invalid(self, ca_engine):
+        assert not ca_engine._is_valid_fct(json.dumps({"affairs": [{
+            "hdl": "x", "ooda": {"现象与问题": [], "背景与约束": [],
+                                  "决策与方案": [], "后续行动": []}}]}))
 
     def test_not_json(self, ca_engine):
         assert not ca_engine._is_valid_fct("不是 JSON")

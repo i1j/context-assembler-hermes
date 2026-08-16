@@ -1,4 +1,8 @@
-"""决策 44 续：Fct 多事务 OODA 输出解析 + think 卡输入筛选测试。"""
+"""决策 45：Fct 多事务 OODA 记录（v3）解析 + think 卡输入筛选测试。
+
+v3 契约：affairs[].ooda 阶段项即变更记录，无 changes/stage_tag；
+v2 旧库记录（带 changes）仍可解析，changes 保留用于只读兼容。
+"""
 import json
 
 from ca.fct_multi_affair import (
@@ -19,12 +23,9 @@ MULTI_RESPONSE = """
       "ooda": {
         "现象与问题": ["连接池耗尽"],
         "背景与约束": ["上限100"],
-        "决策与方案": ["扩容到200"],
+        "决策与方案": ["连接池扩容到200"],
         "后续行动": ["观察慢查询"]
-      },
-      "changes": [
-        {"stage_tag": "已实施", "core_change": "连接池扩容到200"}
-      ]
+      }
     },
     {
       "hdl": "检索链路修复",
@@ -32,37 +33,42 @@ MULTI_RESPONSE = """
       "ooda": {
         "现象与问题": ["召回为空"],
         "背景与约束": [],
-        "决策与方案": ["本地化检索"],
+        "决策与方案": ["检索链路本地化"],
         "后续行动": []
-      },
-      "changes": [
-        {"stage_tag": "计划", "core_change": "检索链路本地化"}
-      ]
+      }
     }
   ]
 }
 ```
 """
 
+V2_LEGACY_RESPONSE = """{"affairs":[{"hdl":"旧事务","turns":[6],"ooda":{
+  "现象与问题":["旧问题"],"背景与约束":[],"决策与方案":["旧方案"],"后续行动":[]},
+  "changes":[{"stage_tag":"已实施","core_change":"旧方案落地"}]}]}"""
+
 
 class TestParseFctMultiAffair:
-    def test_parses_fenced_json(self):
+    def test_parses_fenced_json_v3(self):
         result = parse_fct_multi_affair(MULTI_RESPONSE)
         assert result is not None
         assert len(result["affairs"]) == 2
         assert result["affairs"][0]["hdl"] == "连接池扩容"
         assert result["affairs"][1]["ooda"]["现象与问题"] == ["召回为空"]
+        # v3：OODA 阶段即变更，无 changes 字段
+        assert "changes" not in result["affairs"][0]
+        assert "changes" not in result["affairs"][1]
 
     def test_plain_json_without_fence(self):
-        obj = {"affairs": [{"hdl": "a", "ooda": {}, "changes": []}]}
+        obj = {"affairs": [{"hdl": "a", "ooda": {}}]}
         result = parse_fct_multi_affair(json.dumps(obj, ensure_ascii=False))
         assert result is not None
+        assert "changes" not in result["affairs"][0]
 
     def test_no_affairs_returns_none(self):
         assert parse_fct_multi_affair('{"changes": []}') is None
         assert parse_fct_multi_affair("### 现象与问题\n- 无") is None
 
-    def test_filters_invalid_changes_and_fills_ooda_keys(self):
+    def test_fills_ooda_keys_and_keeps_v2_changes_for_legacy_read(self):
         obj = {"affairs": [{
             "hdl": "a",
             "ooda": {"现象与问题": ["x"], "背景与约束": "bad"},
@@ -72,29 +78,46 @@ class TestParseFctMultiAffair:
         result = parse_fct_multi_affair(json.dumps(obj, ensure_ascii=False))
         affair = result["affairs"][0]
         assert set(affair["ooda"].keys()) == {"现象与问题", "背景与约束", "决策与方案", "后续行动"}
+        # v2 只读兼容：有效 changes 保留，无效过滤
         assert affair["changes"] == [{"stage_tag": "已实施", "core_change": "好"}]
 
 
 class TestFlattenAffairsToLegacy:
-    def test_flatten_backward_compatible(self):
+    def test_flatten_v3_derives_changes_without_stage_tag(self):
         parsed = parse_fct_multi_affair(MULTI_RESPONSE)
         legacy = flatten_affairs_to_legacy(parsed["affairs"])
         assert [c["core_change"] for c in legacy["changes"]] == [
-            "连接池扩容到200", "检索链路本地化"]
-        assert legacy["core_change"] == "连接池扩容到200；检索链路本地化"
+            "连接池耗尽", "上限100", "连接池扩容到200", "观察慢查询",
+            "召回为空", "检索链路本地化"]
+        # 决策 45：多事务模式不再有【已完成】等状态标签
+        assert all("stage_tag" not in c for c in legacy["changes"])
+        assert all(c["ooda"] in ("现象与问题", "背景与约束", "决策与方案", "后续行动")
+                   for c in legacy["changes"])
+        assert legacy["core_change"] == (
+            "连接池耗尽；上限100；连接池扩容到200；观察慢查询；召回为空；检索链路本地化")
         assert "连接池耗尽" in legacy["new_materials"]
-        assert "扩容到200" in legacy["consensus"]
+        assert "连接池扩容到200" in legacy["consensus"]
         assert [a["hdl"] for a in legacy["affairs"]] == [
             "连接池扩容", "检索链路修复"]
         assert legacy["affairs"][0]["ooda"]["现象与问题"] == ["连接池耗尽"]
-        assert legacy["_fct_format"] == "v2-multi-affair"
+        assert legacy["_fct_format"] == "v3-multi-affair-ooda"
 
     def test_empty_hdl_fallback(self):
-        affairs = [{"hdl": "", "ooda": {"决策与方案": ["做成A"]},
-                    "changes": [{"stage_tag": "计划", "core_change": "做成A"}]}]
+        affairs = [{"hdl": "", "ooda": {"决策与方案": ["做成A"]}}]
         legacy = flatten_affairs_to_legacy(affairs)
         assert legacy["affairs"][0]["hdl"] == "做成A"
         assert legacy["changes"][0]["core_change"] == "做成A"
+        assert legacy["changes"][0]["ooda"] == "决策与方案"
+
+    def test_v2_legacy_changes_preserved(self):
+        """旧库 v2 记录（带 stage_tag）只读兼容：changes 原样保留，OODA 阶段项补差集。"""
+        parsed = parse_fct_multi_affair(V2_LEGACY_RESPONSE)
+        legacy = flatten_affairs_to_legacy(parsed["affairs"])
+        assert legacy["changes"][0] == {"stage_tag": "已实施", "core_change": "旧方案落地"}
+        # v2 的 OODA 阶段项补差集（核心重复的不再追加）
+        cores = [c["core_change"] for c in legacy["changes"]]
+        assert "旧问题" in cores
+        assert "旧方案" in cores
 
 
 class TestBuildFctThinkContext:

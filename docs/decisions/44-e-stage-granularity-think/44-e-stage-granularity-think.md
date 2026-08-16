@@ -37,6 +37,7 @@
 - R5.1 F-stage 输入升级为「事务帧」格式：按 turn 分组，按 seq 输出 `[ooda_stage|block_type]` 前缀（旧行无 block_type 自动回退 legacy 文本，兼容历史 DB）。
 - R5.2 输入注入**代码筛选后的首轮 think 卡**：只取当前 turn 的 `orient/decision` 卡，orient 优先；每卡截断、总预算约束（`ca/fct_multi_affair.py:build_fct_think_context`），reasoning 原文从 THINKING 行读、preview 只兜底。
 - R5.3 Fct 输出改为**多事务 OODA JSON**：`{"affairs":[{"hdl","turns","ooda":{"现象与问题","背景与约束","决策与方案","后续行动"},"changes":[{"stage_tag","core_change"}]}]}`；代码解析校验后**扁平化**为 legacy `changes/core_change/四段字段`（`ca/fct_multi_affair.py:flatten_affairs_to_legacy`），`affairs` 一并存入 Fct，topic_summary/strand/A-stage 既有消费链不破。
+  - **已被决策 45 升级**：v3 记录去掉 `changes`/`stage_tag`，OODA 阶段项即变更（`_fct_format = "v3-multi-affair-ooda"`）；v2 仅旧库只读兼容。
 - R5.5 strand 输入效率优先（用户 2026-08-17 裁定，不向后兼容）：`collect_turn_fcts` 直接把 Fct `affairs[]` 交给 `_format_turns_for_prompt`，渲染为 flash 习惯的编号事务清单 `1. hdl / 2. hdl`，每事务附 ooda/changes；有 affairs 时不再重复输出 legacy changes。`TOPIC_SUMMARIZE_PROMPT` 新增规则：编号即候选 strand，优先跨轮合并、不凭空发明/重命名。
 - R5.4 兼容策略：multi-affair JSON 解析失败 → 回退 legacy `parse_v1_markdown_xml`；截断时先尝试解析 partial JSON，再回退 `PAIR_PATTERN`；`CA_FCT_MULTI_AFFAIR_ENABLED`（默认 1）可整体回退旧 prompt/解析。
 

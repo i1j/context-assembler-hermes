@@ -310,7 +310,10 @@ class AStageMixin:
 def _format_fct_readable(fct_dict: dict) -> str:
     """将 Fct dict 渲染为可读文本，按 OODA 四段分组。
 
-    格式:
+    多事务 Fct（决策 45）：按事务 hdl + OODA 阶段渲染，
+    OODA 阶段项即变更记录，无【已完成】等状态标签。
+
+    旧单事务格式:
         # 现象与问题
         - 发现连接池耗尽
 
@@ -320,6 +323,24 @@ def _format_fct_readable(fct_dict: dict) -> str:
         # 后续行动
         - [评估中] 监控超时命中率
     """
+    affairs = fct_dict.get("affairs")
+    if isinstance(affairs, list) and affairs:
+        readable_lines = []
+        for idx, affair in enumerate(affairs, start=1):
+            if not isinstance(affair, dict):
+                continue
+            hdl = str(affair.get("hdl") or f"事务{idx}").strip()
+            readable_lines.append(f"# 事务{idx} {hdl}")
+            ooda = affair.get("ooda") if isinstance(affair.get("ooda"), dict) else {}
+            for label in ("现象与问题", "背景与约束", "决策与方案", "后续行动"):
+                items = ooda.get(label) or []
+                for item in items:
+                    item_text = str(item).strip()
+                    if item_text:
+                        readable_lines.append(f"- {label}：{item_text}")
+        if readable_lines:
+            return "\n".join(readable_lines)
+
     sections = {
         "现象与问题": [],
         "背景与约束": [],

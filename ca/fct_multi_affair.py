@@ -1,9 +1,14 @@
-"""ca/fct_multi_affair.py — Fct 多事务 OODA 输出解析 + think 卡输入筛选（决策 44 续）。
+"""ca/fct_multi_affair.py — Fct 多事务 OODA 输出解析 + think 卡输入筛选（决策 44 续 / 45）。
 
 职责：
-1. 解析 F-stage 4B 的 `affairs[]` JSON 输出（每事务 hdl + ooda 四段 + 独立 changes）。
+1. 解析 F-stage 4B 的 `affairs[]` JSON 输出。
+   - v3（当前写入契约）：每事务 `{hdl, turns, ooda}`；OODA 四段数组项
+     **就是该阶段的变更记录**，不再有 changes/stage_tag（无【已完成】等标签）。
+   - v2（旧库只读兼容）：`{hdl, turns, ooda, changes[{stage_tag, core_change}]}`，
+     解析时保留 changes 供旧渲染路径展示。
 2. 代码扁平化为 legacy Fct 结构（changes/core_change/四段字段），保证
-   topic_summary / strand / A-stage 既有消费链不破。
+   topic_summary / strand / A-stage 既有消费链不破。v3 派生的 legacy changes
+   不带 stage_tag（状态标签在多事务模式已废弃）。
 3. 代码筛选当前事务的 think 卡（orient 优先 → decision），截断 + 总预算，
    拼入 Fct 输入，不把全部思考原文灌给 4B。
 
@@ -20,7 +25,8 @@ from .post_process import MEANINGLESS_CORE, VALID_STATES
 
 FCT_OODA_KEYS = ("现象与问题", "背景与约束", "决策与方案", "后续行动")
 FCT_LEGACY_KEYS = ("new_materials", "objective_facts", "consensus", "todo")
-FCT_FORMAT_V2 = "v2-multi-affair"
+FCT_FORMAT_V2 = "v2-multi-affair"          # 旧库只读兼容
+FCT_FORMAT_V3 = "v3-multi-affair-ooda"     # 当前写入契约（决策 45）
 
 # think 卡输入筛选默认预算（代码过滤，宁缺勿滥）
 THINK_CARD_KIND_PRIORITY = {"orient": 0, "decision": 1}
@@ -94,19 +100,22 @@ def parse_fct_multi_affair(text: str) -> Optional[Dict[str, Any]]:
         if not isinstance(raw_ooda, dict):
             raw_ooda = {}
         ooda = {key: _normalize_str_list(raw_ooda.get(key)) for key in FCT_OODA_KEYS}
-        changes = _normalize_changes(item.get("changes"))
         turns = item.get("turns")
         if not isinstance(turns, list):
             turns = []
         turns = [int(t) for t in turns if isinstance(t, int) or str(t).isdigit()]
         hdl = str(item.get("hdl") or "").strip()
-        affairs.append({
+        affair: Dict[str, Any] = {
             "hdl": hdl,
             "turns": turns,
             "ooda": ooda,
-            "changes": changes,
             "_idx": idx,
-        })
+        }
+        # v2 旧库兼容：保留显式 changes；v3 新契约不再输出该字段
+        legacy_changes = _normalize_changes(item.get("changes"))
+        if legacy_changes:
+            affair["changes"] = legacy_changes
+        affairs.append(affair)
     if not affairs:
         return None
     return {"affairs": affairs}
@@ -125,11 +134,28 @@ def _fallback_hdl(affair: Dict[str, Any], idx: int) -> str:
     return f"事务{idx}"
 
 
+def _ooda_stage_changes(affair: Dict[str, Any]) -> List[Dict[str, str]]:
+    """决策 45：v3 记录的 OODA 阶段项即变更——派生 legacy changes（无 stage_tag）。
+
+    每条携带 `ooda`（阶段标签），供旧消费者按阶段归类；不补 stage_tag，
+    多事务模式不存在【已完成】等状态标签。
+    """
+    out: List[Dict[str, str]] = []
+    for stage in FCT_OODA_KEYS:
+        for item in affair.get("ooda", {}).get(stage, []):
+            if item:
+                out.append({"core_change": item, "ooda": stage})
+    return out
+
+
 def flatten_affairs_to_legacy(affairs: List[Dict[str, Any]]) -> Dict[str, Any]:
     """affairs[] → legacy Fct dict（保留 affairs 供新版消费）。
 
-    代码精确提取兜底：changes 扁平去重；OODA 四段映射旧字段；
-    再经 clean_increment 清洗出旧消费者需要的 stage_tag/ooda 标注。
+    代码精确提取兜底：
+    - v3（无显式 changes）：legacy changes 从 OODA 阶段项派生，只带
+      `ooda` 阶段标签、不带 stage_tag 状态标签；
+    - v2（旧库带 changes）：changes 原样保留（只读兼容），阶段项补差集。
+    OODA 四段映射旧字段，供旧消费者/embedding/回退链路不破。
     """
     normalized: List[Dict[str, Any]] = []
     for idx, affair in enumerate(affairs, start=1):
@@ -141,11 +167,18 @@ def flatten_affairs_to_legacy(affairs: List[Dict[str, Any]]) -> Dict[str, Any]:
     changes: List[Dict[str, str]] = []
     seen: set = set()
     for affair in normalized:
+        # v2 旧库兼容：显式 changes 原样保留（含旧 stage_tag）
         for change in affair.get("changes", []):
             core = change["core_change"]
             if core not in seen:
                 seen.add(core)
-                changes.append({"stage_tag": change["stage_tag"], "core_change": core})
+                changes.append(dict(change))
+        # v3 派生：OODA 阶段项补充未覆盖的变更
+        for change in _ooda_stage_changes(affair):
+            core = change["core_change"]
+            if core not in seen:
+                seen.add(core)
+                changes.append(change)
 
     legacy = {
         "changes": changes,
@@ -169,9 +202,9 @@ def flatten_affairs_to_legacy(affairs: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     # 注意：不走 clean_increment——它的「changes 已有条目时把 OODA 四段
     # 反哺为 stage_tag=待分类」会把多事务 changes 与 ooda 混在一起。
-    # parser 已逐字段校验，这里保持 affairs.changes 精确性。
+    # parser 已逐字段校验，这里保持 affairs.ooda 为唯一内容源。
     legacy["affairs"] = normalized
-    legacy["_fct_format"] = FCT_FORMAT_V2
+    legacy["_fct_format"] = FCT_FORMAT_V3
     return legacy
 
 

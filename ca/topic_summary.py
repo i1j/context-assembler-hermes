@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 
 TOPIC_SUMMARIZE_PROMPT = """Given the topic changes grouped by turn and OODA category, produce a structured summary.
 
-Each change may carry a [stage_tag] prefix: [已实施] [计划] [探讨] [已取消] [评估中]
+Legacy turns may carry a [stage_tag] prefix on changes: [已实施] [计划] [探讨] [已取消] [评估中].
+Turns carrying 「事务清单」 are already grouped by affair: each numbered item is an affair hdl, and the items under its OODA stage sections ARE its changes (no status labels there — do not invent them).
 
 Each turn may also have supplementary sections:
 - 额外信息 > 共识: decisions agreed upon that are not in the changes list
@@ -104,8 +105,10 @@ def _format_turns_for_prompt(turns_data: list[dict]) -> str:
         sections.append("")
         sections.append(f"# 轮次 {turn}")
 
-        # 决策 44 续：affairs 是 Fct 已识别的事务边界——先给 4B 编号清单
-        #（flash 习惯：1. xxx / 2. yyy 即事务 hdl），并逐事务给 ooda/changes。
+        # 决策 44/45：affairs 是 Fct 已识别的事务边界——先给 4B 编号清单
+        #（flash 习惯：1. xxx / 2. yyy 即事务 hdl），并逐事务给 OODA 阶段。
+        # v3 契约：OODA 阶段项即变更记录，无 changes/状态标签；
+        # 旧 v2 记录携带 changes 时才做兼容展示（读旧库数据）。
         if affairs:
             sections.append("## 事务清单（编号即候选 strand）")
             for i, affair in enumerate(affairs, start=1):
@@ -122,12 +125,12 @@ def _format_turns_for_prompt(turns_data: list[dict]) -> str:
                             sections.append(f"    - {item}")
                 a_changes = affair.get("changes") or []
                 if a_changes:
-                    sections.append("    ### changes")
+                    sections.append("    ### changes（旧版兼容）")
                     for c in a_changes:
                         stage = c.get("stage_tag") or ""
                         prefix = f"[{stage}] " if stage else ""
                         sections.append(f"    - {prefix}{c.get('core_change', '')}")
-            # affairs 已含完整 OODA，不再重复输出 legacy changes（效率优先）
+            # affairs 的 OODA 阶段已含完整变更，不再重复输出 legacy changes（效率优先）
             continue
 
         # 按 OODA 归类
