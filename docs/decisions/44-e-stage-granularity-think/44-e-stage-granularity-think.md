@@ -29,6 +29,7 @@
   - **事务内首段 think 且无 tool_calls → `card_kind='orient'`，零门槛入卡**（提问后首轮 think 是事务划分的关键线索，不套 800 字门槛；同一事务第二段及以后的无工具短 think 不入 orient）；
   - fin 轮 reasoning 且（raw_len≥800 或命中修正词表 或 同 turn 存在工具错误）→ `card_kind='conclusion'`（长首段 fin think 仍优先 conclusion）；
   - 其余短/非 fin reasoning 不入卡（捡选纪律）。
+  - 注：DSH K0 的卡规则确为 decision 需 tool_calls、conclusion 需 fin+门槛（think-collect.js:136-147），但 DSH 的 reasoning 原文始终保留在 session.jsonl.zstd（L2），卡片只是索引；Hermes 版由 turn_stream THINKING 行承担 L2 权威，故所有 THINKING 行先落盘、不受卡门槛影响，orient 卡仅是“事务首 think”的增量索引（不复制原文）。
 - R4.2a reasoning 提取全字段：`provider_data.reasoning_content` → 顶层 `.reasoning` → `provider_data.reasoning_details`（OpenRouter `summary/thinking/content/text`）/ `codex_reasoning_items` / `codex_message_items` / `anthropic_content_blocks` → 最后才扫 content 内联 `<think>/<thinking>/<thought>/<reasoning>` 标签；双源去重合并，绝不把普通 content 当 reasoning。
 - R4.3 `l1_json/l0_abstract/entities_json/embedding_json` 预留，`status='raw'`；L1 提炼后续走 7.2 模式（每次最多 1 次本地调用、失败保持 raw、fail-open），本轮 E 阶段不调 LLM。
 
