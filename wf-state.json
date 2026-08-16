@@ -2,15 +2,63 @@
   "schema_version": "1.0",
   "meta": {
     "object": "ca-e-stage-v7-granularity-think",
-    "current_state": "技术方案",
+    "current_state": "交付部署",
     "created": "2026-08-17T00:00:00",
     "task_line": "参考 DSH 版 CA 与 EFLR，改进 Hermes 版 E 阶段：近源细颗粒度数据+元数据+think 录入，支撑 Fct 多事务 OODA 摘要",
     "accept_line": "新增 5 hook 注册（13 总）；旧库幂等迁移；turn_stream 块级+元数据列；llm_calls/think_trace 落库；Fct 事务帧输入；全量 pytest（基线 1008+新增）全绿"
   },
   "transitions": [
-    {"from": null, "to": "需求开发", "type": "init", "rating": "", "ts": "2026-08-17T00:00:00", "note": "三调查员情报+接口契约补充调查完成"},
-    {"from": "需求开发", "to": "技术方案", "type": "forward", "rating": "复杂", "ts": "2026-08-17T00:10:00", "note": "需求/测试需求/技术方案落盘 docs/decisions/44"}
+    {
+      "from": null,
+      "to": "需求开发",
+      "type": "init",
+      "rating": "",
+      "ts": "2026-08-17T00:00:00",
+      "note": "三调查员情报+接口契约补充调查完成"
+    },
+    {
+      "from": "需求开发",
+      "to": "技术方案",
+      "type": "forward",
+      "rating": "复杂",
+      "ts": "2026-08-17T00:10:00",
+      "note": "需求/测试需求/技术方案落盘 docs/decisions/44"
+    },
+    {
+      "from": "技术方案",
+      "to": "代码构建",
+      "type": "forward",
+      "rating": "复杂",
+      "ts": "2026-08-16T22:39:58",
+      "note": "TDD：RED(6文件) → GREEN(纯函数+store+e/f改造)"
+    },
+    {
+      "from": "代码构建",
+      "to": "验证诊断",
+      "type": "forward",
+      "rating": "完整",
+      "ts": "2026-08-16T22:39:58",
+      "note": "全量 pytest 1124 passed / 1 skipped / 1 xfailed"
+    },
+    {
+      "from": "验证诊断",
+      "to": "交付部署",
+      "type": "forward",
+      "rating": "完整",
+      "ts": "2026-08-16T22:39:58",
+      "note": "git commit 0c8fa2c + 文档/plugin.yaml 同步"
+    }
   ],
-  "counters": {"bounce": 0, "adjudicate": 0, "fixloop": 0},
-  "exit_checks": {"last": {"state": "", "result": "", "ts": ""}}
+  "counters": {
+    "bounce": 0,
+    "adjudicate": 0,
+    "fixloop": 0
+  },
+  "exit_checks": {
+    "last": {
+      "state": "验证诊断",
+      "result": "PASS",
+      "ts": "2026-08-16T22:39:58"
+    }
+  }
 }
