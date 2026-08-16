@@ -757,14 +757,16 @@ class TestExtractTurnFct:
                  '{"affairs":[{"hdl":"连接池扩容","turns":[7],'
                  '"ooda":{"现象与问题":["池耗尽"],"背景与约束":[],'
                  '"决策与方案":["扩容到200"],"后续行动":[]}}],'
-                 '"_assemble_status":0}', "")]
+                 '"_assemble_status":0,"_fct_format":"v3-multi-affair-ooda"}', "")]
         out = mgr._extract_turn_fct(rows)
         assert "池耗尽" in out
         assert "扩容到200" in out
         assert "连接池扩容" in out
-        # 元数据不残留（装配数字 / 键名）
+        # 元数据不残留（装配数字 / 格式号 / 键名）
         assert "0" not in out.split()
+        assert "v3-multi-affair-ooda" not in out
         assert "_assemble_status" not in out
+        assert "_fct_format" not in out
         assert "ooda" not in out
 
     def test_json_v3_affairs_skips_legacy_change_ooda_tag(self, mgr):

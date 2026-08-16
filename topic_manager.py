@@ -75,10 +75,10 @@ def _jaccard_text(text_a: str, text_b: str) -> float:
 
 # Fct JSON 中与话题无关的元数据键：值不参与 Jaccard。
 #  - stage_tag: 固定状态集（已实施/计划/探讨…），跨话题恒定
-#  - ooda: 固定 4 标签（现象与问题/背景与约束/决策与方案/后续行动），跨话题恒定
-#  - _assemble_status / _truncated: 装配元数据
+#  - ooda: legacy changes 的固定 4 标签（决策 45 起 affairs 内的 ooda 值是内容，放行）
+#  - _assemble_status / _truncated / _fct_format: 装配元数据
 _FCT_METADATA_KEYS: frozenset = frozenset({
-    "stage_tag", "ooda", "_assemble_status", "_truncated",
+    "stage_tag", "ooda", "_assemble_status", "_truncated", "_fct_format",
 })
 
 
