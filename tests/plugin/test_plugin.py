@@ -326,7 +326,7 @@ class TestPostLlmCall:
     """post_llm_call_v5 钩子 — v5 E-stage 写入 + snapshot 恢复。"""
 
     def test_calls_process_turn_after_estage(self):
-        """v5: 先写 ass_fin (E-stage)，再 process_turn_async。"""
+        """v7：先写 fin（E-stage _on_final_response_v7），再 process_turn_f_stage。"""
         plugin = CAContextAssemblerPlugin()
         mock_engine = MagicMock()
         plugin._engine = mock_engine
@@ -334,16 +334,17 @@ class TestPostLlmCall:
         plugin._session_id = "test_sid"
         mock_engine._current_turn = 1
         mock_engine._seq_counter = {1: 0}
-        mock_engine.store.conn = MagicMock()
+        mock_engine._on_final_response_v7.side_effect = (
+            lambda **kw: mock_engine._seq_counter.__setitem__(1, 1))
 
-        with patch('ca.store.write_turn_v5') as mock_write:
-            plugin.post_llm_call_v5(
-                user_message="查文件",
-                assistant_response="查完了",
-                conversation_history=[{"role": "user", "content": "查文件"}],
-            )
-            mock_write.assert_called_once()
+        plugin.post_llm_call_v5(
+            user_message="查文件",
+            assistant_response="查完了",
+            conversation_history=[{"role": "user", "content": "查文件"}],
+        )
 
+        mock_engine._on_final_response_v7.assert_called_once_with(
+            session_id="test_sid", turn_index=1, assistant_response="查完了")
         # 然后 process_turn_f_stage（参数为 turn_index）
         mock_engine.process_turn_f_stage.assert_called_once_with(1, fin_seq=1)
 
@@ -530,23 +531,23 @@ class TestEngineRefreshAfterTtlCleanup:
 
 
 class TestRegister:
-    """register() 注册 8 个钩子。"""
+    """register() 注册 13 个钩子（决策 44：8 旧 + 5 近源采集）。"""
 
-    def test_registers_eight_hooks(self):
-        """register 注册 8 个钩子（v6.2：5 生命周期 + post_api + 2 工具轮）。"""
+    def test_registers_thirteen_hooks(self):
+        """register 注册 13 个钩子（v7：5 生命周期/轮级 + post_api + 2 工具轮 + 5 近源）。"""
         ctx = MagicMock()
         register(ctx)
 
-        assert ctx.register_hook.call_count == 8
+        assert ctx.register_hook.call_count == 13
         hook_names = [call[0][0] for call in ctx.register_hook.call_args_list]
-        assert "on_session_start" in hook_names
-        assert "on_session_end" in hook_names
-        assert "on_session_reset" in hook_names
-        assert "pre_llm_call" in hook_names
-        assert "post_llm_call" in hook_names
-        assert "post_api_request" in hook_names
-        assert "pre_tool_call" in hook_names
-        assert "post_tool_call" in hook_names
+        for name in (
+            "on_session_start", "on_session_end", "on_session_reset",
+            "pre_llm_call", "post_llm_call", "post_api_request",
+            "pre_tool_call", "post_tool_call",
+            "pre_api_request", "api_request_error",
+            "on_stream_start", "on_stream_delta", "on_stream_end",
+        ):
+            assert name in hook_names, f"missing hook: {name}"
 
 # ============================================================================
 # 从 test_circuit / test_lifecycle 合并的剩余唯一测试

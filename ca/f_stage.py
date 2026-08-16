@@ -83,6 +83,23 @@ class FStageMixin:
             elif role == "tool":
                 parts.append(f"Tool({tool_name}): {(content or '')[:200]}")
         elm_text = "\n".join(parts)
+
+        # ── 决策 44 R5：优先使用事务帧（[ooda_stage|block_type] 前缀），
+        # 历史行无 block_type 时自动回退 legacy 文本，保证兼容。 ──
+        if Config.FCT_STRUCTURED_INPUT:
+            try:
+                from .blocks import format_transaction_frames
+                from .store import read_incremental_elm_detailed
+                detailed_rows = read_incremental_elm_detailed(
+                    self.store, session_id, turn_index, fin_seq)
+                if detailed_rows and any(r.get("block_type") for r in detailed_rows):
+                    elm_text = format_transaction_frames(detailed_rows)
+                    for r in detailed_rows:
+                        if r.get("role") == "user" and r.get("Elm"):
+                            user_elm = r["Elm"]
+            except Exception as exc:
+                logger.warning("[CA_v7] transaction frames fallback: %s", exc)
+
         prev_fct = read_prev_fct(self.store, session_id, turn_index)
 
         # prev_fct 为空时（首轮/无历史摘要），提供格式完整但内容为空的 Fct JSON，

@@ -73,6 +73,12 @@ class Config:
     DB_BUSY_TIMEOUT_MS: ClassVar[int] = int(os.getenv("CA_DB_BUSY_TIMEOUT", "3000"))
     DB_IDLE_TIMEOUT_SECONDS: ClassVar[int] = int(os.getenv("CA_DB_IDLE_TIMEOUT", "300"))
 
+    # 决策 44：E 阶段近源采集与 Fct 事务帧
+    CA_STREAM_OBSERVE_ENABLED: ClassVar[bool] = os.getenv("CA_STREAM_OBSERVE_ENABLED", "1") == "1"
+    FCT_STRUCTURED_INPUT: ClassVar[bool] = os.getenv("CA_FCT_STRUCTURED_INPUT", "1") == "1"
+    THINK_MIN_REASONING_CHARS: ClassVar[int] = int(os.getenv("CA_THINK_MIN_REASONING_CHARS", "800"))
+    THINK_PREVIEW_CHARS: ClassVar[int] = int(os.getenv("CA_THINK_PREVIEW_CHARS", "160"))
+
     CACHE_MAX_SESSIONS: ClassVar[int] = int(os.getenv("CA_CACHE_MAX_SESSIONS", "50"))
     SESSION_TTL: ClassVar[int] = int(os.getenv("CA_SESSION_TTL", "1800"))
 

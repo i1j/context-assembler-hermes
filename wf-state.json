@@ -1,56 +1,16 @@
 {
   "schema_version": "1.0",
   "meta": {
-    "object": "ca-ce-shell-audit",
-    "current_state": "交付部署",
-    "created": "2026-08-16T00:18:47",
-    "task_line": "检查 CA 插件当前代码（CE 壳 select_context 激活等未提交改动）是否符合设计要求（AGENTS.md 关键约束 + 设计文档），修正发现的 bug",
-    "accept_line": "全量 pytest 通过（基线 1008 passed 之外无新增失败）；修正项逐条有代码依据与测试覆盖；与 AGENTS.md 关键约束无冲突"
+    "object": "ca-e-stage-v7-granularity-think",
+    "current_state": "技术方案",
+    "created": "2026-08-17T00:00:00",
+    "task_line": "参考 DSH 版 CA 与 EFLR，改进 Hermes 版 E 阶段：近源细颗粒度数据+元数据+think 录入，支撑 Fct 多事务 OODA 摘要",
+    "accept_line": "新增 5 hook 注册（13 总）；旧库幂等迁移；turn_stream 块级+元数据列；llm_calls/think_trace 落库；Fct 事务帧输入；全量 pytest（基线 1008+新增）全绿"
   },
   "transitions": [
-    {
-      "from": null,
-      "to": "需求开发",
-      "type": "init",
-      "rating": "",
-      "ts": "2026-08-16T00:18:47",
-      "note": "init"
-    },
-    {
-      "from": "需求开发",
-      "to": "代码构建",
-      "type": "forward",
-      "rating": "纯代码",
-      "ts": "2026-08-16T00:33:51",
-      "note": ""
-    },
-    {
-      "from": "代码构建",
-      "to": "验证诊断",
-      "type": "forward",
-      "rating": "需验证",
-      "ts": "2026-08-16T01:01:33",
-      "note": ""
-    },
-    {
-      "from": "验证诊断",
-      "to": "交付部署",
-      "type": "forward",
-      "rating": "完整",
-      "ts": "2026-08-16T01:01:48",
-      "note": ""
-    }
+    {"from": null, "to": "需求开发", "type": "init", "rating": "", "ts": "2026-08-17T00:00:00", "note": "三调查员情报+接口契约补充调查完成"},
+    {"from": "需求开发", "to": "技术方案", "type": "forward", "rating": "复杂", "ts": "2026-08-17T00:10:00", "note": "需求/测试需求/技术方案落盘 docs/decisions/44"}
   ],
-  "counters": {
-    "bounce": 0,
-    "adjudicate": 0,
-    "fixloop": 0
-  },
-  "exit_checks": {
-    "last": {
-      "state": "验证诊断",
-      "result": "PASS",
-      "ts": "2026-08-16T01:01:48"
-    }
-  }
+  "counters": {"bounce": 0, "adjudicate": 0, "fixloop": 0},
+  "exit_checks": {"last": {"state": "", "result": "", "ts": ""}}
 }

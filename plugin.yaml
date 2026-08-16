@@ -1,10 +1,12 @@
 name: ca_assembler
-version: 6.0.0
+version: 6.1.0
 description: >
-  ContextAssembler v6.0 — Hermes 插件 + ContextEngine ABC 壳，
+  ContextAssembler v6.1 — Hermes 插件 + ContextEngine ABC 壳，
   增量 Elm/Fct/Hdl 分层摘要 + topic-aware 三级替换（ACT/REL/FAR）
-  + 角色队列匹配 + E-stage 写即落盘 + 话题分割（Jaccard）
-  + F‑stage 异步补全 + CE 路压缩（手动 /compress）。
+  + 角色队列匹配 + E-stage 写即落盘（决策 44：块级 OODA 打标、
+  近源 API 元数据、llm_calls/think_trace、流式旁路观测）
+  + 话题分割（Jaccard）+ F‑stage 事务帧多事务 OODA 支撑
+  + CE 路压缩（手动 /compress）。
 pip_dependencies:
   - numpy
   - urllib3
@@ -20,6 +22,11 @@ hooks:
   - post_api_request
   - pre_tool_call
   - post_tool_call
+  - pre_api_request
+  - api_request_error
+  - on_stream_start
+  - on_stream_delta
+  - on_stream_end
 
 # Hermes UI 元数据；运行时配置经 env（CA_*）/settings.yaml，此 schema 未接入消费。
 # 默认值与 ca/config.py 实际生效值对齐（BUG-13）。
@@ -52,6 +59,18 @@ config_schema:
   llm_timeout:
     type: integer
     default: 120
+  stream_observe_enabled:
+    type: boolean
+    default: true
+  fct_structured_input:
+    type: boolean
+    default: true
+  think_min_reasoning_chars:
+    type: integer
+    default: 800
+  think_preview_chars:
+    type: integer
+    default: 160
   debug:
     type: boolean
     default: false

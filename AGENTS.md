@@ -2,7 +2,7 @@
 
 > **首读** → [`docs/INDEX.md`](docs/INDEX.md)（架构关系图 + 全量索引）
 > 双维文档体系：`docs/architecture/`（空间：当前系统组件）+ `docs/decisions/`（时间：决策树）
-> **版本 v6.0（方向 B）** | `__init__.py: CE v5.10` | `ca/__init__.py: SessionManager`
+> **版本 v6.1（方向 B + 决策 44）** | `__init__.py: CE v5.10` | `ca/__init__.py: SessionManager`
 
 ## 项目结构
 
@@ -15,7 +15,7 @@ plugins/ca_assembler/
 ├── ca/
 │   ├── __init__.py           # ContextAssembler + SessionManager
 │   ├── a_stage.py            # A-stage: _build_conv_history_v6（方向 B）
-│   ├── e_stage.py            # E-stage: 写即落盘（5 hooks）
+│   ├── e_stage.py            # E-stage: 写即落盘（13 hooks；决策 44 块级/近源/think）
 │   ├── f_stage.py            # F-stage: 异步 LLM 摘要（fin 粒度）
 │   ├── store.py              # turn_stream SQLite 存储
 │   ├── cache.py              # AssemblyCache
@@ -56,7 +56,7 @@ plugins/ca_assembler/
 
 ## 注册接口
 
-`register(ctx)` 注册 8 个 Hermes hooks（5 生命周期 + 3 工具轮数据采集），详见 `docs/architecture/03-e-stage/03-e-stage.md`。
+`register(ctx)` 注册 13 个 Hermes hooks（决策 44：8 旧 + `pre_api_request`/`api_request_error`/`on_stream_start`/`on_stream_delta`/`on_stream_end`），详见 `docs/architecture/03-e-stage/03-e-stage.md` 与 `docs/decisions/44-e-stage-granularity-think/44-e-stage-granularity-think.md`。
 
 ## 初始化检查清单
 

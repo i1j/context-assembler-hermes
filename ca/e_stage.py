@@ -26,8 +26,22 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .config import Config
 from .post_process import _safe_truncate
-from .store import write_turn_v5
+from .store import (
+    read_turn_thinking_rows_v1,
+    read_turn_tool_rows_v1,
+    read_turn_user_question_v1,
+    write_llm_call_v1,
+    write_think_card_v1,
+    write_turn_v5,
+)
 from .tool_summarizer import ToolSummarizer
+from .blocks import AGENT_REPLY, THINKING, TOOL_CALL_REQUEST, TOOL_CALL_RESULT, USER_MESSAGE
+from .meta_marker import extract_request_meta, extract_response_meta
+from .think_collect import (
+    classify_card_kind,
+    has_tool_error_signal,
+    make_think_card,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +211,305 @@ class EStageMixin:
         self._seq_counter[turn] += len(tool_defs)
         logger.info("[CA_v5] _on_api_response: wrote %d tool placeholders", len(tool_defs))
 
+    # ═══════════════════════════════════════════════════════════════
+    # 决策 44 — E 阶段 v7：近源细颗粒度 + llm_calls + think_trace
+    # ═══════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _code_summary_for(text: str) -> Tuple[str, str]:
+        """thought/content 的代码级 Fct/Hdl（零 LLM，保守兜底）。"""
+        fct_text = ""
+        try:
+            fct_text = ToolSummarizer.generate_group_summary(text)
+        except Exception:
+            pass
+        if not fct_text.strip():
+            fct_text = "空"
+        hdl_text = ""
+        try:
+            raw = (text or "").strip()
+            for prefix in ToolSummarizer._TRANSITION_PREFIXES:
+                if raw.startswith(prefix):
+                    raw = raw[len(prefix):].strip()
+                    break
+            hdl_text = _safe_truncate(raw, max_len=60) if raw else "空"
+        except Exception:
+            hdl_text = "空"
+        return fct_text, hdl_text or "空"
+
+    def _on_pre_api_request_v7(self, **kwargs: Any) -> None:
+        """pre_api_request：记录请求侧元数据（写 llm_calls 时合并）。"""
+        self._pending_request_meta = extract_request_meta(kwargs or {})
+
+    def _on_api_request_error_v7(self, **kwargs: Any) -> None:
+        """api_request_error：每次失败尝试写一条 failed llm_calls。"""
+        kwargs = kwargs or {}
+        request_id = kwargs.get("api_request_id", "") or (
+            f"{self._session_id}:api:{kwargs.get('api_call_count', 0)}")
+        error_obj = kwargs.get("error") or {}
+        failure = {
+            "type": error_obj.get("type", ""),
+            "message": error_obj.get("message", ""),
+            "status_code": kwargs.get("status_code"),
+            "retry_count": kwargs.get("retry_count"),
+            "reason": kwargs.get("reason"),
+        }
+        write_llm_call_v1(
+            self.store, self._session_id, request_id,
+            request_seq=kwargs.get("api_call_count"),
+            turn=self._current_turn,
+            step=kwargs.get("api_call_count"),
+            provider=kwargs.get("provider"),
+            model=kwargs.get("model"),
+            base_url=kwargs.get("base_url"),
+            api_mode=kwargs.get("api_mode"),
+            finish_kind="error",
+            duration_ms=int(kwargs.get("api_duration", 0) * 1000)
+            if isinstance(kwargs.get("api_duration"), (int, float)) else None,
+            failure_json=json.dumps(failure, ensure_ascii=False),
+            status="failed",
+        )
+
+    def _on_api_response_v7(
+        self,
+        *,
+        api_request_id: str = "",
+        assistant_message: Any = None,
+        api_call_count: int = 0,
+        turn_index: int = 0,
+        finish_reason: str = "stop",
+        usage: Optional[Dict] = None,
+        provider: str = "",
+        model: str = "",
+        base_url: str = "",
+        api_mode: str = "",
+        api_duration: Optional[float] = None,
+        message_count: Optional[int] = None,
+        **kwargs: Any,
+    ) -> None:
+        """决策 44：每 API 调用拆块写盘 + llm_calls + decision 思考卡。
+
+        - reasoning → THINKING 行（decide）；content → AGENT_REPLY 行（decide）；
+        - 工具占位 → tool_call_request 行（act）；
+        - 纯对话 stop 不写 turn_stream（fin 由 post_llm_call 写），但仍写 llm_calls。
+        """
+        turn = turn_index
+        meta = extract_response_meta({
+            "api_request_id": api_request_id,
+            "provider": provider,
+            "model": model,
+            "base_url": base_url,
+            "api_mode": api_mode,
+            "api_call_count": api_call_count,
+            "api_duration": api_duration,
+            "finish_reason": finish_reason,
+            "usage": usage,
+            "message_count": message_count,
+        }, assistant_message)
+        request_id = meta["request_id"] or (
+            f"{self._session_id}:api:{api_call_count or 1}")
+        reasoning_text = meta["reasoning_text"]
+        content_text = meta["content_text"]
+        tool_defs = meta["tool_calls"]
+        has_tool_turn = bool(tool_defs) or finish_reason == "tool_calls"
+
+        # 保存最近一次 API 元数据：post_llm_call fin 行回填用
+        self._last_api_meta = meta
+        self._last_api_meta["request_id"] = request_id
+
+        # 流式 pending 计数由插件层合并进 kwargs（乱序安全：max 合并）
+        pending = kwargs.get("stream_pending") or {}
+        stream_reasoning = int(pending.get("reasoning_chars") or 0)
+        stream_text = int(pending.get("text_chars") or 0)
+        stream_chunks = int(pending.get("chunk_count") or 0)
+
+        seq = self._seq_counter.get(turn, 0)
+        first_seq = seq + 1
+
+        # ── 拆块写 turn_stream ──
+        if has_tool_turn or reasoning_text:
+            if reasoning_text:
+                block_type, elm = THINKING, reasoning_text
+            elif content_text:
+                block_type, elm = AGENT_REPLY, content_text
+            else:
+                block_type, elm = TOOL_CALL_REQUEST, ""
+            seq += 1
+            fct_text, hdl_text = self._code_summary_for(elm)
+            # 无工具轮单独出现 reasoning 时用合成 finish_reason，避免 A-stage
+            # 把 THINKING 行误判为 fin（stop 是 fin 判定锚）。
+            row_finish_reason = finish_reason if has_tool_turn else "reasoning"
+            write_turn_v5(
+                self.store, self._session_id, turn, seq,
+                role="assistant", elm_text=elm,
+                tool_calls_json=json.dumps(tool_defs, ensure_ascii=False)
+                if tool_defs else None,
+                finish_reason=row_finish_reason,
+                usage_prompt_tokens=meta["usage_prompt_tokens"],
+                usage_completion_tokens=meta["usage_completion_tokens"],
+                block_type=block_type,
+                ooda_stage="decide" if block_type in (THINKING, AGENT_REPLY) else "act",
+                request_id=request_id,
+                provider=meta["provider"],
+                model=meta["model"],
+                reasoning_chars=len(reasoning_text) if block_type == THINKING else 0,
+                text_chars=len(content_text) if block_type == AGENT_REPLY else 0,
+                fct_text=fct_text,
+                hdl_text=hdl_text,
+                written_at=time.time(),
+            )
+            self._seq_counter[turn] = seq
+            thinking_seq = seq if block_type == THINKING else None
+
+            # reasoning 与 content 同响应 → 分离第二块（EFLR 边界规则）
+            if reasoning_text and content_text:
+                seq += 1
+                fct2, hdl2 = self._code_summary_for(content_text)
+                write_turn_v5(
+                    self.store, self._session_id, turn, seq,
+                    role="assistant", elm_text=content_text,
+                    finish_reason=row_finish_reason,
+                    block_type=AGENT_REPLY,
+                    ooda_stage="decide",
+                    request_id=request_id,
+                    provider=meta["provider"],
+                    model=meta["model"],
+                    text_chars=len(content_text),
+                    fct_text=fct2,
+                    hdl_text=hdl2,
+                    written_at=time.time(),
+                )
+                self._seq_counter[turn] = seq
+        else:
+            thinking_seq = None
+
+        # 工具占位（tool_call_request / act）
+        for i, tc_def in enumerate(tool_defs, start=1):
+            tool_seq = self._seq_counter[turn] + i
+            tc_id = tc_def["id"]
+            write_turn_v5(
+                self.store, self._session_id, turn, tool_seq,
+                role="tool", elm_text="",
+                tool_name=tc_def.get("function", {}).get("name", ""),
+                tool_call_id=tc_id,
+                status="pending",
+                block_type=TOOL_CALL_REQUEST,
+                ooda_stage="act",
+                request_id=request_id,
+                provider=meta["provider"],
+                model=meta["model"],
+                written_at=time.time(),
+            )
+            self._tool_seq_map[tc_id] = (turn, tool_seq)
+        if tool_defs:
+            self._seq_counter[turn] += len(tool_defs)
+
+        # ── llm_calls（每次 API 调用一行；stream 计数 max 合并）──
+        pending_req = getattr(self, "_pending_request_meta", None) or {}
+        input_chars = int(pending_req.get("input_chars") or kwargs.get("input_chars") or 0)
+        usage_json = json.dumps(meta["usage"], ensure_ascii=False, allow_nan=False) \
+            if meta["usage"] else None
+        write_llm_call_v1(
+            self.store, self._session_id, request_id,
+            request_seq=api_call_count or pending_req.get("api_call_count"),
+            turn=turn,
+            step=api_call_count or pending_req.get("api_call_count"),
+            seq=first_seq,
+            provider=meta["provider"],
+            model=meta["model"],
+            base_url=meta["base_url"],
+            api_mode=meta["api_mode"],
+            messages_count=message_count if message_count is not None
+            else pending_req.get("messages_count"),
+            input_chars=input_chars,
+            reasoning_chars=max(meta["reasoning_chars"], stream_reasoning),
+            text_chars=max(meta["text_chars"], stream_text),
+            chunk_count=stream_chunks,
+            tool_calls_json=meta["tool_calls_json"] if tool_defs else None,
+            usage_json=usage_json,
+            finish_kind=finish_reason,
+            duration_ms=meta["duration_ms"],
+            status="completed",
+        )
+
+        # ── decision 思考卡（reasoning + tool_calls，任意长度）──
+        if reasoning_text and tool_defs and thinking_seq is not None:
+            question = read_turn_user_question_v1(self.store, self._session_id, turn)
+            card = make_think_card(
+                session_id=self._session_id,
+                turn=turn,
+                seq=thinking_seq,
+                reasoning_text=reasoning_text,
+                tool_calls=tool_defs,
+                card_kind="decision",
+                question_text=question,
+                step=api_call_count or pending_req.get("api_call_count"),
+            )
+            write_think_card_v1(self.store, card)
+            logger.info("[CA_v7] think decision card written turn=%d seq=%d", turn, thinking_seq)
+
+    def _on_final_response_v7(
+        self,
+        *,
+        session_id: str = "",
+        turn_index: int = 0,
+        assistant_response: str = "",
+    ) -> None:
+        """post_llm_call：写 fin 行（agent_reply/decide/is_fin=1）+ conclusion 思考卡。"""
+        turn = turn_index
+        meta = getattr(self, "_last_api_meta", None) or {}
+        seq = self._seq_counter.get(turn, 0) + 1
+        self._seq_counter[turn] = seq
+        write_turn_v5(
+            self.store, session_id or self._session_id, turn, seq,
+            role="assistant", elm_text=assistant_response,
+            finish_reason="stop",
+            usage_prompt_tokens=meta.get("usage_prompt_tokens"),
+            usage_completion_tokens=meta.get("usage_completion_tokens"),
+            block_type=AGENT_REPLY,
+            ooda_stage="decide",
+            request_id=meta.get("request_id"),
+            provider=meta.get("provider"),
+            model=meta.get("model"),
+            text_chars=len(assistant_response),
+            is_fin=1,
+            written_at=time.time(),
+        )
+        logger.info("[CA_v7] _on_final_response: wrote fin turn=%d seq=%d", turn, seq)
+
+        # ── conclusion 思考卡（DSH K0 门槛）──
+        try:
+            thinking_rows = read_turn_thinking_rows_v1(self.store, self._session_id, turn)
+            tool_rows = read_turn_tool_rows_v1(self.store, self._session_id, turn)
+            tool_error = has_tool_error_signal(tool_rows, turn)
+            question = read_turn_user_question_v1(self.store, self._session_id, turn)
+            for row in thinking_rows:
+                reasoning_text = row.get("Elm") or ""
+                if not reasoning_text:
+                    continue
+                kind = classify_card_kind(
+                    raw_len=len(reasoning_text),
+                    tool_calls=[],
+                    is_fin=True,
+                    tool_error=tool_error,
+                    reasoning_text=reasoning_text,
+                )
+                if kind == "conclusion":
+                    card = make_think_card(
+                        session_id=self._session_id,
+                        turn=turn,
+                        seq=seq,
+                        reasoning_text=reasoning_text,
+                        tool_calls=[],
+                        card_kind="conclusion",
+                        question_text=question,
+                    )
+                    write_think_card_v1(self.store, card)
+                    logger.info("[CA_v7] think conclusion card written turn=%d seq=%d",
+                                turn, seq)
+        except Exception as exc:
+            logger.warning("[CA_v7] conclusion think card failed: %s", exc)
+
     def _on_pre_tool_call_v5(
         self,
         *,
@@ -254,12 +567,34 @@ class EStageMixin:
         if "空" in (fct_str, hdl_text):
             logger.debug("[CA_v5] _on_post_tool_call: empty Fct/Hdl, using '空' fallback turn=%d seq=%d", turn, seq)
 
+        # 保留占位行已写入的近源元数据（provider/model 不回退为 NULL）
+        placeholder_meta = (None, None, None)
+        try:
+            cur = self.store.conn.execute(
+                "SELECT request_id, provider, model FROM turn_stream "
+                "WHERE session_id=? AND turn=? AND seq=?",
+                (self._session_id, turn, seq),
+            )
+            placeholder_meta = cur.fetchone() or (None, None, None)
+        except Exception:
+            pass
+        row_request_id = api_request_id or placeholder_meta[0]
+        row_provider = placeholder_meta[1]
+        row_model = placeholder_meta[2]
+
         write_turn_v5(
             self.store, self._session_id, turn, seq,
             role="tool", elm_text=content,
             tool_name=tool_name, tool_call_id=tool_call_id,
             args_json=_safe_json_dump(args) if args is not None else None,
             status=status, duration_ms=duration_ms,
+            block_type=TOOL_CALL_RESULT,
+            ooda_stage="observe",
+            request_id=row_request_id,
+            provider=row_provider,
+            model=row_model,
+            result_chars=len(content),
+            error_text=(error_message or error_type) if status not in (None, "ok") else None,
             fct_text=fct_str, hdl_text=hdl_text,
             written_at=time.time(),
         )

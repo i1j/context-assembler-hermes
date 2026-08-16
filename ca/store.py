@@ -69,6 +69,12 @@ class SQLiteStore:
         except Exception:
             pass
 
+        # 决策 44：v7 细颗粒度列增量迁移（缺列才 ALTER）
+        try:
+            _migrate_turn_stream_v7(self._local.conn)
+        except Exception:
+            pass
+
         self._local.last_used = now
         return self._local.conn
 
@@ -146,9 +152,113 @@ CREATE TABLE IF NOT EXISTS turn_stream (
     Fct       TEXT,
     Hdl       TEXT,
 
+    -- 决策 44：细颗粒度块模型 + 近源元数据（旧库经 _migrate_turn_stream_v7 补列）
+    block_type  TEXT,
+    ooda_stage  TEXT,
+    request_id  TEXT,
+    provider    TEXT,
+    model       TEXT,
+    reasoning_chars INTEGER,
+    text_chars       INTEGER,
+    result_chars     INTEGER,
+    error_text       TEXT,
+    is_fin           INTEGER DEFAULT 0,
+    metadata_incomplete INTEGER DEFAULT 0,
+
     PRIMARY KEY (session_id, turn, seq)
 );
+
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    request_seq INTEGER,
+    turn INTEGER,
+    step INTEGER,
+    seq INTEGER,
+    provider TEXT,
+    model TEXT,
+    purpose TEXT,
+    reasoning_effort TEXT,
+    base_url TEXT,
+    api_mode TEXT,
+    messages_count INTEGER DEFAULT 0,
+    input_chars INTEGER DEFAULT 0,
+    reasoning_chars INTEGER DEFAULT 0,
+    text_chars INTEGER DEFAULT 0,
+    chunk_count INTEGER DEFAULT 0,
+    tool_calls_json TEXT,
+    usage_json TEXT,
+    finish_kind TEXT,
+    duration_ms INTEGER,
+    failure_json TEXT,
+    status TEXT NOT NULL DEFAULT 'streaming',
+    created_at REAL,
+    UNIQUE(session_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_request_id ON llm_calls(request_id);
+
+CREATE TABLE IF NOT EXISTS think_trace (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    turn INTEGER,
+    step INTEGER,
+    seq INTEGER,
+    txn_id INTEGER,
+    topic_id INTEGER,
+    source_kind TEXT NOT NULL DEFAULT 'cloud_think',
+    card_kind TEXT,
+    call_id TEXT,
+    tool_name TEXT,
+    question_text TEXT NOT NULL DEFAULT '',
+    l0_abstract TEXT,
+    l1_json TEXT,
+    entities_json TEXT,
+    embedding_json TEXT,
+    raw_len INTEGER NOT NULL DEFAULT 0,
+    preview TEXT,
+    status TEXT NOT NULL DEFAULT 'raw',
+    created_at REAL,
+    updated_at REAL,
+    UNIQUE(session_id, turn, seq)
+);
 """
+
+# 决策 44：turn_stream v7 增量列（幂等 ALTER TABLE 迁移）
+_TURN_STREAM_V7_COLUMNS = [
+    ("block_type", "TEXT"),
+    ("ooda_stage", "TEXT"),
+    ("request_id", "TEXT"),
+    ("provider", "TEXT"),
+    ("model", "TEXT"),
+    ("reasoning_chars", "INTEGER"),
+    ("text_chars", "INTEGER"),
+    ("result_chars", "INTEGER"),
+    ("error_text", "TEXT"),
+    ("is_fin", "INTEGER DEFAULT 0"),
+    ("metadata_incomplete", "INTEGER DEFAULT 0"),
+]
+
+
+def _migrate_turn_stream_v7(conn: sqlite3.Connection) -> None:
+    """旧库增量补列（缺列才 ALTER；PRAGMA user_version 门控幂等）。"""
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version >= 1:
+            return
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(turn_stream)")}
+        missing = [name for name, _ in _TURN_STREAM_V7_COLUMNS if name not in cols]
+        changed = False
+        for name, decl in _TURN_STREAM_V7_COLUMNS:
+            if name not in cols:
+                conn.execute(f"ALTER TABLE turn_stream ADD COLUMN {name} {decl}")
+                changed = True
+        conn.execute("PRAGMA user_version = 1")
+        if changed:
+            conn.commit()
+            logger.info("[CA_v7] turn_stream migrated: added columns %s", missing)
+    except sqlite3.Error as exc:
+        logger.warning("[CA_v7] turn_stream v7 migration failed: %s", exc)
 
 
 def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
@@ -165,7 +275,18 @@ def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
                   biz_category: Optional[str] = None,
                   written_at: Optional[float] = None,
                   fct_text: Optional[str] = None,
-                  hdl_text: Optional[str] = None) -> bool:
+                  hdl_text: Optional[str] = None,
+                  block_type: Optional[str] = None,
+                  ooda_stage: Optional[str] = None,
+                  request_id: Optional[str] = None,
+                  provider: Optional[str] = None,
+                  model: Optional[str] = None,
+                  reasoning_chars: Optional[int] = None,
+                  text_chars: Optional[int] = None,
+                  result_chars: Optional[int] = None,
+                  error_text: Optional[str] = None,
+                  is_fin: Optional[int] = None,
+                  metadata_incomplete: Optional[int] = None) -> bool:
     """v5.0 INSERT OR REPLACE + 同内容重放跳过（02-store 行不可变 / BUG-09 泛化）。
 
     - 同 (session_id, turn, seq) 且「核心列」完全一致 → 跳过，不覆盖已回填的
@@ -173,16 +294,25 @@ def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
     - Fct/Hdl 允许被本次参数覆盖（回填路径仍走本函数时生效）。
     - 核心列不同 → 保持既有 INSERT OR REPLACE 覆盖语义（引擎恢复/内容变更）。
     - written_at 不参与比较（时间戳天然不同，否则重放永不命中）。
+    - 决策 44：核心列扩展到 v7 新列；旧行（迁移前写入）以 NULL 补齐比较。
     """
     if written_at is None:
         written_at = time.time()
+    if is_fin is None:
+        is_fin = None
+    else:
+        is_fin = 1 if is_fin else 0
     core_values = (
         role, elm_text,
         tool_name, tool_call_id, args_json, status, duration_ms,
         tool_calls_json, finish_reason,
         usage_prompt_tokens, usage_completion_tokens,
         biz_category,
+        block_type, ooda_stage, request_id, provider, model,
+        reasoning_chars, text_chars, result_chars, error_text,
+        is_fin, metadata_incomplete,
     )
+    _CORE_LEN = len(core_values)
     for attempt in range(Config.DB_MAX_RETRY):
         try:
             conn = store.conn
@@ -191,7 +321,10 @@ def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
                     """SELECT role, Elm, tool_name, tool_call_id, args_json,
                               status, duration_ms, tool_calls_json, finish_reason,
                               usage_prompt_tokens, usage_completion_tokens,
-                              biz_category, Fct, Hdl
+                              biz_category, block_type, ooda_stage, request_id,
+                              provider, model, reasoning_chars, text_chars,
+                              result_chars, error_text, is_fin, metadata_incomplete,
+                              Fct, Hdl
                        FROM turn_stream
                        WHERE session_id=? AND turn=? AND seq=?""",
                     (session_id, turn, seq),
@@ -199,8 +332,8 @@ def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
             except sqlite3.Error:
                 old = None
             if old is not None:
-                old_core = old[:12]
-                old_fct, old_hdl = old[12], old[13]
+                old_core = tuple(old[:_CORE_LEN])
+                old_fct, old_hdl = old[_CORE_LEN], old[_CORE_LEN + 1]
                 if old_core == core_values and (
                         (fct_text is None or fct_text == old_fct)
                         and (hdl_text is None or hdl_text == old_hdl)):
@@ -212,14 +345,21 @@ def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
                     tool_calls_json, finish_reason,
                     usage_prompt_tokens, usage_completion_tokens,
                     biz_category, written_at,
-                    Fct, Hdl)
-                   VALUES (?,?,?,?,?, ?,?,?,?,?, ?,?,?,?, ?,?,?,?)""",
+                    Fct, Hdl,
+                    block_type, ooda_stage, request_id, provider, model,
+                    reasoning_chars, text_chars, result_chars, error_text,
+                    is_fin, metadata_incomplete)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                           ?,?,?,?,?,?,?,?,?,?,?)""",
                 (session_id, turn, seq, role, elm_text,
                  tool_name, tool_call_id, args_json, status, duration_ms,
                  tool_calls_json, finish_reason,
                  usage_prompt_tokens, usage_completion_tokens,
                  biz_category, written_at,
-                 fct_text, hdl_text),
+                 fct_text, hdl_text,
+                 block_type, ooda_stage, request_id, provider, model,
+                 reasoning_chars, text_chars, result_chars, error_text,
+                 is_fin, metadata_incomplete),
             )
             conn.commit()
             return True
@@ -362,7 +502,10 @@ def read_turn_stream_all(store, session_id: str) -> list:
     Returns list of dicts with keys:
       turn, seq, role, Elm, tool_name, tool_call_id, args_json, status, duration_ms,
       tool_calls_json, finish_reason, usage_prompt_tokens, usage_completion_tokens,
-      biz_category, written_at, Fct, Hdl
+      biz_category, written_at, Fct, Hdl,
+      block_type, ooda_stage, request_id, provider, model,
+      reasoning_chars, text_chars, result_chars, error_text, is_fin,
+      metadata_incomplete
     Used by CacheBuilder.build to warm cache from DB.
     """
     try:
@@ -370,14 +513,287 @@ def read_turn_stream_all(store, session_id: str) -> list:
             "SELECT turn, seq, role, Elm, tool_name, tool_call_id, args_json, "
             "       status, duration_ms, tool_calls_json, finish_reason, "
             "       usage_prompt_tokens, usage_completion_tokens, "
-            "       biz_category, written_at, Fct, Hdl "
+            "       biz_category, written_at, Fct, Hdl, "
+            "       block_type, ooda_stage, request_id, provider, model, "
+            "       reasoning_chars, text_chars, result_chars, error_text, "
+            "       is_fin, metadata_incomplete "
             "FROM turn_stream WHERE session_id=? ORDER BY turn, seq",
             (session_id,),
         )
         cols = ["turn", "seq", "role", "Elm", "tool_name", "tool_call_id", "args_json",
                 "status", "duration_ms", "tool_calls_json", "finish_reason",
                 "usage_prompt_tokens", "usage_completion_tokens",
-                "biz_category", "written_at", "Fct", "Hdl"]
+                "biz_category", "written_at", "Fct", "Hdl",
+                "block_type", "ooda_stage", "request_id", "provider", "model",
+                "reasoning_chars", "text_chars", "result_chars", "error_text",
+                "is_fin", "metadata_incomplete"]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    except sqlite3.Error:
+        return []
+
+
+# ═══════════════════════════════════════════════════════════
+# 决策 44 — v7 细颗粒度 reader / llm_calls / think_trace
+# ═══════════════════════════════════════════════════════════
+
+def read_incremental_elm_detailed(store, session_id: str, turn: int, fin_seq: int) -> list:
+    """F-stage v7 输入：读增量行并附带决策 44 元数据（dict 行）。
+
+    与 read_incremental_elm 相同的窗口语义：
+    user 行 + 上次 fin 之后到 fin_seq 之间的所有行。
+    返回每行 dict：seq/role/Elm/tool_name/tool_call_id/block_type/ooda_stage/
+    request_id/provider/model/finish_reason/tool_calls_json/result_chars/
+    error_text/is_fin/Fct/Hdl。
+    """
+    try:
+        cur = store.conn.execute(
+            "SELECT turn, seq, role, Elm, tool_name, tool_call_id, "
+            "       block_type, ooda_stage, request_id, provider, model, "
+            "       finish_reason, tool_calls_json, result_chars, error_text, "
+            "       is_fin, Fct, Hdl "
+            "FROM turn_stream WHERE session_id=? AND turn=? ORDER BY seq",
+            (session_id, turn),
+        )
+        cols = ["turn", "seq", "role", "Elm", "tool_name", "tool_call_id",
+                "block_type", "ooda_stage", "request_id", "provider", "model",
+                "finish_reason", "tool_calls_json", "result_chars", "error_text",
+                "is_fin", "Fct", "Hdl"]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+        fin_seqs = {
+            r["seq"] for r in rows
+            if r["role"] == "assistant" and r["finish_reason"] == "stop"
+        }
+        last_fin_seq = -1
+        for r in rows:
+            if r["seq"] < fin_seq and r["seq"] in fin_seqs:
+                last_fin_seq = r["seq"]
+        result = []
+        for r in rows:
+            if r["role"] == "user":
+                result.append(r)
+            elif last_fin_seq < r["seq"] <= fin_seq:
+                result.append(r)
+        return result
+    except sqlite3.Error:
+        return []
+
+
+def write_llm_call_v1(store, session_id: str, request_id: str, *,
+                      request_seq: Optional[int] = None,
+                      turn: Optional[int] = None,
+                      step: Optional[int] = None,
+                      seq: Optional[int] = None,
+                      provider: Optional[str] = None,
+                      model: Optional[str] = None,
+                      purpose: Optional[str] = None,
+                      reasoning_effort: Optional[str] = None,
+                      base_url: Optional[str] = None,
+                      api_mode: Optional[str] = None,
+                      messages_count: Optional[int] = None,
+                      input_chars: Optional[int] = None,
+                      reasoning_chars: Optional[int] = None,
+                      text_chars: Optional[int] = None,
+                      chunk_count: Optional[int] = None,
+                      tool_calls_json: Optional[str] = None,
+                      usage_json: Optional[str] = None,
+                      finish_kind: Optional[str] = None,
+                      duration_ms: Optional[int] = None,
+                      failure_json: Optional[str] = None,
+                      status: str = "completed") -> bool:
+    """post_api_request 主写 llm_calls（request_id UPSERT，latest-wins）。
+
+    stream 计数由调用方合并 pending 后传入；本函数保留权威列。
+    """
+    try:
+        store.conn.execute(
+            """INSERT INTO llm_calls
+               (session_id, request_id, request_seq, turn, step, seq,
+                provider, model, purpose, reasoning_effort, base_url, api_mode,
+                messages_count, input_chars, reasoning_chars, text_chars,
+                chunk_count, tool_calls_json, usage_json, finish_kind,
+                duration_ms, failure_json, status, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(session_id, request_id) DO UPDATE SET
+                 request_seq=COALESCE(excluded.request_seq, llm_calls.request_seq),
+                 turn=COALESCE(excluded.turn, llm_calls.turn),
+                 step=COALESCE(excluded.step, llm_calls.step),
+                 seq=COALESCE(excluded.seq, llm_calls.seq),
+                 provider=COALESCE(excluded.provider, llm_calls.provider),
+                 model=COALESCE(excluded.model, llm_calls.model),
+                 purpose=COALESCE(excluded.purpose, llm_calls.purpose),
+                 reasoning_effort=COALESCE(excluded.reasoning_effort, llm_calls.reasoning_effort),
+                 base_url=COALESCE(excluded.base_url, llm_calls.base_url),
+                 api_mode=COALESCE(excluded.api_mode, llm_calls.api_mode),
+                 messages_count=COALESCE(excluded.messages_count, llm_calls.messages_count),
+                 input_chars=COALESCE(excluded.input_chars, llm_calls.input_chars),
+                 tool_calls_json=COALESCE(excluded.tool_calls_json, llm_calls.tool_calls_json),
+                 usage_json=COALESCE(excluded.usage_json, llm_calls.usage_json),
+                 finish_kind=COALESCE(excluded.finish_kind, llm_calls.finish_kind),
+                 duration_ms=COALESCE(excluded.duration_ms, llm_calls.duration_ms),
+                 failure_json=COALESCE(excluded.failure_json, llm_calls.failure_json),
+                 status=excluded.status""",
+            (session_id, request_id, request_seq, turn, step, seq,
+             provider, model, purpose, reasoning_effort, base_url, api_mode,
+             messages_count or 0, input_chars or 0, reasoning_chars or 0,
+             text_chars or 0, chunk_count or 0,
+             tool_calls_json, usage_json, finish_kind,
+             duration_ms, failure_json, status, time.time()),
+        )
+        store.conn.commit()
+        return True
+    except sqlite3.Error as exc:
+        logger.warning("write_llm_call_v1 failed: %s", exc)
+        return False
+
+
+def patch_llm_call_stream_v1(store, session_id: str, request_id: str, *,
+                             turn: Optional[int] = None,
+                             provider: Optional[str] = None,
+                             model: Optional[str] = None,
+                             reasoning_chars: int = 0,
+                             text_chars: int = 0,
+                             chunk_count: int = 0,
+                             finished: Optional[bool] = None,
+                             error: Optional[str] = None) -> bool:
+    """on_stream_* 补丁：只动流式计数，不覆盖 post_api 权威列（乱序安全）。
+
+    行不存在时插入最小 streaming 行；统计列取 MAX 合并。
+    """
+    try:
+        store.conn.execute(
+            """INSERT INTO llm_calls
+               (session_id, request_id, turn, provider, model,
+                reasoning_chars, text_chars, chunk_count, status, created_at)
+               VALUES (?,?,?,?,?, ?,?,?, 'streaming', ?)
+               ON CONFLICT(session_id, request_id) DO UPDATE SET
+                 turn=COALESCE(excluded.turn, llm_calls.turn),
+                 provider=COALESCE(excluded.provider, llm_calls.provider),
+                 model=COALESCE(excluded.model, llm_calls.model),
+                 reasoning_chars=MAX(COALESCE(llm_calls.reasoning_chars,0), excluded.reasoning_chars),
+                 text_chars=MAX(COALESCE(llm_calls.text_chars,0), excluded.text_chars),
+                 chunk_count=MAX(COALESCE(llm_calls.chunk_count,0), excluded.chunk_count)""",
+            (session_id, request_id, turn, provider, model,
+             reasoning_chars, text_chars, chunk_count, time.time()),
+        )
+        if finished is not None:
+            store.conn.execute(
+                "UPDATE llm_calls SET status=? WHERE session_id=? AND request_id=?",
+                ("completed" if finished else "failed", session_id, request_id))
+        if error:
+            store.conn.execute(
+                "UPDATE llm_calls SET failure_json=?, status='failed' "
+                "WHERE session_id=? AND request_id=?",
+                (json.dumps({"error": error}, ensure_ascii=False), session_id, request_id))
+        store.conn.commit()
+        return True
+    except sqlite3.Error as exc:
+        logger.warning("patch_llm_call_stream_v1 failed: %s", exc)
+        return False
+
+
+def read_llm_call_v1(store, session_id: str, request_id: str) -> Optional[Dict]:
+    try:
+        cur = store.conn.execute(
+            "SELECT * FROM llm_calls WHERE session_id=? AND request_id=?",
+            (session_id, request_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [c[0] for c in cur.description]
+        return dict(zip(cols, row))
+    except sqlite3.Error:
+        return None
+
+
+def write_think_card_v1(store, card: Dict[str, Any]) -> bool:
+    """think_trace UPSERT（UNIQUE(session_id,turn,seq) latest-wins）。"""
+    try:
+        now = time.time()
+        store.conn.execute(
+            """INSERT INTO think_trace
+               (session_id, turn, step, seq, txn_id, topic_id, source_kind,
+                card_kind, call_id, tool_name, question_text, l0_abstract,
+                l1_json, entities_json, embedding_json, raw_len, preview,
+                status, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?)
+               ON CONFLICT(session_id, turn, seq) DO UPDATE SET
+                 card_kind=excluded.card_kind,
+                 call_id=excluded.call_id,
+                 tool_name=excluded.tool_name,
+                 question_text=excluded.question_text,
+                 raw_len=excluded.raw_len,
+                 preview=excluded.preview,
+                 updated_at=excluded.updated_at""",
+            (card.get("session_id"), card.get("turn"), card.get("step"),
+             card.get("seq"), card.get("txn_id"), card.get("topic_id"),
+             card.get("source_kind", "cloud_think"),
+             card.get("card_kind"), card.get("call_id"), card.get("tool_name"),
+             card.get("question_text", ""), card.get("l0_abstract"),
+             card.get("l1_json"), card.get("entities_json"),
+             card.get("embedding_json"), card.get("raw_len", 0),
+             card.get("preview"), card.get("status", "raw"), now, now),
+        )
+        store.conn.commit()
+        return True
+    except sqlite3.Error as exc:
+        logger.warning("write_think_card_v1 failed: %s", exc)
+        return False
+
+
+def read_think_cards_v1(store, session_id: str) -> list:
+    try:
+        cur = store.conn.execute(
+            "SELECT * FROM think_trace WHERE session_id=? ORDER BY turn, seq",
+            (session_id,),
+        )
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    except sqlite3.Error:
+        return []
+
+
+def read_turn_user_question_v1(store, session_id: str, turn: int) -> str:
+    """取该 turn 的 user 行文本（思考卡 question_text）。"""
+    try:
+        cur = store.conn.execute(
+            "SELECT Elm FROM turn_stream "
+            "WHERE session_id=? AND turn=? AND role='user' ORDER BY seq LIMIT 1",
+            (session_id, turn),
+        )
+        row = cur.fetchone()
+        return row[0] if row else ""
+    except sqlite3.Error:
+        return ""
+
+
+def read_turn_thinking_rows_v1(store, session_id: str, turn: int) -> list:
+    """该 turn 的 THINKING/thought 行（dict，供 conclusion 卡判定）。"""
+    try:
+        cur = store.conn.execute(
+            "SELECT turn, seq, role, Elm, block_type, ooda_stage, finish_reason, "
+            "       reasoning_chars, request_id FROM turn_stream "
+            "WHERE session_id=? AND turn=? AND block_type='thinking' ORDER BY seq",
+            (session_id, turn),
+        )
+        cols = ["turn", "seq", "role", "Elm", "block_type", "ooda_stage",
+                "finish_reason", "reasoning_chars", "request_id"]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    except sqlite3.Error:
+        return []
+
+
+def read_turn_tool_rows_v1(store, session_id: str, turn: int) -> list:
+    """该 turn 工具行（dict），供 conclusion 卡工具错误信号判定。"""
+    try:
+        cur = store.conn.execute(
+            "SELECT turn, seq, role, tool_call_id, tool_name, status, error_text, "
+            "       result_chars FROM turn_stream "
+            "WHERE session_id=? AND turn=? AND role='tool' ORDER BY seq",
+            (session_id, turn),
+        )
+        cols = ["turn", "seq", "role", "tool_call_id", "tool_name", "status",
+                "error_text", "result_chars"]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
     except sqlite3.Error:
         return []

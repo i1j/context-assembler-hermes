@@ -29,6 +29,7 @@ if str(_plugin_dir) not in sys.path:
     sys.path.insert(0, str(_plugin_dir))
 
 from ca import session_manager
+from ca.blocks import USER_MESSAGE
 from ca.config import Config
 from ca.grade import Grade, TopicGrade
 from ca.refinement import IdleRefinementDaemon
@@ -179,9 +180,9 @@ def is_available() -> bool:
 
 
 def register(ctx) -> None:
-    """注册 CA 插件 v5.0 hooks 和 ContextEngine ABC。
+    """注册 CA 插件 hooks 和 ContextEngine ABC。
 
-    - 8 个 hooks（5 生命周期 + 3 工具轮数据采集）保持不变。
+    - 13 个 hooks（决策 44：8 旧 + pre_api_request/api_request_error/on_stream_*）。
     - CE 壳已注册，select_context 驱动 A-stage（方向 B）：每轮从 turn_stream DB
       重建 conv_history；should_compress 恒 False，阻断 Hermes 前检压缩路径。
     - 注册使用 1 参签名 ctx.register_context_engine(_ce_engine)（Hermes plugins.py:1898）。
@@ -194,6 +195,12 @@ def register(ctx) -> None:
     ctx.register_hook("post_api_request", _on_post_api_request_v5)
     ctx.register_hook("pre_tool_call",    _on_pre_tool_call_v5)
     ctx.register_hook("post_tool_call",   _on_post_tool_call_v5)
+    # 决策 44：更接近云端 LLM 响应的数据源头
+    ctx.register_hook("pre_api_request",  _on_pre_api_request_v7)
+    ctx.register_hook("api_request_error", _on_api_request_error_v7)
+    ctx.register_hook("on_stream_start",  _on_stream_start_v7)
+    ctx.register_hook("on_stream_delta",  _on_stream_delta_v7)
+    ctx.register_hook("on_stream_end",    _on_stream_end_v7)
     # ── CE 壳注册（1 参签名，Hermes plugins.py:1898）──
     ctx.register_context_engine(_ce_engine)
 
@@ -535,6 +542,10 @@ class CAContextAssemblerPlugin:
         self._candidate_themes: Optional[list] = None  # v6.5.3: 切换注入的候选 theme（快照进 pending）
         self._graph_lock = threading.Lock()  # v6.5.3: graph.json 并发写锁
         self._cleanup_done: bool = False         # on_session_start 清账已完成
+        # 决策 44：on_stream_* 异步 worker 与 post_api_request 无顺序保证，
+        # pending 只存流式计数；llm_calls 用 UPSERT max 合并。
+        self._stream_pending: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._stream_lock = threading.Lock()
         # L4 空闲精炼守护线程
         self._refinement_daemon: Optional[IdleRefinementDaemon] = None
 
@@ -981,16 +992,17 @@ class CAContextAssemblerPlugin:
         engine = self._engine
         turn = engine._current_turn
 
-        seq = engine._seq_counter.get(turn, 0) + 1
-        engine._seq_counter[turn] = seq
-
-        from ca.store import write_turn_v5
-        write_turn_v5(
-            engine.store, self._session_id, turn, seq,
-            role='assistant', elm_text=assistant_response,
-            finish_reason='stop',
-            written_at=time.time(),
-        )
+        # 决策 44：fin 行由 E-stage v7 统一写（agent_reply/decide/is_fin=1，
+        # 元数据来自最近一次 post_api_request 的 llm_calls 记录）。
+        try:
+            engine._on_final_response_v7(
+                session_id=self._session_id,
+                turn_index=turn,
+                assistant_response=assistant_response,
+            )
+        except Exception as exc:
+            logger.warning("[CA_v7] _on_final_response_v7 failed: %s", exc)
+        seq = engine._seq_counter.get(turn, 0)
         logger.info("[CA_v6] post_llm_call: wrote asst_fin turn=%d seq=%d", turn, seq)
 
         # v6: 方向 B — compress 不修改 Hermes 消息，无需 _full_backup 或 _saved_history_snapshot 恢复
@@ -1147,6 +1159,8 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
             fct_text=user_message,
             hdl_text=user_message[:100],
             biz_category=None,
+            block_type=USER_MESSAGE,
+            ooda_stage="orient",
             written_at=time.time(),
         )
         logger.info("[CA_v6] pre_llm_call: wrote seq 0 turn=%d", turn)
@@ -1285,11 +1299,23 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
     return recall_str
 
 
-def _on_post_api_request_v5(**kwargs: Any) -> None:
-    """v6: 写 thought 行 + tool 占位行（bg 跳过）。"""
-    session_id = kwargs.get("session_id", "")
+def _stream_request_id(kwargs: Dict[str, Any]) -> str:
+    """on_stream_* payload 无 api_request_id：按 Hermes 格式重建
+    api_request_id = f"{turn_id}:api:{api_call_count}"（conversation_loop.py:2625）。"""
+    turn_id = kwargs.get("turn_id", "")
+    iteration = kwargs.get("iteration", kwargs.get("api_call_count", 0))
+    return f"{turn_id}:api:{iteration}"
+
+
+def _get_plugin(session_id: str) -> Optional["CAContextAssemblerPlugin"]:
     with _engines_lock:
-        plugin = _engines.get(session_id)
+        return _engines.get(session_id)
+
+
+def _on_post_api_request_v5(**kwargs: Any) -> None:
+    """v7: 每 API 调用拆块写入 + llm_calls + decision 思考卡（bg 跳过）。"""
+    session_id = kwargs.get("session_id", "")
+    plugin = _get_plugin(session_id)
     if not plugin or plugin._engine_errored:
         return
     if getattr(plugin, '_bg_turn', False):
@@ -1297,17 +1323,125 @@ def _on_post_api_request_v5(**kwargs: Any) -> None:
     # Engine refresh (CR-009)
     if not _refresh_engine(session_id, plugin):
         return
+    # stream pending 合并（on_stream_end 可能尚未/已经到达，UPSERT 保证不丢）
+    request_id = kwargs.get("api_request_id", "")
+    stream_pending: Dict[str, Any] = {}
+    with plugin._stream_lock:
+        stream_pending = dict(plugin._stream_pending.get(session_id, {}).get(request_id, {}))
+        plugin._stream_pending.get(session_id, {}).pop(request_id, None)
     try:
-        plugin._engine._on_api_response_v5(
-            api_request_id=kwargs.get("api_request_id", ""),
+        plugin._engine._on_api_response_v7(
+            api_request_id=request_id,
             assistant_message=kwargs.get("assistant_message"),
             api_call_count=kwargs.get("api_call_count", 0),
             turn_index=plugin._engine._current_turn,
             finish_reason=kwargs.get("finish_reason", "stop"),
             usage=kwargs.get("usage"),
+            provider=kwargs.get("provider", ""),
+            model=kwargs.get("model", ""),
+            base_url=kwargs.get("base_url", ""),
+            api_mode=kwargs.get("api_mode", ""),
+            api_duration=kwargs.get("api_duration"),
+            message_count=kwargs.get("message_count"),
+            stream_pending=stream_pending,
         )
     except Exception as exc:
         logger.warning("[CA_v5] _on_post_api_request failed: %s", exc, exc_info=True)
+
+
+def _on_pre_api_request_v7(**kwargs: Any) -> None:
+    """pre_api_request：记录请求侧元数据（每 retry 一次，latest-wins）。"""
+    session_id = kwargs.get("session_id", "")
+    plugin = _get_plugin(session_id)
+    if not plugin or plugin._engine_errored:
+        return
+    try:
+        plugin._engine._on_pre_api_request_v7(**kwargs)
+    except Exception as exc:
+        logger.warning("[CA_v7] _on_pre_api_request failed: %s", exc, exc_info=True)
+
+
+def _on_api_request_error_v7(**kwargs: Any) -> None:
+    """api_request_error：失败尝试写 failed llm_calls（cold path，fail-open）。"""
+    session_id = kwargs.get("session_id", "")
+    plugin = _get_plugin(session_id)
+    if not plugin or plugin._engine_errored:
+        return
+    try:
+        plugin._engine._on_api_request_error_v7(**kwargs)
+    except Exception as exc:
+        logger.warning("[CA_v7] _on_api_request_error failed: %s", exc, exc_info=True)
+
+
+def _on_stream_start_v7(**kwargs: Any) -> None:
+    """on_stream_start：重置该 request_id 的流式计数 pending（异步 worker 线程）。"""
+    if not Config.CA_STREAM_OBSERVE_ENABLED:
+        return
+    session_id = kwargs.get("session_id", "")
+    plugin = _get_plugin(session_id)
+    if not plugin:
+        return
+    request_id = _stream_request_id(kwargs)
+    with plugin._stream_lock:
+        plugin._stream_pending.setdefault(session_id, {})[request_id] = {
+            "reasoning_chars": 0, "text_chars": 0, "chunk_count": 0,
+            "provider": kwargs.get("provider"), "model": kwargs.get("model"),
+        }
+
+
+def _on_stream_delta_v7(**kwargs: Any) -> None:
+    """on_stream_delta：只累计内存 pending（不做逐 token 落盘；fail-open）。"""
+    if not Config.CA_STREAM_OBSERVE_ENABLED:
+        return
+    session_id = kwargs.get("session_id", "")
+    plugin = _get_plugin(session_id)
+    if not plugin:
+        return
+    request_id = _stream_request_id(kwargs)
+    kind = kwargs.get("kind", "")
+    delta = kwargs.get("delta", "")
+    if not isinstance(delta, str):
+        return
+    with plugin._stream_lock:
+        bucket = plugin._stream_pending.setdefault(session_id, {}).setdefault(
+            request_id, {"reasoning_chars": 0, "text_chars": 0, "chunk_count": 0})
+        bucket["chunk_count"] = int(bucket.get("chunk_count") or 0) + 1
+        if kind == "reasoning":
+            bucket["reasoning_chars"] = int(bucket.get("reasoning_chars") or 0) + len(delta)
+        elif kind == "text":
+            bucket["text_chars"] = int(bucket.get("text_chars") or 0) + len(delta)
+
+
+def _on_stream_end_v7(**kwargs: Any) -> None:
+    """on_stream_end：把流式计数补丁一次写入 llm_calls（UPSERT，乱序安全）。"""
+    if not Config.CA_STREAM_OBSERVE_ENABLED:
+        return
+    session_id = kwargs.get("session_id", "")
+    plugin = _get_plugin(session_id)
+    if not plugin or plugin._engine_errored:
+        return
+    request_id = _stream_request_id(kwargs)
+    with plugin._stream_lock:
+        bucket = plugin._stream_pending.setdefault(session_id, {}).setdefault(
+            request_id, {"reasoning_chars": 0, "text_chars": 0, "chunk_count": 0})
+        patch_values = dict(bucket)
+    try:
+        engine = plugin._engine
+        if engine is None or getattr(engine, "store", None) is None:
+            return
+        from ca.store import patch_llm_call_stream_v1
+        patch_llm_call_stream_v1(
+            engine.store, session_id, request_id,
+            provider=kwargs.get("provider"),
+            model=kwargs.get("model"),
+            reasoning_chars=int(patch_values.get("reasoning_chars") or 0),
+            text_chars=int(patch_values.get("text_chars") or 0),
+            chunk_count=int(patch_values.get("chunk_count") or 0),
+            finished=kwargs.get("finished"),
+            error=kwargs.get("error"),
+        )
+    except Exception as exc:
+        logger.warning("[CA_v7] _on_stream_end patch failed: %s", exc)
 
 
 def _on_post_tool_call_v5(**kwargs: Any) -> None:

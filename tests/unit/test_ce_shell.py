@@ -184,7 +184,9 @@ class TestCachePreservation:
         hook_names = [c[1] for c in calls if c[0] == "hook"]
         expected = ["on_session_start", "on_session_end", "on_session_reset",
                     "pre_llm_call", "post_llm_call",
-                    "post_api_request", "pre_tool_call", "post_tool_call"]
+                    "post_api_request", "pre_tool_call", "post_tool_call",
+                    "pre_api_request", "api_request_error",
+                    "on_stream_start", "on_stream_delta", "on_stream_end"]
         assert len(hook_names) == len(expected)
         assert set(hook_names) == set(expected)
 
