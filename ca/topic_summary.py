@@ -57,6 +57,7 @@ Incorporate these supplementary items into the summary just like changes — mer
 
 Rules:
 - Identify 2-6 distinct work strands in this topic block. **When in doubt, split into separate strands** — prefer over-merging into one (a wiki entry aggregation pass will group related strands under the same theme later).
+- 若输入中有「事务清单（编号即候选 strand）」：这些编号就是 Fct 阶段已识别的事务 hdl，优先作为 strand 基础——同名事务跨轮合并、同一编号对应一个 strand；只有当某编号明显包含两个独立工作线时才再拆，不凭空发明新 strand、不重命名（需要补充语义时在 hdl 后加括号说明）。
 - Each strand: hdl (short name), turns (which turn numbers it appears in — use the "# 轮次 N" markers in the input), ooda (4 groups, only include groups that have content).
 - theme_ref (optional): if the 候选主题参考 section lists candidates, and this strand is the SAME piece of work as one candidate (continuation / deepening / fixing the same problem), output that candidate's id exactly as shown (reality_id / theme_id); otherwise OMIT the theme_ref field entirely (uncertain → omit; better to create a new theme than wrongly merge).
 - ⚠️ hdl 命名规范（必须先组织该 strand 的 ooda 内容，再基于 ooda 总结 hdl）：
@@ -98,6 +99,36 @@ def _format_turns_for_prompt(turns_data: list[dict]) -> str:
         changes = td.get("changes", [])
         tags = td.get("tags", {})
         ooda_tags = td.get("ooda_tags", {})
+        affairs = td.get("affairs") or []
+
+        sections.append("")
+        sections.append(f"# 轮次 {turn}")
+
+        # 决策 44 续：affairs 是 Fct 已识别的事务边界——先给 4B 编号清单
+        #（flash 习惯：1. xxx / 2. yyy 即事务 hdl），并逐事务给 ooda/changes。
+        if affairs:
+            sections.append("## 事务清单（编号即候选 strand）")
+            for i, affair in enumerate(affairs, start=1):
+                hdl = affair.get("hdl") or f"事务{i}"
+                sections.append(f"{i}. {hdl}")
+            for i, affair in enumerate(affairs, start=1):
+                hdl = affair.get("hdl") or f"事务{i}"
+                sections.append(f"## 事务{i} {hdl}")
+                for label in OODA_LABELS:
+                    items = affair.get("ooda", {}).get(label) or []
+                    if items:
+                        sections.append(f"    ### {label}")
+                        for item in items:
+                            sections.append(f"    - {item}")
+                a_changes = affair.get("changes") or []
+                if a_changes:
+                    sections.append("    ### changes")
+                    for c in a_changes:
+                        stage = c.get("stage_tag") or ""
+                        prefix = f"[{stage}] " if stage else ""
+                        sections.append(f"    - {prefix}{c.get('core_change', '')}")
+            # affairs 已含完整 OODA，不再重复输出 legacy changes（效率优先）
+            continue
 
         # 按 OODA 归类
         ooda_groups: dict[str, list[str]] = {l: [] for l in OODA_LABELS}
@@ -116,8 +147,6 @@ def _format_turns_for_prompt(turns_data: list[dict]) -> str:
             else:
                 uncategorized.append(f"    - {prefix}{c}")
 
-        sections.append("")
-        sections.append(f"# 轮次 {turn}")
         for label in OODA_LABELS:
             items = ooda_groups[label]
             if items:

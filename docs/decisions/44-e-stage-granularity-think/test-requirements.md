@@ -13,6 +13,7 @@
 | `tests/unit/test_fct_multi_affair.py` | R5 | `affairs[]` JSON 解析（围栏/裸 JSON/非法回退）；ooda 四键补齐；changes 校验；flatten 为 legacy changes/core_change/四段；think 卡输入代码筛选（当前 turn/orient 优先/截断预算/历史轮排除） |
 | `tests/store/test_store_v7_meta.py` | R3/R4/R6 | 新表 schema 存在；turn_stream 新列存在；旧 18 列库 ALTER 迁移幂等；write_turn_v5 新列核心比较/重放保留 Fct；llm_calls/think_trace 写入与 latest-wins |
 | `tests/stage/test_e_stage_v7.py` | R1/R2/R3/R4 | post_api 拆 THINKING/AGENT_REPLY 行；tool_call_request 占位；post_tool 回填 observe+result_chars/error_text；纯对话早退不变；llm_calls 全字段；think_trace decision/orient 落库；post_llm fin 行 metadata+is_fin+conclusion 卡 |
+| `tests/unit/test_strand_affair_input.py` | R5.5 | collect_turn_fcts 暴露 affairs；编号事务清单渲染；affairs 存在时跳过 legacy changes；legacy 行不变 |
 | `tests/stage/test_f_stage_v7_frames.py` | R5 | 事务帧输入；multi-affair JSON 落库（affairs+legacy 扁平）；orient 卡注入 `current_dialog`；legacy 行回退 |
 | `tests/plugin/test_plugin.py`（修改） | R1 | register 计数 8→13 且新 hook 名全在 |
 

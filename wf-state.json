@@ -4,8 +4,8 @@
     "object": "ca-e-stage-v7-granularity-think",
     "current_state": "交付部署",
     "created": "2026-08-17T00:00:00",
-    "task_line": "参考 DSH/EFLR 改进 Hermes E 阶段；增补：首轮 orient think 卡；Fct 输入注入代码筛选 think 卡、输出多事务 OODA JSON",
-    "accept_line": "13 hooks；旧库迁移；llm_calls/think_trace(decision/orient/conclusion)；Fct affairs 多事务输出+legacy 扁平；全量 pytest 1141 passed"
+    "task_line": "Hermes E/F 细颗粒度+think+多事务 OODA；strand 部分直接消费 affairs（编号候选 hdl，效率优先不兼容）",
+    "accept_line": "13 hooks；llm_calls/think_trace；Fct affairs；strand 输入编号事务清单；全量 pytest 1144 passed"
   },
   "transitions": [
     {
@@ -127,6 +127,46 @@
       "rating": "完整",
       "ts": "2026-08-16T23:02:13",
       "note": "Fct 多事务 OODA 交付"
+    },
+    {
+      "from": "交付部署",
+      "to": "需求开发",
+      "type": "bounce",
+      "rating": "",
+      "ts": "2026-08-16T23:06:32",
+      "note": "用户：flash 的 1./2./3. 就是事务 hdl；效率优先、strand 可改、不向后兼容"
+    },
+    {
+      "from": "需求开发",
+      "to": "技术方案",
+      "type": "forward",
+      "rating": "纯代码",
+      "ts": "2026-08-16T23:06:32",
+      "note": "collect_turn_fcts 透传 affairs；_format_turns_for_prompt 编号清单；prompt 候选 strand 规则"
+    },
+    {
+      "from": "技术方案",
+      "to": "代码构建",
+      "type": "forward",
+      "rating": "需验证",
+      "ts": "2026-08-16T23:06:32",
+      "note": "TDD 3 新用例"
+    },
+    {
+      "from": "代码构建",
+      "to": "验证诊断",
+      "type": "forward",
+      "rating": "完整",
+      "ts": "2026-08-16T23:06:32",
+      "note": "全量 pytest 1144 passed / 1 skipped / 1 xfailed"
+    },
+    {
+      "from": "验证诊断",
+      "to": "交付部署",
+      "type": "forward",
+      "rating": "完整",
+      "ts": "2026-08-16T23:06:32",
+      "note": "strand 输入效率改造交付"
     }
   ],
   "counters": {
@@ -138,7 +178,7 @@
     "last": {
       "state": "验证诊断",
       "result": "PASS",
-      "ts": "2026-08-16T23:02:13"
+      "ts": "2026-08-16T23:06:32"
     }
   }
 }

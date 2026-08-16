@@ -1935,6 +1935,35 @@ def collect_turn_fcts(
                 new_mat = fct_data.get("new_materials")
                 if isinstance(new_mat, list):
                     entry["new_materials"] = [str(x).strip() for x in new_mat if x]
+                # 决策 44：多事务 Fct —— affairs 直接进入 strand 输入（效率优先，
+                # 避免再从 legacy changes 反推事务边界）
+                raw_affairs = fct_data.get("affairs")
+                if isinstance(raw_affairs, list) and raw_affairs:
+                    affairs = []
+                    for a in raw_affairs:
+                        if not isinstance(a, dict):
+                            continue
+                        ooda = a.get("ooda") if isinstance(a.get("ooda"), dict) else {}
+                        a_changes = a.get("changes")
+                        if not isinstance(a_changes, list):
+                            a_changes = []
+                        affairs.append({
+                            "hdl": str(a.get("hdl") or "").strip(),
+                            "turns": a.get("turns") if isinstance(a.get("turns"), list) else [t],
+                            "ooda": {
+                                k: [str(x).strip() for x in (ooda.get(k) or []) if str(x).strip()]
+                                for k in ("现象与问题", "背景与约束", "决策与方案", "后续行动")
+                            },
+                            "changes": [
+                                {"stage_tag": str(c.get("stage_tag") or "").strip(),
+                                 "core_change": str(c.get("core_change") or "").strip()}
+                                for c in a_changes
+                                if isinstance(c, dict)
+                                and str(c.get("core_change") or "").strip()
+                            ],
+                        })
+                    if affairs:
+                        entry["affairs"] = affairs
                 result.append(entry)
             except (json.JSONDecodeError, TypeError):
                 pass
