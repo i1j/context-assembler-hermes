@@ -34,7 +34,12 @@ from .post_process import (
     clean_increment,
     parse_v1_markdown_xml,
 )
-from .prompts import FCT_GENERATION_PROMPT
+from .fct_multi_affair import (
+    build_fct_think_context,
+    flatten_affairs_to_legacy,
+    parse_fct_multi_affair,
+)
+from .prompts import FCT_GENERATION_PROMPT, FCT_GENERATION_PROMPT_MULTI_AFFAIR
 from .store import format_previous_summary_for_prompt, read_incremental_elm, read_prev_fct
 
 logger = logging.getLogger(__name__)
@@ -100,6 +105,22 @@ class FStageMixin:
             except Exception as exc:
                 logger.warning("[CA_v7] transaction frames fallback: %s", exc)
 
+        # ── 决策 44 续：代码筛选当前 turn 的 think 卡，作为多事务划分线索。
+        # 仅 orient/decision、按预算截断；无卡时 elm_text 保持旧格式。 ──
+        if Config.FCT_MULTI_AFFAIR_ENABLED:
+            try:
+                think_context = build_fct_think_context(
+                    self.store, session_id, turn_index)
+                if think_context:
+                    elm_text = (
+                        "【首轮思考线索（代码筛选）】\n"
+                        + think_context
+                        + "\n\n【事务帧】\n"
+                        + elm_text
+                    )
+            except Exception as exc:
+                logger.warning("[CA_v7] fct think context failed: %s", exc)
+
         prev_fct = read_prev_fct(self.store, session_id, turn_index)
 
         # prev_fct 为空时（首轮/无历史摘要），提供格式完整但内容为空的 Fct JSON，
@@ -130,7 +151,20 @@ class FStageMixin:
                 with self.stats._lock:
                     self.stats.truncated_fallback += 1
                 partial = (response_text or "").strip()
-                # 截断时优先提取 partial 中已完成的 <stage_tag>/<core_change> 对
+                # 截断优先尝试多事务 JSON partial
+                if Config.FCT_MULTI_AFFAIR_ENABLED:
+                    partial_multi = parse_fct_multi_affair(partial)
+                    if partial_multi:
+                        truncated_cleaned = flatten_affairs_to_legacy(
+                            partial_multi["affairs"])
+                        truncated_cleaned["_assemble_status"] = ASSEMBLE_PENDING_BACKFILL
+                        fct_str = json.dumps(truncated_cleaned, ensure_ascii=False)
+                        hdl_text = self._extract_hdl(truncated_cleaned, turn_index) or (user_elm or "")[:150]
+                        self._update_fct_v5(session_id, turn_index, fin_seq, fct_str, hdl_text)
+                        logger.info("[CA] _run_f_stage turn %d fin_seq %d: multi-affair partial saved as pending",
+                                    turn_index, fin_seq)
+                        return
+                # 再尝试已完成 <stage_tag>/<core_change> 对
                 raw_pairs = PAIR_PATTERN.findall(partial)
                 valid_changes = []
                 for raw_state, raw_core in raw_pairs:
@@ -189,15 +223,24 @@ class FStageMixin:
                 logger.info("[CA] _run_f_stage turn %d fin_seq %d: error, saved fallback", turn_index, fin_seq)
                 return
 
-            fct_dict, parser_hdl, _ = parse_v1_markdown_xml(response_text)
-            if not parser_hdl:
-                logger.warning("[CA-METRIC] ca.hdl.skipped_empty: turn=%d fin_seq=%d", turn_index, fin_seq)
-                with self.stats._lock:
-                    self.stats.skipped_empty += 1
-            cleaned = clean_increment(fct_dict)
-
-            cleaned["_assemble_status"] = ASSEMBLE_OK
-            dialogue_ok = True
+            parser_hdl = ""
+            multi_parsed = None
+            if Config.FCT_MULTI_AFFAIR_ENABLED:
+                multi_parsed = parse_fct_multi_affair(response_text)
+            if multi_parsed:
+                # 决策 44 续：多事务 affairs 输出，代码扁平化为 legacy 兼容结构
+                cleaned = flatten_affairs_to_legacy(multi_parsed["affairs"])
+                cleaned["_assemble_status"] = ASSEMBLE_OK
+                dialogue_ok = True
+            else:
+                fct_dict, parser_hdl, _ = parse_v1_markdown_xml(response_text)
+                if not parser_hdl:
+                    logger.warning("[CA-METRIC] ca.hdl.skipped_empty: turn=%d fin_seq=%d", turn_index, fin_seq)
+                    with self.stats._lock:
+                        self.stats.skipped_empty += 1
+                cleaned = clean_increment(fct_dict)
+                cleaned["_assemble_status"] = ASSEMBLE_OK
+                dialogue_ok = True
 
             fct_str = json.dumps(cleaned, ensure_ascii=False)
             hdl_text = self._extract_hdl(cleaned, turn_index)
@@ -246,7 +289,12 @@ class FStageMixin:
         """返回 (response_text, finish_reason)。所有重试均失败时返回 ("", "error")。"""
         import urllib.request
         llm_start = time.monotonic()
-        prompt = FCT_GENERATION_PROMPT.format(
+        prompt_template = (
+            FCT_GENERATION_PROMPT_MULTI_AFFAIR
+            if Config.FCT_MULTI_AFFAIR_ENABLED
+            else FCT_GENERATION_PROMPT
+        )
+        prompt = prompt_template.format(
             previous_summary=format_previous_summary_for_prompt(
                 prev_fct  # prev_fct 已是 JSON 字符串，不能再次 json.dumps
             ),

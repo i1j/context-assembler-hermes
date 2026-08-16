@@ -76,6 +76,7 @@ class Config:
     # 决策 44：E 阶段近源采集与 Fct 事务帧
     CA_STREAM_OBSERVE_ENABLED: ClassVar[bool] = os.getenv("CA_STREAM_OBSERVE_ENABLED", "1") == "1"
     FCT_STRUCTURED_INPUT: ClassVar[bool] = os.getenv("CA_FCT_STRUCTURED_INPUT", "1") == "1"
+    FCT_MULTI_AFFAIR_ENABLED: ClassVar[bool] = os.getenv("CA_FCT_MULTI_AFFAIR_ENABLED", "1") == "1"
     THINK_MIN_REASONING_CHARS: ClassVar[int] = int(os.getenv("CA_THINK_MIN_REASONING_CHARS", "800"))
     THINK_PREVIEW_CHARS: ClassVar[int] = int(os.getenv("CA_THINK_PREVIEW_CHARS", "160"))
 

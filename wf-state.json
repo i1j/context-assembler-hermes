@@ -4,8 +4,8 @@
     "object": "ca-e-stage-v7-granularity-think",
     "current_state": "交付部署",
     "created": "2026-08-17T00:00:00",
-    "task_line": "参考 DSH 版 CA 与 EFLR 改进 Hermes E 阶段；增补：提问后首轮 think（orient 卡）零门槛入卡",
-    "accept_line": "13 hooks；旧库幂等迁移；turn_stream 块级+元数据列；llm_calls/think_trace（decision/orient/conclusion）；Fct 事务帧；全量 pytest 1131 passed"
+    "task_line": "参考 DSH/EFLR 改进 Hermes E 阶段；增补：首轮 orient think 卡；Fct 输入注入代码筛选 think 卡、输出多事务 OODA JSON",
+    "accept_line": "13 hooks；旧库迁移；llm_calls/think_trace(decision/orient/conclusion)；Fct affairs 多事务输出+legacy 扁平；全量 pytest 1141 passed"
   },
   "transitions": [
     {
@@ -87,6 +87,46 @@
       "rating": "完整",
       "ts": "2026-08-16T22:49:17",
       "note": "commit c2cd1cb"
+    },
+    {
+      "from": "交付部署",
+      "to": "需求开发",
+      "type": "bounce",
+      "rating": "",
+      "ts": "2026-08-16T23:02:13",
+      "note": "用户新增：Fct 输入加首轮 think 卡（代码筛选）、输出改多事务 OODA"
+    },
+    {
+      "from": "需求开发",
+      "to": "技术方案",
+      "type": "forward",
+      "rating": "纯代码",
+      "ts": "2026-08-16T23:02:13",
+      "note": "ca/fct_multi_affair.py 解析/扁平/think 筛选；prompt v2 与 legacy 兼容策略"
+    },
+    {
+      "from": "技术方案",
+      "to": "代码构建",
+      "type": "forward",
+      "rating": "需验证",
+      "ts": "2026-08-16T23:02:13",
+      "note": "TDD：parser/flatten/think filter/stage 落库 5 组新用例"
+    },
+    {
+      "from": "代码构建",
+      "to": "验证诊断",
+      "type": "forward",
+      "rating": "完整",
+      "ts": "2026-08-16T23:02:13",
+      "note": "全量 pytest 1141 passed / 1 skipped / 1 xfailed"
+    },
+    {
+      "from": "验证诊断",
+      "to": "交付部署",
+      "type": "forward",
+      "rating": "完整",
+      "ts": "2026-08-16T23:02:13",
+      "note": "Fct 多事务 OODA 交付"
     }
   ],
   "counters": {
@@ -98,7 +138,7 @@
     "last": {
       "state": "验证诊断",
       "result": "PASS",
-      "ts": "2026-08-16T22:49:17"
+      "ts": "2026-08-16T23:02:13"
     }
   }
 }

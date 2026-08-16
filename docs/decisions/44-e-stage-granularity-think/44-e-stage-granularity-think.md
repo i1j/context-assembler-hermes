@@ -35,8 +35,9 @@
 
 ### R5 Fct 多事务 OODA 支撑
 - R5.1 F-stage 输入升级为「事务帧」格式：按 turn 分组，按 seq 输出 `[ooda_stage|block_type]` 前缀（旧行无 block_type 自动回退 legacy 文本，兼容历史 DB）。
-- R5.2 FCT prompt 增加多事务提示：以 E 阶段 OODA 标记作为分割线索，四节按事务组织，每事务仍输出独立 `<stage_tag>/<core_change>` 对。
-- R5.3 不改变 Fct JSON 顶层 schema 与 strand_summaries.ooda_json 四段契约（决策 28/35 已定义），避免破坏 topic_summary 全链路。
+- R5.2 输入注入**代码筛选后的首轮 think 卡**：只取当前 turn 的 `orient/decision` 卡，orient 优先；每卡截断、总预算约束（`ca/fct_multi_affair.py:build_fct_think_context`），reasoning 原文从 THINKING 行读、preview 只兜底。
+- R5.3 Fct 输出改为**多事务 OODA JSON**：`{"affairs":[{"hdl","turns","ooda":{"现象与问题","背景与约束","决策与方案","后续行动"},"changes":[{"stage_tag","core_change"}]}]}`；代码解析校验后**扁平化**为 legacy `changes/core_change/四段字段`（`ca/fct_multi_affair.py:flatten_affairs_to_legacy`），`affairs` 一并存入 Fct，topic_summary/strand/A-stage 既有消费链不破。
+- R5.4 兼容策略：multi-affair JSON 解析失败 → 回退 legacy `parse_v1_markdown_xml`；截断时先尝试解析 partial JSON，再回退 `PAIR_PATTERN`；`CA_FCT_MULTI_AFFAIR_ENABLED`（默认 1）可整体回退旧 prompt/解析。
 
 ### R6 兼容与纪律
 - R6.1 SQLite 增量迁移：旧 turn_stream 库 `ALTER TABLE ADD COLUMN`（幂等、缺列才加）；新库 schema 全量含新列；设置 `PRAGMA user_version=1`。

@@ -10,9 +10,10 @@
 | `tests/unit/test_blocks.py` | R2/R5 | detect_block_type 8 类优先级；map_ooda_stage 全映射；format_transaction_frames 多事务分组 + legacy 回退 |
 | `tests/unit/test_meta_marker.py` | R3 | provider 规则顺序匹配/未知 fallback；usage 归一化 dict+Namespace；request/response 提取 |
 | `tests/unit/test_think_collect.py` | R4 | 修正词表；decision 门槛（含 tool_calls）；orient 门槛（事务首 think 无工具零门槛）；conclusion 门槛（≥800/修正/工具错误）；preview≤160；raw_len 指针 |
+| `tests/unit/test_fct_multi_affair.py` | R5 | `affairs[]` JSON 解析（围栏/裸 JSON/非法回退）；ooda 四键补齐；changes 校验；flatten 为 legacy changes/core_change/四段；think 卡输入代码筛选（当前 turn/orient 优先/截断预算/历史轮排除） |
 | `tests/store/test_store_v7_meta.py` | R3/R4/R6 | 新表 schema 存在；turn_stream 新列存在；旧 18 列库 ALTER 迁移幂等；write_turn_v5 新列核心比较/重放保留 Fct；llm_calls/think_trace 写入与 latest-wins |
 | `tests/stage/test_e_stage_v7.py` | R1/R2/R3/R4 | post_api 拆 THINKING/AGENT_REPLY 行；tool_call_request 占位；post_tool 回填 observe+result_chars/error_text；纯对话早退不变；llm_calls 全字段；think_trace decision/orient 落库；post_llm fin 行 metadata+is_fin+conclusion 卡 |
-| `tests/stage/test_f_stage_v7_frames.py` | R5 | 带 block_type 的增量行 → 事务帧文本含 `[orient|user_message]` 等前缀；legacy 行回退 |
+| `tests/stage/test_f_stage_v7_frames.py` | R5 | 事务帧输入；multi-affair JSON 落库（affairs+legacy 扁平）；orient 卡注入 `current_dialog`；legacy 行回退 |
 | `tests/plugin/test_plugin.py`（修改） | R1 | register 计数 8→13 且新 hook 名全在 |
 
 ## 2. 契约级断言
@@ -37,5 +38,5 @@
 ```bash
 cd /home/i1j/.hermes/profiles/tester/plugins/ca_assembler
 python -m pytest -q                       # 全量，期望 1008 + 新增全绿
-python -m pytest -q tests/unit/test_blocks.py tests/unit/test_meta_marker.py tests/unit/test_think_collect.py tests/store/test_store_v7_meta.py tests/stage/test_e_stage_v7.py tests/stage/test_f_stage_v7_frames.py
+python -m pytest -q tests/unit/test_blocks.py tests/unit/test_meta_marker.py tests/unit/test_think_collect.py tests/unit/test_fct_multi_affair.py tests/store/test_store_v7_meta.py tests/stage/test_e_stage_v7.py tests/stage/test_f_stage_v7_frames.py
 ```

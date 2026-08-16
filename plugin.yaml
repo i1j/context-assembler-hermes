@@ -65,6 +65,9 @@ config_schema:
   fct_structured_input:
     type: boolean
     default: true
+  fct_multi_affair_enabled:
+    type: boolean
+    default: true
   think_min_reasoning_chars:
     type: integer
     default: 800

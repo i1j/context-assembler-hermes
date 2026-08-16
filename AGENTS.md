@@ -16,7 +16,7 @@ plugins/ca_assembler/
 │   ├── __init__.py           # ContextAssembler + SessionManager
 │   ├── a_stage.py            # A-stage: _build_conv_history_v6（方向 B）
 │   ├── e_stage.py            # E-stage: 写即落盘（13 hooks；决策 44 块级/近源/think）
-│   ├── f_stage.py            # F-stage: 异步 LLM 摘要（fin 粒度）
+│   ├── f_stage.py            # F-stage: 异步 LLM 摘要（fin 粒度；决策 44 多事务 OODA）
 │   ├── store.py              # turn_stream SQLite 存储
 │   ├── cache.py              # AssemblyCache
 │   ├── config.py             # 配置系统
