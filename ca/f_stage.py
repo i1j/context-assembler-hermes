@@ -35,8 +35,8 @@ from .post_process import (
     parse_v1_markdown_xml,
 )
 from .fct_multi_affair import (
+    build_fct_multi_affair,
     build_fct_think_context,
-    flatten_affairs_to_legacy,
     parse_fct_multi_affair,
 )
 from .prompts import FCT_GENERATION_PROMPT, FCT_GENERATION_PROMPT_MULTI_AFFAIR
@@ -155,9 +155,9 @@ class FStageMixin:
                 if Config.FCT_MULTI_AFFAIR_ENABLED:
                     partial_multi = parse_fct_multi_affair(partial)
                     if partial_multi:
-                        truncated_cleaned = flatten_affairs_to_legacy(
-                            partial_multi["affairs"])
-                        truncated_cleaned["_assemble_status"] = ASSEMBLE_PENDING_BACKFILL
+                        # 决策 45：单一数据源——只落 affairs + 装配元数据
+                        truncated_cleaned = build_fct_multi_affair(
+                            partial_multi["affairs"], ASSEMBLE_PENDING_BACKFILL)
                         fct_str = json.dumps(truncated_cleaned, ensure_ascii=False)
                         hdl_text = self._extract_hdl(truncated_cleaned, turn_index) or (user_elm or "")[:150]
                         self._update_fct_v5(session_id, turn_index, fin_seq, fct_str, hdl_text)
@@ -228,9 +228,8 @@ class FStageMixin:
             if Config.FCT_MULTI_AFFAIR_ENABLED:
                 multi_parsed = parse_fct_multi_affair(response_text)
             if multi_parsed:
-                # 决策 44 续：多事务 affairs 输出，代码扁平化为 legacy 兼容结构
-                cleaned = flatten_affairs_to_legacy(multi_parsed["affairs"])
-                cleaned["_assemble_status"] = ASSEMBLE_OK
+                # 决策 45：单一数据源——Fct 只存 affairs + 装配元数据
+                cleaned = build_fct_multi_affair(multi_parsed["affairs"], ASSEMBLE_OK)
                 dialogue_ok = True
             else:
                 fct_dict, parser_hdl, _ = parse_v1_markdown_xml(response_text)

@@ -693,10 +693,21 @@ def _extract_open_items(turns_data: list[dict]) -> list[str]:
 
 
 def _compute_status(turns_data: list[dict]) -> str:
-    """规则：如果有 stage_tag=评估中 的 change → 'active'，否则 'completed'。"""
+    """规则：legacy 有 stage_tag=评估中，或任一事务仍带「后续行动」→ active。
+
+    决策 45：多事务记录没有状态标签，事务处于 OODA 哪一环节由阶段体现——
+    有非空「后续行动」即仍在循环中。
+    """
     for td in turns_data:
         for stag in td.get("tags", {}).values():
             if stag == "评估中":
+                return "active"
+    for td in turns_data:
+        for affair in td.get("affairs") or []:
+            if not isinstance(affair, dict):
+                continue
+            ooda = affair.get("ooda") if isinstance(affair.get("ooda"), dict) else {}
+            if ooda.get("后续行动"):
                 return "active"
     return "completed"
 
@@ -826,18 +837,25 @@ def _assemble_summary(
         strands = llm_result.get("strands")
         strands_from_llm = isinstance(strands, list) and bool(strands)
         if not strands_from_llm:
-            # 无 strands → 单 strand 包装：OODA 优先 4B ooda_groups，回退代码回溯
-            ooda_groups = llm_result.get("ooda_groups")
-            if not isinstance(ooda_groups, dict) or not ooda_groups:
-                ooda_groups = _fallback_ooda_groups(changes, turns_data)
-            strands = _fallback_single_strand(turns_data, hdl, ooda_groups)
+            # 决策 45：无 strands 且输入带 affairs → 直接用 affairs 聚合；
+            # 否则维持旧兜底（4B ooda_groups → 单 strand 包装）。
+            affair_strands = _fallback_strands_from_affairs(turns_data, hdl)
+            if affair_strands:
+                strands = affair_strands
+            else:
+                ooda_groups = llm_result.get("ooda_groups")
+                if not isinstance(ooda_groups, dict) or not ooda_groups:
+                    ooda_groups = _fallback_ooda_groups(changes, turns_data)
+                strands = _fallback_single_strand(turns_data, hdl, ooda_groups)
     else:
-        # 4B 失败：用代码精确去重的数据，不 skip
+        # 4B 失败：用代码精确去重的数据，不 skip；
+        # 决策 45：有 affairs 时按同名事务跨轮聚合 strands
         changes = fallback_changes
         key_facts = fallback_key_facts
         title_4b = ""
         consumable = bool(changes or key_facts)
-        strands = _fallback_single_strand(turns_data, hdl)
+        strands = _fallback_strands_from_affairs(turns_data, hdl) or \
+            _fallback_single_strand(turns_data, hdl)
         strands_from_llm = False
         logger.info("[CA_TOPIC_SUM] 4B failed, using code-extracted fallback")
 
@@ -891,6 +909,55 @@ def _fallback_single_strand(
     if ooda_groups is None:
         ooda_groups = _fallback_ooda_groups(_fallback_changes(turns_data), turns_data)
     return [{"hdl": hdl, "turns": all_turns, "ooda": ooda_groups}]
+
+
+def _fallback_strands_from_affairs(
+    turns_data: list[dict],
+    fallback_hdl: str = "",
+) -> list[dict]:
+    """决策 45：4B 失败兜底时直接用 Fct affairs 聚合 strands。
+
+    - 同名事务跨轮合并（hdl 相同 → 同一 strand）；
+    - turns 取该事务出现的轮次并集；
+    - ooda 四段跨轮 concat 去重（保序）。
+    无 affairs 数据 → 返回空列表（调用方回退 _fallback_single_strand）。
+    """
+    OODA_KEYS = ("现象与问题", "背景与约束", "决策与方案", "后续行动")
+    strands: list[dict] = []
+    by_hdl: dict[str, dict] = {}
+    order: list[str] = []
+
+    for td in turns_data:
+        turn = td.get("turn", 0)
+        for affair in td.get("affairs") or []:
+            if not isinstance(affair, dict):
+                continue
+            hdl = str(affair.get("hdl") or "").strip()
+            if not hdl:
+                hdl = str(td.get("hdl") or fallback_hdl or f"事务{len(strands) + 1}").strip()
+            strand = by_hdl.get(hdl)
+            if strand is None:
+                strand = {
+                    "hdl": hdl,
+                    "turns": [],
+                    "ooda": {k: [] for k in OODA_KEYS},
+                }
+                by_hdl[hdl] = strand
+                order.append(hdl)
+            if turn and turn not in strand["turns"]:
+                strand["turns"].append(turn)
+            ooda = affair.get("ooda") if isinstance(affair.get("ooda"), dict) else {}
+            for key in OODA_KEYS:
+                for item in ooda.get(key) or []:
+                    item_text = str(item).strip()
+                    if item_text and item_text not in strand["ooda"][key]:
+                        strand["ooda"][key].append(item_text)
+
+    for hdl in order:
+        strand = by_hdl[hdl]
+        if any(strand["ooda"].values()):
+            strands.append(strand)
+    return strands
 
 
 def _jaccard_dedup(items: list, threshold: float = 0.95) -> list[str]:

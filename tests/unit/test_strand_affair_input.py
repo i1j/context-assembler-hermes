@@ -1,4 +1,4 @@
-"""决策 45：strand 输入直接消费 Fct affairs（v3：OODA 阶段项即变更）。"""
+"""决策 45：strand 输入直接消费 Fct affairs（单一数据源，OODA 阶段项即变更）。"""
 import json
 
 from ca.store import SQLiteStore, collect_turn_fcts, write_turn_v5
@@ -14,26 +14,73 @@ def _write_fct(store, session, turn, fct: dict):
                   fct_text=json.dumps(fct, ensure_ascii=False), hdl_text="块hdl")
 
 
+V3_FCT = {
+    "_assemble_status": 0,
+    "_fct_format": "v3-multi-affair-ooda",
+    "affairs": [
+        {"hdl": "事务A", "turns": [7],
+         "ooda": {"现象与问题": ["问题A"], "背景与约束": [],
+                  "决策与方案": ["方案A"], "后续行动": []}},
+        {"hdl": "事务B", "turns": [7],
+         "ooda": {"现象与问题": [], "背景与约束": ["约束B"],
+                  "决策与方案": ["方案B"], "后续行动": ["跟进B"]}},
+    ],
+}
+
+
 class TestCollectTurnAffairs:
-    def test_affairs_exposed_from_fct_v3(self, tmp_path):
+    def test_v3_fct_single_source_derives_legacy_view(self, tmp_path):
+        """v3 Fct 无 legacy 扁平字段；collect_turn_fcts 从 affairs 现场派生视图。"""
         store = SQLiteStore(tmp_path / "s.db")
-        _write_fct(store, "s", 7, {
-            "changes": [{"core_change": "扁平兜底", "ooda": "决策与方案"}],
-            "affairs": [
-                {"hdl": "事务A", "turns": [7],
-                 "ooda": {"现象与问题": ["问题A"], "背景与约束": [],
-                          "决策与方案": ["方案A"], "后续行动": []}},
-                {"hdl": "事务B", "turns": [7],
-                 "ooda": {"现象与问题": [], "背景与约束": [],
-                          "决策与方案": ["方案B"], "后续行动": ["跟进B"]}},
-            ],
-        })
+        _write_fct(store, "s", 7, V3_FCT)
         entry = collect_turn_fcts(store, "s", [7])[0]
+
         assert [a["hdl"] for a in entry["affairs"]] == ["事务A", "事务B"]
         assert entry["affairs"][1]["ooda"]["后续行动"] == ["跟进B"]
-        # v3：affair 无 changes 字段/空列表（OODA 阶段即变更）
+        # v3：affair 无 changes 字段
         assert not entry["affairs"][0].get("changes")
-        assert not entry["affairs"][1].get("changes")
+
+        # 旧消费者视图由 OODA 阶段项派生
+        assert entry["changes"] == ["问题A", "方案A", "约束B", "方案B", "跟进B"]
+        assert entry["ooda_tags"] == {
+            "问题A": "现象与问题",
+            "方案A": "决策与方案",
+            "约束B": "背景与约束",
+            "方案B": "决策与方案",
+            "跟进B": "后续行动",
+        }
+        assert entry["todos"] == ["跟进B"]
+        assert entry["new_materials"] == ["问题A"]
+        assert entry["key_facts_supp"] == ["约束B"]
+        assert entry["consensus"] == ["方案A", "方案B"]
+        assert entry["tags"] == {}
+
+    def test_v3_fct_without_hdl_uses_first_affair_hdl(self, tmp_path):
+        store = SQLiteStore(tmp_path / "s.db")
+        write_turn_v5(store, "s", 7, 0, role="user", elm_text="任务",
+                      block_type="user_message", ooda_stage="orient")
+        write_turn_v5(store, "s", 7, 1, role="assistant", elm_text="答复",
+                      finish_reason="stop", block_type="agent_reply",
+                      ooda_stage="decide", is_fin=1,
+                      fct_text=json.dumps(V3_FCT, ensure_ascii=False), hdl_text="")
+        entry = collect_turn_fcts(store, "s", [7])[0]
+        assert entry["hdl"] == "事务A"
+
+    def test_v2_legacy_affair_changes_keep_tags(self, tmp_path):
+        """v2 旧库记录（affairs 带 changes）只读兼容：标签保留在派生视图。"""
+        store = SQLiteStore(tmp_path / "s.db")
+        _write_fct(store, "s", 6, {
+            "affairs": [{
+                "hdl": "旧事务", "turns": [6],
+                "ooda": {"现象与问题": ["旧问题"], "背景与约束": [],
+                         "决策与方案": ["旧方案"], "后续行动": []},
+                "changes": [{"stage_tag": "已实施", "core_change": "旧方案落地"}],
+            }],
+        })
+        entry = collect_turn_fcts(store, "s", [6])[0]
+        assert entry["tags"] == {"旧方案落地": "已实施"}
+        assert "旧问题" in entry["changes"]
+        assert "旧方案落地" in entry["changes"]
 
 
 class TestFormatTurnsForPrompt:
@@ -41,7 +88,7 @@ class TestFormatTurnsForPrompt:
         entry = {
             "turn": 7,
             "hdl": "块hdl",
-            "changes": ["扁平兜底"],
+            "changes": ["问题A", "方案A"],
             "tags": {}, "ooda_tags": {}, "todos": [], "user_requests": [],
             "affairs": [
                 {"hdl": "连接池扩容", "turns": [7],

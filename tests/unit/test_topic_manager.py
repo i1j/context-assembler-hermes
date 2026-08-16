@@ -751,6 +751,35 @@ class TestExtractTurnFct:
         assert "ooda" not in out
         assert "决策与方案" not in out
 
+    def test_json_v3_affairs_keeps_ooda_values(self, mgr):
+        """决策 45：affairs[].ooda 值是变更内容，必须保留（不再是元数据标签）"""
+        rows = [(0, "user", None, None, "原始消息",
+                 '{"affairs":[{"hdl":"连接池扩容","turns":[7],'
+                 '"ooda":{"现象与问题":["池耗尽"],"背景与约束":[],'
+                 '"决策与方案":["扩容到200"],"后续行动":[]}}],'
+                 '"_assemble_status":0}', "")]
+        out = mgr._extract_turn_fct(rows)
+        assert "池耗尽" in out
+        assert "扩容到200" in out
+        assert "连接池扩容" in out
+        # 元数据不残留（装配数字 / 键名）
+        assert "0" not in out.split()
+        assert "_assemble_status" not in out
+        assert "ooda" not in out
+
+    def test_json_v3_affairs_skips_legacy_change_ooda_tag(self, mgr):
+        """v2 affair 的 changes 中 ooda 仍是标签 → 跳过；stage_tag 也跳过"""
+        rows = [(0, "user", None, None, "原始消息",
+                 '{"affairs":[{"hdl":"旧事务","turns":[6],'
+                 '"ooda":{"决策与方案":["旧方案"]},'
+                 '"changes":[{"stage_tag":"已实施","ooda":"决策与方案",'
+                 '"core_change":"旧方案落地"}]}]}', "")]
+        out = mgr._extract_turn_fct(rows)
+        assert "旧方案落地" in out
+        assert "旧方案" in out
+        assert "已实施" not in out
+        assert "决策与方案" not in out
+
     def test_json_malformed_passthrough(self, mgr):
         """损坏的 JSON 原样返回（不吞内容）"""
         rows = [(0, "user", None, None, "原始消息", '{"core_change": broken', "")]

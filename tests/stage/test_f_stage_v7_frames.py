@@ -87,7 +87,7 @@ MULTI_AFFAIR_JSON = """{"affairs":[
 
 
 class TestFStageMultiAffairOutput:
-    def test_multi_affair_response_stored_with_legacy_flatten(self, ca_engine):
+    def test_multi_affair_response_stored_single_source(self, ca_engine):
         import json as _json
         from ca.store import read_fct_v5
         write_turn_v5(ca_engine.store, "test", 3, 0, role="user", elm_text="两件事",
@@ -107,14 +107,13 @@ class TestFStageMultiAffairOutput:
 
         data = _json.loads(read_fct_v5(ca_engine.store, "test", 3, 1))
         assert data["_fct_format"] == "v3-multi-affair-ooda"
+        assert data["_assemble_status"] == 0
         assert [a["hdl"] for a in data["affairs"]] == ["事务A", "事务B"]
-        # 决策 45：affairs 本身不再带 changes/stage_tag
+        # 决策 45 单一数据源：只存 affairs + 装配元数据，无 legacy 扁平字段
+        assert set(data.keys()) == {"affairs", "_assemble_status", "_fct_format"}
         assert all("changes" not in a for a in data["affairs"])
-        # legacy 扁平字段由 OODA 阶段项派生，无状态标签
-        assert [c["core_change"] for c in data["changes"]] == [
-            "问题A", "方案A落地", "问题B", "方案B将实施", "跟进B"]
-        assert all("stage_tag" not in c for c in data["changes"])
-        assert "跟进B" in data["todo"]
+        assert data["affairs"][0]["ooda"]["决策与方案"] == ["方案A落地"]
+        assert data["affairs"][1]["ooda"]["后续行动"] == ["跟进B"]
 
     def test_orient_card_injected_into_fct_input(self, ca_engine):
         from ca.store import write_think_card_v1

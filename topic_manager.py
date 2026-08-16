@@ -95,6 +95,10 @@ def _extract_fct_semantic_text(fct_json: str) -> str:
     必须同时跳过元数据键与非字符串 value。
 
     非 JSON 文本（原始用户消息 / 旧格式 / 损坏 JSON）原样返回。
+
+    决策 45：v3 多事务 Fct 的 `affairs[].ooda` 值是变更内容本身，
+    仅当 ooda 出现在 affair 对象内时保留其值；legacy changes 里的
+    `ooda` 仍是固定阶段标签，继续跳过。
     """
     if not fct_json:
         return ""
@@ -107,15 +111,28 @@ def _extract_fct_semantic_text(fct_json: str) -> str:
 
     parts: List[str] = []
 
-    def _walk(v: Any) -> None:
+    def _walk(v: Any, allow_ooda: bool = False) -> None:
         if isinstance(v, dict):
             for key, val in v.items():
+                # affairs 列表元素是事务对象：其 ooda 值是语义内容
+                if key == "affairs" and isinstance(val, list):
+                    for item in val:
+                        _walk(item, allow_ooda=True)
+                    continue
+                # affair 内允许 ooda；其余位置的 ooda 仍是元数据标签
+                if key == "ooda" and allow_ooda:
+                    _walk(val, allow_ooda=False)
+                    continue
                 if key in _FCT_METADATA_KEYS:
                     continue
-                _walk(val)
+                # legacy changes 元素内的 ooda 标签不放开
+                if key == "changes":
+                    _walk(val, allow_ooda=False)
+                else:
+                    _walk(val, allow_ooda=allow_ooda)
         elif isinstance(v, list):
             for item in v:
-                _walk(item)
+                _walk(item, allow_ooda=allow_ooda)
         elif isinstance(v, str):
             s = v.strip()
             if s:

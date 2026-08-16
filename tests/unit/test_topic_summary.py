@@ -779,6 +779,68 @@ class TestFallbackSingleStrandShortHdl:
         assert len(out_hdl) <= 30, f"fallback hdl 未缩短: {len(out_hdl)}: {out_hdl}"
 
 
+class TestFallbackStrandsFromAffairs:
+    """决策 45：4B 失败兜底直接用 Fct affairs 聚合 strands（同名事务跨轮合并）。"""
+
+    @staticmethod
+    def _affair_turns() -> list:
+        return [
+            {"turn": 7, "hdl": "块hdl",
+             "changes": ["池耗尽", "扩容到200", "召回空", "本地化", "验证"],
+             "tags": {}, "ooda_tags": {}, "todos": [], "user_requests": [],
+             "affairs": [
+                 {"hdl": "连接池扩容", "turns": [7],
+                  "ooda": {"现象与问题": ["池耗尽"], "背景与约束": [],
+                           "决策与方案": ["扩容到200"], "后续行动": []}},
+                 {"hdl": "检索修复", "turns": [7],
+                  "ooda": {"现象与问题": ["召回空"], "背景与约束": [],
+                           "决策与方案": ["本地化"], "后续行动": ["验证"]}},
+             ]},
+            {"turn": 8, "hdl": "块hdl", "changes": ["观察慢查询"],
+             "tags": {}, "ooda_tags": {}, "todos": [], "user_requests": [],
+             "affairs": [
+                 {"hdl": "连接池扩容", "turns": [8],
+                  "ooda": {"现象与问题": [], "背景与约束": [],
+                           "决策与方案": ["扩容到200"], "后续行动": ["观察慢查询"]}},
+             ]},
+        ]
+
+    def test_aggregates_same_hdl_across_turns(self):
+        from ca.topic_summary import _fallback_strands_from_affairs
+        strands = _fallback_strands_from_affairs(self._affair_turns())
+        assert [s["hdl"] for s in strands] == ["连接池扩容", "检索修复"]
+        assert strands[0]["turns"] == [7, 8]
+        assert strands[0]["ooda"]["决策与方案"] == ["扩容到200"]
+        assert strands[0]["ooda"]["后续行动"] == ["观察慢查询"]
+        assert strands[1]["ooda"]["后续行动"] == ["验证"]
+
+    def test_summarize_llm_failure_uses_affair_strands(self):
+        from unittest.mock import patch
+        from ca.topic_summary import summarize_topic_chunk
+
+        with patch("ca.topic_summary.call_llm_for_summary", return_value=None):
+            result = summarize_topic_chunk(self._affair_turns(), max_chars=2000)
+        assert result is not None
+        assert [s["hdl"] for s in result["strands"]] == ["连接池扩容", "检索修复"]
+        assert result["changes"] == ["池耗尽", "扩容到200", "召回空", "本地化", "验证",
+                                     "观察慢查询"]
+
+    def test_status_active_when_affair_has_followup(self):
+        from ca.topic_summary import _compute_status
+        assert _compute_status(self._affair_turns()) == "active"
+
+    def test_status_completed_when_no_followup(self):
+        from ca.topic_summary import _compute_status
+        turns = [
+            {"turn": 7, "hdl": "h", "changes": [], "tags": {}, "ooda_tags": {},
+             "todos": [], "user_requests": [],
+             "affairs": [{"hdl": "已完成事务", "turns": [7],
+                          "ooda": {"现象与问题": ["p"], "背景与约束": [],
+                                   "决策与方案": ["d"], "后续行动": []}}]},
+        ]
+        assert _compute_status(turns) == "completed"
+
+
 class TestSummarizeChunkRetryDegenerate:
     """P1-1: 4B 返回退化输出（无 strands 且无 ooda_groups）→ 重试一次。"""
 

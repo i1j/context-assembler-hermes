@@ -1903,19 +1903,176 @@ def get_topic_strand_status(
         return None
 
 
+def _entry_from_affairs(turn: int, block_hdl: str, raw_affairs: list) -> dict[str, Any]:
+    """决策 45 单一数据源：从 Fct affairs 现场派生旧消费者视图。
+
+    Fct JSON 不再携带 legacy 扁平字段；collect_turn_fcts 在这里把
+    affairs[].ooda 四段映射回 entry 的 changes/tags/ooda_tags/todos/
+    consensus/key_facts_supp/new_materials 视图（v2 旧记录携带的
+    per-affair changes 保留其 stage_tag/user_request，只读兼容）。
+    """
+    OODA_KEYS = ("现象与问题", "背景与约束", "决策与方案", "后续行动")
+    STAGE_TO_LEGACY = {
+        "现象与问题": "new_materials",
+        "背景与约束": "key_facts_supp",
+        "决策与方案": "consensus",
+    }
+
+    affairs: list[dict] = []
+    clean_changes: list[str] = []
+    seen_cores: set[str] = set()
+    tags: dict[str, str] = {}
+    ooda_tags: dict[str, str] = {}
+    todos: list[str] = []
+    user_requests: list[str] = []
+    consensus: list[str] = []
+    key_facts_supp: list[str] = []
+    new_materials: list[str] = []
+
+    for a in raw_affairs:
+        if not isinstance(a, dict):
+            continue
+        raw_ooda = a.get("ooda") if isinstance(a.get("ooda"), dict) else {}
+        ooda: dict[str, list[str]] = {
+            k: [str(x).strip() for x in (raw_ooda.get(k) or []) if str(x).strip()]
+            for k in OODA_KEYS
+        }
+        a_changes = a.get("changes")
+        if not isinstance(a_changes, list):
+            a_changes = []
+        v2_changes: list[dict] = []
+        for c in a_changes:
+            if not isinstance(c, dict):
+                continue
+            core = str(c.get("core_change") or "").strip()
+            if not core:
+                continue
+            stag = str(c.get("stage_tag") or "").strip()
+            item: dict[str, str] = {"core_change": core}
+            if stag:
+                item["stage_tag"] = stag
+            if c.get("user_request"):
+                item["user_request"] = str(c["user_request"]).strip()
+            v2_changes.append(item)
+
+        affair: dict[str, Any] = {
+            "hdl": str(a.get("hdl") or "").strip(),
+            "turns": a.get("turns") if isinstance(a.get("turns"), list) else [turn],
+            "ooda": ooda,
+        }
+        if v2_changes:
+            affair["changes"] = v2_changes
+        affairs.append(affair)
+
+        # v3：OODA 阶段项即变更；同时派生旧消费者的扁平视图
+        for stage in OODA_KEYS:
+            for item_text in ooda[stage]:
+                if item_text not in seen_cores:
+                    seen_cores.add(item_text)
+                    clean_changes.append(item_text)
+                ooda_tags[item_text] = stage
+                legacy_key = STAGE_TO_LEGACY.get(stage)
+                if legacy_key:
+                    target = {"new_materials": new_materials,
+                              "key_facts_supp": key_facts_supp,
+                              "consensus": consensus}[legacy_key]
+                    if item_text not in target:
+                        target.append(item_text)
+                if stage == "后续行动" and item_text not in todos:
+                    todos.append(item_text)
+
+        # v2 旧库：per-affair changes 补差集，并保留状态标签语义
+        for c in v2_changes:
+            core = c["core_change"]
+            if core not in seen_cores:
+                seen_cores.add(core)
+                clean_changes.append(core)
+            if c.get("stage_tag"):
+                tags[core] = c["stage_tag"]
+                if c["stage_tag"] == "评估中" and core not in todos:
+                    todos.append(core)
+            ur = c.get("user_request", "").strip()
+            if ur and ur not in user_requests:
+                user_requests.append(ur)
+
+    first_affair_hdl = next((a["hdl"] for a in affairs if a["hdl"]), "")
+    entry: dict[str, Any] = {
+        "turn": turn,
+        "hdl": block_hdl or first_affair_hdl,
+        "changes": clean_changes,
+        "tags": tags,
+        "ooda_tags": ooda_tags,
+        "todos": todos,
+        "user_requests": user_requests,
+        "consensus": consensus,
+        "key_facts_supp": key_facts_supp,
+        "new_materials": new_materials,
+        "affairs": affairs,
+    }
+    return entry
+
+
+def _entry_from_legacy_fct(turn: int, block_hdl: str, fct_data: dict) -> dict[str, Any]:
+    """旧单事务 Fct JSON → collect_turn_fcts 的 entry 视图（行为不变）。"""
+    raw_changes = fct_data.get("changes") or fct_data.get("changes_before", [])
+    clean_changes: list[str] = []
+    tags: dict[str, str] = {}
+    ooda_tags: dict[str, str] = {}
+    todos: list[str] = []
+    user_requests: list[str] = []
+    for c in raw_changes:
+        if not isinstance(c, dict):
+            continue
+        core = (c.get("core_change") or c.get("change", "")).strip()
+        if not core:
+            continue
+        clean_changes.append(core)
+        stag = c.get("stage_tag", "").strip()
+        if stag:
+            tags[core] = stag
+            if stag == "评估中":
+                todos.append(core)
+        ooda_val = c.get("ooda", "").strip()
+        if ooda_val:
+            ooda_tags[core] = ooda_val
+        ur = c.get("user_request", "").strip()
+        if ur:
+            user_requests.append(ur)
+    entry: dict[str, Any] = {
+        "turn": turn,
+        "hdl": block_hdl,
+        "changes": clean_changes,
+        "tags": tags,
+        "ooda_tags": ooda_tags,
+        "todos": todos,
+        "user_requests": user_requests,
+    }
+    consensus = fct_data.get("consensus")
+    if isinstance(consensus, list):
+        entry["consensus"] = [str(x).strip() for x in consensus if x]
+    obj_facts = fct_data.get("objective_facts")
+    if isinstance(obj_facts, list):
+        entry["key_facts_supp"] = [str(x).strip() for x in obj_facts if x]
+    new_mat = fct_data.get("new_materials")
+    if isinstance(new_mat, list):
+        entry["new_materials"] = [str(x).strip() for x in new_mat if x]
+    return entry
+
+
 def collect_turn_fcts(
     store, session_id: str, turns: list[int],
 ) -> list[dict]:
     """从 turn_stream 收集话题块各轮的 Fct 数据。
 
-    新格式（v5+ turn_stream）：Fct JSON 结构为
-      {"changes": [{"stage_tag": "已实施", "core_change": "...", "user_request": "..."}, ...],
-       "consensus": [...], "objective_facts": [...], "new_materials": [...]}
+    - 多事务 Fct（v3，决策 45）：JSON 只有 `affairs[]`，OODA 阶段项即变更；
+      此处现场派生旧消费者视图（changes/tags/ooda_tags/todos/补充四段）。
+    - 旧单事务 Fct：维持原有 `changes/core_change/四段字段` 解析行为。
 
     返回 [{"turn": n, "hdl": "...", "changes": [str, ...],
-            "tags": {str: str}, "todos": [str, ...], "user_requests": [str, ...],
+            "tags": {str: str}, "ooda_tags": {str: str},
+            "todos": [str, ...], "user_requests": [str, ...],
             "consensus": [str, ...], "key_facts_supp": [str, ...],
-            "new_materials": [str, ...]}, ...]
+            "new_materials": [str, ...], "affairs": [...]}, ...]
     """
     result = []
     for t in sorted(turns):
@@ -1926,85 +2083,18 @@ def collect_turn_fcts(
             if role == "assistant" and fin == "stop" and Fct:
                 fct = Fct
                 hdl = Hdl or ""
-        if fct:
-            try:
-                fct_data = json.loads(fct)
-                raw_changes = fct_data.get("changes") or fct_data.get("changes_before", [])
-                clean_changes: list[str] = []
-                tags: dict[str, str] = {}
-                ooda_tags: dict[str, str] = {}
-                todos: list[str] = []
-                user_requests: list[str] = []
-                for c in raw_changes:
-                    if not isinstance(c, dict):
-                        continue
-                    core = (c.get("core_change") or c.get("change", "")).strip()
-                    if not core:
-                        continue
-                    clean_changes.append(core)
-                    stag = c.get("stage_tag", "").strip()
-                    if stag:
-                        tags[core] = stag
-                        if stag == "评估中":
-                            todos.append(core)
-                    ooda_val = c.get("ooda", "").strip()
-                    if ooda_val:
-                        ooda_tags[core] = ooda_val
-                    # 收集 change 级的 user_request
-                    ur = c.get("user_request", "").strip()
-                    if ur:
-                        user_requests.append(ur)
-                entry: dict[str, Any] = {
-                    "turn": t,
-                    "hdl": hdl,
-                    "changes": clean_changes,
-                    "tags": tags,
-                    "ooda_tags": ooda_tags,
-                    "todos": todos,
-                    "user_requests": user_requests,
-                }
-                # 提取 Fct 顶层补充字段
-                consensus = fct_data.get("consensus")
-                if isinstance(consensus, list):
-                    entry["consensus"] = [str(x).strip() for x in consensus if x]
-                obj_facts = fct_data.get("objective_facts")
-                if isinstance(obj_facts, list):
-                    entry["key_facts_supp"] = [str(x).strip() for x in obj_facts if x]
-                new_mat = fct_data.get("new_materials")
-                if isinstance(new_mat, list):
-                    entry["new_materials"] = [str(x).strip() for x in new_mat if x]
-                # 决策 44/45：多事务 Fct —— affairs 直接进入 strand 输入（效率优先，
-                # 避免再从 legacy changes 反推事务边界）；v3 的 OODA 阶段项即变更
-                raw_affairs = fct_data.get("affairs")
-                if isinstance(raw_affairs, list) and raw_affairs:
-                    affairs = []
-                    for a in raw_affairs:
-                        if not isinstance(a, dict):
-                            continue
-                        ooda = a.get("ooda") if isinstance(a.get("ooda"), dict) else {}
-                        a_changes = a.get("changes")
-                        if not isinstance(a_changes, list):
-                            a_changes = []
-                        affairs.append({
-                            "hdl": str(a.get("hdl") or "").strip(),
-                            "turns": a.get("turns") if isinstance(a.get("turns"), list) else [t],
-                            "ooda": {
-                                k: [str(x).strip() for x in (ooda.get(k) or []) if str(x).strip()]
-                                for k in ("现象与问题", "背景与约束", "决策与方案", "后续行动")
-                            },
-                            "changes": [
-                                {"stage_tag": str(c.get("stage_tag") or "").strip(),
-                                 "core_change": str(c.get("core_change") or "").strip()}
-                                for c in a_changes
-                                if isinstance(c, dict)
-                                and str(c.get("core_change") or "").strip()
-                            ],
-                        })
-                    if affairs:
-                        entry["affairs"] = affairs
-                result.append(entry)
-            except (json.JSONDecodeError, TypeError):
-                pass
+        if not fct:
+            continue
+        try:
+            fct_data = json.loads(fct)
+            raw_affairs = fct_data.get("affairs")
+            if isinstance(raw_affairs, list) and raw_affairs:
+                entry = _entry_from_affairs(t, hdl, raw_affairs)
+            else:
+                entry = _entry_from_legacy_fct(t, hdl, fct_data)
+            result.append(entry)
+        except (json.JSONDecodeError, TypeError):
+            pass
     return result
 
 

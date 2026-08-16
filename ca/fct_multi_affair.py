@@ -6,9 +6,8 @@
      **就是该阶段的变更记录**，不再有 changes/stage_tag（无【已完成】等标签）。
    - v2（旧库只读兼容）：`{hdl, turns, ooda, changes[{stage_tag, core_change}]}`，
      解析时保留 changes 供旧渲染路径展示。
-2. 代码扁平化为 legacy Fct 结构（changes/core_change/四段字段），保证
-   topic_summary / strand / A-stage 既有消费链不破。v3 派生的 legacy changes
-   不带 stage_tag（状态标签在多事务模式已废弃）。
+2. `build_fct_multi_affair` 产出单一数据源 Fct JSON（仅 affairs +
+   装配元数据），不再写 legacy 扁平字段；旧消费者的扁平视图由读路径现场派生。
 3. 代码筛选当前事务的 think 卡（orient 优先 → decision），截断 + 总预算，
    拼入 Fct 输入，不把全部思考原文灌给 4B。
 
@@ -24,7 +23,6 @@ from typing import Any, Dict, List, Optional
 from .post_process import MEANINGLESS_CORE, VALID_STATES
 
 FCT_OODA_KEYS = ("现象与问题", "背景与约束", "决策与方案", "后续行动")
-FCT_LEGACY_KEYS = ("new_materials", "objective_facts", "consensus", "todo")
 FCT_FORMAT_V2 = "v2-multi-affair"          # 旧库只读兼容
 FCT_FORMAT_V3 = "v3-multi-affair-ooda"     # 当前写入契约（决策 45）
 
@@ -134,28 +132,15 @@ def _fallback_hdl(affair: Dict[str, Any], idx: int) -> str:
     return f"事务{idx}"
 
 
-def _ooda_stage_changes(affair: Dict[str, Any]) -> List[Dict[str, str]]:
-    """决策 45：v3 记录的 OODA 阶段项即变更——派生 legacy changes（无 stage_tag）。
+def build_fct_multi_affair(
+    affairs: List[Dict[str, Any]],
+    assemble_status: Any,
+) -> Dict[str, Any]:
+    """affairs[] → 单一数据源 Fct JSON（决策 45 v3 落库契约）。
 
-    每条携带 `ooda`（阶段标签），供旧消费者按阶段归类；不补 stage_tag，
-    多事务模式不存在【已完成】等状态标签。
-    """
-    out: List[Dict[str, str]] = []
-    for stage in FCT_OODA_KEYS:
-        for item in affair.get("ooda", {}).get(stage, []):
-            if item:
-                out.append({"core_change": item, "ooda": stage})
-    return out
-
-
-def flatten_affairs_to_legacy(affairs: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """affairs[] → legacy Fct dict（保留 affairs 供新版消费）。
-
-    代码精确提取兜底：
-    - v3（无显式 changes）：legacy changes 从 OODA 阶段项派生，只带
-      `ooda` 阶段标签、不带 stage_tag 状态标签；
-    - v2（旧库带 changes）：changes 原样保留（只读兼容），阶段项补差集。
-    OODA 四段映射旧字段，供旧消费者/embedding/回退链路不破。
+    只写 `affairs` + `_assemble_status` + `_fct_format`，**不再写任何
+    legacy 扁平字段**（changes/core_change/四段字段）。旧消费者需要的
+    扁平视图由读路径（`collect_turn_fcts`）从 affairs 现场派生。
     """
     normalized: List[Dict[str, Any]] = []
     for idx, affair in enumerate(affairs, start=1):
@@ -163,49 +148,11 @@ def flatten_affairs_to_legacy(affairs: List[Dict[str, Any]]) -> Dict[str, Any]:
         item["hdl"] = _fallback_hdl(item, idx)
         item.pop("_idx", None)
         normalized.append(item)
-
-    changes: List[Dict[str, str]] = []
-    seen: set = set()
-    for affair in normalized:
-        # v2 旧库兼容：显式 changes 原样保留（含旧 stage_tag）
-        for change in affair.get("changes", []):
-            core = change["core_change"]
-            if core not in seen:
-                seen.add(core)
-                changes.append(dict(change))
-        # v3 派生：OODA 阶段项补充未覆盖的变更
-        for change in _ooda_stage_changes(affair):
-            core = change["core_change"]
-            if core not in seen:
-                seen.add(core)
-                changes.append(change)
-
-    legacy = {
-        "changes": changes,
-        "core_change": "；".join(c["core_change"] for c in changes) if changes else "本轮无新内容",
-        "new_materials": [],
-        "objective_facts": [],
-        "consensus": [],
-        "todo": [],
+    return {
+        "affairs": normalized,
+        "_assemble_status": assemble_status,
+        "_fct_format": FCT_FORMAT_V3,
     }
-    ooda_to_legacy = {
-        "现象与问题": "new_materials",
-        "背景与约束": "objective_facts",
-        "决策与方案": "consensus",
-        "后续行动": "todo",
-    }
-    for affair in normalized:
-        for ooda_key, legacy_key in ooda_to_legacy.items():
-            for item in affair.get("ooda", {}).get(ooda_key, []):
-                if item not in legacy[legacy_key]:
-                    legacy[legacy_key].append(item)
-
-    # 注意：不走 clean_increment——它的「changes 已有条目时把 OODA 四段
-    # 反哺为 stage_tag=待分类」会把多事务 changes 与 ooda 混在一起。
-    # parser 已逐字段校验，这里保持 affairs.ooda 为唯一内容源。
-    legacy["affairs"] = normalized
-    legacy["_fct_format"] = FCT_FORMAT_V3
-    return legacy
 
 
 def _truncate_reasoning(text: str, max_chars: int) -> str:
