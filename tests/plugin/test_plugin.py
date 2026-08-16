@@ -457,6 +457,12 @@ class TestEngineRefreshAfterTtlCleanup:
         assert plugin._engine is not None
         assert plugin._engine_errored is False
 
+        # 验证: topic_mgr 的底层依赖已随新引擎重绑（旧连接已关闭）
+        assert plugin._topic_mgr is not None
+        assert plugin._topic_mgr._store is plugin._engine.store
+        assert plugin._topic_mgr._embed_client is plugin._engine.embed_client
+        assert plugin._topic_mgr._cache is plugin._engine.cache
+
         # 新引擎能读旧数据
         rows_after = read_turn_stream_all(plugin._engine.store, session_id)
         assert len(rows_after) >= len(rows_before), "should retain previous data"
@@ -467,6 +473,47 @@ class TestEngineRefreshAfterTtlCleanup:
             (session_id, "recovery test"),
         )
         assert cur.fetchone() is not None, "recovery user message should be in DB"
+
+        # 清理
+        with _engines_lock:
+            _engines.pop(session_id, None)
+        try:
+            ca.session_manager._sessions.pop(session_id, None)
+        except Exception:
+            pass
+
+    def test_refresh_restores_turn_state_after_mid_turn_ttl(self):
+        """TTL 驱逐后新引擎必须从 DB 恢复 _current_turn/_seq_counter/_tool_seq_map，否则 mid-turn hook 会写 turn 0。"""
+        import ca
+        plugin = CAContextAssemblerPlugin()
+        session_id = f"cr009_mid_{int(time.time())}"
+        plugin.on_session_start(session_id, model="deepseek-v4-flash")
+        with _engines_lock:
+            _engines[session_id] = plugin
+
+        from ca.store import write_turn_v5
+        write_turn_v5(plugin._engine.store, session_id, 5, 0,
+                      role="user", elm_text="turn5 user")
+        write_turn_v5(plugin._engine.store, session_id, 5, 1,
+                      role="assistant", elm_text="thinking",
+                      finish_reason="tool_calls")
+        write_turn_v5(plugin._engine.store, session_id, 5, 2,
+                      role="tool", elm_text="",
+                      tool_name="bash", tool_call_id="mid_call",
+                      status="pending")
+
+        old_engine = plugin._engine
+        try:
+            ca.session_manager._sessions.pop(session_id, None)
+        except Exception:
+            pass
+        old_engine.destroy()
+
+        assert _ca_plugin._refresh_engine(session_id, plugin) is True
+        assert plugin._engine is not old_engine
+        assert plugin._engine._current_turn == 5
+        assert plugin._engine._seq_counter.get(5) == 2
+        assert plugin._engine._tool_seq_map == {"mid_call": (5, 2)}
 
         # 清理
         with _engines_lock:

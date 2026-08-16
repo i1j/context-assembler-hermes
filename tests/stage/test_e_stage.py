@@ -143,6 +143,63 @@ class TestOnApiResponseV5:
         assert rows[0][2] == "深层思考", \
             f"Expected reasoning_content, got {rows[0][2]}"
 
+    def test_tool_calls_arguments_stored_as_json_string(self, ca_engine):
+        """tool_calls_json 中的 function.arguments 必须是 JSON string（Chat Completions schema）"""
+        ca_engine._seq_counter = {0: 0}
+        tc = _make_tool_call("c6", "tool", args={"x": 1, "y": "二"})
+        ca_engine._on_api_response_v5(
+            api_request_id="r6",
+            assistant_message=_make_msg("工具", tool_calls=[tc]),
+            api_call_count=1,
+            turn_index=0,
+        )
+        cur = ca_engine.store.conn.execute(
+            "SELECT tool_calls_json FROM turn_stream "
+            "WHERE session_id=? AND turn=? AND seq=?",
+            ("test", 0, 1),
+        )
+        row = cur.fetchone()
+        assert row is not None, "thought row should exist"
+        tool_calls = json.loads(row[0])
+        raw_args = tool_calls[0]["function"]["arguments"]
+        assert isinstance(raw_args, str), (
+            f"arguments 必须是 JSON string，got {type(raw_args).__name__}: {raw_args!r}"
+        )
+        assert json.loads(raw_args) == {"x": 1, "y": "二"}
+
+    @pytest.mark.parametrize("raw_args, expected_json", [
+        ("", {}),
+        ("not-json", {}),
+        (None, {}),
+        ({"x": 1}, {"x": 1}),
+        (object(), {}),
+        (float("nan"), {}),
+    ])
+    def test_arguments_normalization_contract(self, ca_engine, raw_args, expected_json):
+        """arguments 契约：合法 str 原样、非法/空/None/不可序列化/NaN → "{}"；dict → JSON string"""
+        ca_engine._seq_counter = {0: 0}
+        tc = SimpleNamespace()
+        tc.id = "c_norm"
+        tc.name = "tool"
+        tc.type = "function"
+        tc.arguments = raw_args
+        ca_engine._on_api_response_v5(
+            api_request_id="r_norm",
+            assistant_message=_make_msg("工具", tool_calls=[tc]),
+            api_call_count=1,
+            turn_index=0,
+        )
+        cur = ca_engine.store.conn.execute(
+            "SELECT tool_calls_json FROM turn_stream "
+            "WHERE session_id=? AND turn=? AND seq=?",
+            ("test", 0, 1),
+        )
+        row = cur.fetchone()
+        assert row is not None, "thought row should exist"
+        stored = json.loads(row[0])
+        assert isinstance(stored[0]["function"]["arguments"], str)
+        assert json.loads(stored[0]["function"]["arguments"]) == expected_json
+
     def test_tool_seq_map_populated(self, ca_engine):
         """_tool_seq_map 包含每个 tool_call_id 的 (turn, seq)"""
         ca_engine._seq_counter = {0: 0}
@@ -265,6 +322,46 @@ class TestOnPostToolCallV5:
         assert len(rows) == 2
         content = rows[1][2]  # seq=2 行
         assert "a.txt" in content or "files" in content
+
+    def test_result_falsy_or_unserializable_preserved(self, ca_engine):
+        """result=0 不被吞掉；不可序列化对象回退 str(result)，tool 行必须落库"""
+        ca_engine._seq_counter = {0: 0}
+        tc = _make_tool_call("c_falsy", "test")
+        ca_engine._on_api_response_v5(
+            api_request_id="r_falsy",
+            assistant_message=_make_msg("查数", tool_calls=[tc]),
+            api_call_count=1,
+            turn_index=0,
+        )
+        ca_engine._on_post_tool_call_v5(
+            tool_call_id="c_falsy",
+            tool_name="test",
+            args={},
+            result=0,
+            status="ok",
+            duration_ms=10,
+        )
+        from ca.store import read_turn_elm_rows
+        rows = read_turn_elm_rows(ca_engine.store, "test", 0)
+        assert rows[1][2] == "0"
+
+        tc2 = _make_tool_call("c_bytes", "test")
+        ca_engine._on_api_response_v5(
+            api_request_id="r_bytes",
+            assistant_message=_make_msg("查字节", tool_calls=[tc2]),
+            api_call_count=1,
+            turn_index=1,
+        )
+        ca_engine._on_post_tool_call_v5(
+            tool_call_id="c_bytes",
+            tool_name="test",
+            args={},
+            result=b"raw-bytes",
+            status="ok",
+            duration_ms=10,
+        )
+        rows = read_turn_elm_rows(ca_engine.store, "test", 1)
+        assert any("raw-bytes" in (r[2] or "") for r in rows)
 
     def test_no_placeholder_fallback_creates_row(self, ca_engine):
         """无占位行 → 回退创建新行"""
@@ -409,7 +506,7 @@ class TestColumnIntegrityV5:
         )
         row = cur.fetchone()
         assert row is not None, "thought row should exist"
-        # Fct = thought_fct（代码摘要），非用于 A-stage 替换的对话 Fct
+        # Fct = thought_fct（代码摘要），非用于 A-stage 重建的对话 Fct
         assert isinstance(row[0], str), f"thought Fct should be str (thought_fct), got {row[0]!r}"
         assert isinstance(row[1], str) and len(row[1]) > 0, f"thought Hdl should be non-empty str at E-stage write, got {row[1]!r}"
         assert row[2] is not None, "thought should have tool_calls_json"

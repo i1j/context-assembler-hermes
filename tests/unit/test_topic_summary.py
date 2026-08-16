@@ -380,6 +380,22 @@ class TestSummarizeTopicChunkBudget:
         # 参考段在 Input 之前
         assert prompt.index("候选主题参考") < prompt.index("Input:")
 
+    def test_build_prompt_with_reality_candidates_uses_reality_id(self):
+        """v7: 注入候选是 reality dict → prompt 显示 reality_id/name，不能输出 theme_id=None。"""
+        from ca.topic_summary import build_summarize_prompt
+
+        prompt = build_summarize_prompt(
+            _turns(2), max_chars=2000,
+            candidate_themes=[{
+                "reality_id": 41, "name": "连接池治理", "hdl": "当前聚焦连接池参数",
+                "current_status": {"goals": ["降低超时率"], "current_state": [],
+                                   "key_facts": [], "context": []},
+            }],
+        )
+        assert "reality_id=41" in prompt
+        assert "连接池治理" in prompt
+        assert "theme_id=None" not in prompt
+
     def test_build_prompt_without_candidates_no_refs(self):
         """v6.5.3: 无候选 theme → prompt 不含参考段（零额外输入）。"""
         from ca.topic_summary import build_summarize_prompt

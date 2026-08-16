@@ -5,7 +5,7 @@ category: decision
 date: "2026-06"
 version_introduced: v6.0
 affects: [a-stage, topic-management]
-status: 已实装（代码+测试）｜生产未激活（2026-08-13 核对修订）
+status: 已实装（代码+测试）｜生产已激活（select_context，2026-08-15 修订）
 source_files: ["ca/a_stage.py"]
 ---
 
@@ -32,3 +32,8 @@ v5 mutation 模式（`_simple_mutation_mode_v5`）破坏 Hermes 消息，需要 
 `compress()` 调用（`__init__.py:352`），而 CE 壳注册因签名错误从未成功、2026-08-13
 起注册暂停（见 `decisions/20-ce-shell-registration.md` 修订）。当前生产 conv_history
 由 Hermes 原生构建；A-stage 三区降级需在恢复 CE 壳并补齐 §6.3 前置条件后才会生效。
+
+## 修订（2026-08-15：select_context 激活）
+`register()` 恢复 1 参 CE 壳注册，`_build_conv_history_v6` 改由
+`CAContextEngine.select_context()` 每轮驱动；`should_compress()` 恒 False。
+方向 B 生产已激活，A-stage 三区降级随 select_context 每轮生效。

@@ -51,8 +51,8 @@ plugins/ca_assembler/
 - **4B 超时降级保守原则** — 超时/失败时不 assume same topic merge，保守 skip 优于错误合并。
 - **E-stage 写即落盘** — 每条消息立即写入 turn_stream，不经 buffer
 - **方向 B** — `_build_conv_history_v6` 从 turn_stream DB 重建 conv_history，不修改 Hermes 消息
-- **CE 壳 = 替代内置 compressor 的占位（用户设计定论）** — CA 注册 ContextEngine（`context.engine: ca_assembler`）是**替代** Hermes 内置 ContextCompressor 的占位；**CA 不触发 Hermes compress_context 流程**。注意（代码事实）：`_build_conv_history_v6`（A-stage 重建）**仅**由 CE 壳 `compress()` 调用，8 个 hooks 负责的是 E-stage 写入 / F-stage 摘要 / 话题检测 / recall 注入（即 A-stage 重建在 CE 壳未激活时不会运行；"A-stage 完全由 hooks 驱动"是文档误述，见 `docs/migration-research-dsh.md` §6）。
-- **⚠️ CE 壳注册已暂停（2026-08-13 修复，勿再恢复旧 2 参写法）** — 旧代码 `ctx.register_context_engine("ca_assembler", _ce_engine)` 传 2 参数 vs hermes 接口 `register_context_engine(self, engine)` 1 参数 → 必抛 TypeError；Hermes commit `22af80bcf`（2026-08-01）起 register() 抛异常会 **dispose 该插件全部 registration（含 8 个 hooks）→ 整个插件加载失败、CA 停摆**（08-13 实测 errors.log 连续报 `Failed to load plugin 'ca_assembler'`，agent.log 无 CA 活动）。修复：`__init__.py` register() 已注释掉该行（hooks 恢复、engine 回退内置 compressor，恢复生产停摆前的实际状态）。**如要恢复 CE 壳**：改 1 参 `ctx.register_context_engine(_ce_engine)` 会激活 A-stage（should_compress 恒 True → 每轮 compress() 从 DB 重建 conv_history）——该路径从未在生产运行过且前检压缩先于 pre_llm_call 写 seq 0（存在当前轮用户消息缺失的轮序风险），恢复前先读 `docs/migration-research-dsh.md` §1.5/§5.3；若只想"纯占位"需同时把 should_compress 改 False。**旧文档中"参数警告=无害已知项、hooks 不被回滚"的记录已失效，勿再引用。**
+- **CE 壳 = 替代内置 compressor 的占位（用户设计定论）** — CA 注册 ContextEngine（`context.engine: ca_assembler`）是**替代** Hermes 内置 ContextCompressor 的占位；**CA 不触发 Hermes compress_context 流程**。`select_context()` 每轮从 turn_stream DB 重建 conv_history（方向 B），`should_compress()` 恒 False 阻断前检压缩，`compress()` 仅保留手动 /compress 回退路径。
+- **CE 壳已注册（select_context 驱动，1 参签名）** — `__init__.py` register() 使用 `ctx.register_context_engine(_ce_engine)`（Hermes `hermes_cli/plugins.py:1898`）；旧 2 参写法会抛 TypeError 并使 Hermes dispose 全部 registration（08-13 停摆），**勿再恢复旧 2 参写法**。A-stage 由 `CAContextEngine.select_context()` 每轮驱动，`should_compress()` 恒 False；生产激活需 tester profile `context.engine: ca_assembler`。
 
 ## 注册接口
 
@@ -67,12 +67,12 @@ hermes plugin list | grep ca_assembler
 # 2. 验证 SessionManager 启动
 grep "CA plugin" ~/.hermes/logs/agent.log
 
-# 3. 验证 CE 壳状态（2026-08-13 起 CE 壳注册已暂停）
+# 3. 验证 CE 壳状态（select_context 驱动 A-stage）
 hermes config get context.engine
-# 配置值仍为 'ca_assembler'，但运行时引擎已回退内置 compressor（CE 壳未注册，
-# 见上方"CE 壳注册已暂停"约束）。CA 工作正常的判定标准 = hook 链路数据完整
-# （agent.log 出现 "CA plugin started" + E-stage/F-stage/话题/recall 日志），
-# 与 CE 是否被选中无关。
+# 配置值应为 'ca_assembler'，且 E2E 前置断言 agent.context_compressor 是
+# CAContextEngine 实例。CA 工作正常的判定标准 = hook 链路数据完整
+# （agent.log 出现 "CA plugin started" + E-stage/F-stage/话题/recall 日志）
+# 且 select_context 每轮从 DB 重建 conv_history。
 ```
 
 ## 设计细节与调试细节（迁移至 OV）

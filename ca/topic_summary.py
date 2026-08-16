@@ -58,7 +58,7 @@ Incorporate these supplementary items into the summary just like changes — mer
 Rules:
 - Identify 2-6 distinct work strands in this topic block. **When in doubt, split into separate strands** — prefer over-merging into one (a wiki entry aggregation pass will group related strands under the same theme later).
 - Each strand: hdl (short name), turns (which turn numbers it appears in — use the "# 轮次 N" markers in the input), ooda (4 groups, only include groups that have content).
-- theme_ref (optional): if the 候选主题参考 section lists candidate themes, and this strand is the SAME piece of work as one candidate (continuation / deepening / fixing the same problem), output that candidate's theme_id; otherwise OMIT the theme_ref field entirely (uncertain → omit; better to create a new theme than wrongly merge).
+- theme_ref (optional): if the 候选主题参考 section lists candidates, and this strand is the SAME piece of work as one candidate (continuation / deepening / fixing the same problem), output that candidate's id exactly as shown (reality_id / theme_id); otherwise OMIT the theme_ref field entirely (uncertain → omit; better to create a new theme than wrongly merge).
 - ⚠️ hdl 命名规范（必须先组织该 strand 的 ooda 内容，再基于 ooda 总结 hdl）：
   - ✅ 正确示例："wiki entry 核心粒度与字段设计"、"连接池与超时配置优化"（中文语义短名，概括该工作线做了什么）
   - ❌ 错误示例（禁止）："embedding_service"、"topic_find_ca"、"consensus"、"l2_clustering"（代码符号名/英文标识符/文件名/函数名）
@@ -150,23 +150,41 @@ def _format_turns_for_prompt(turns_data: list[dict]) -> str:
 
 
 def _format_candidate_refs(candidate_themes: Optional[list]) -> str:
-    """候选主题参考段（v6.5.3）：切换注入的 theme 摘要，供 4B 判断 strand 归属。
+    """候选参考段：v7 注入的是 reality（reality_id/name/hdl），v6.5 遗留 theme 键兼容。
 
-    无候选 → 空串（prompt 零额外输入）；有候选 → 「候选主题参考」段，
-    声明仅参考非强制 + theme_ref 判定规则（宁新建不错并）。
+    无候选 → 空串；有候选 → 「候选参考」段，声明仅参考非强制 +
+    theme_ref 判定规则（宁新建不错并）。4B 看到的 id 必须是 reality_id。
     """
     if not candidate_themes:
         return ""
     lines = ["## 候选主题参考（仅参考，非强制归属）"]
     for t in candidate_themes[:3]:
-        title = (t.get("title") or "").strip()
-        overview = (t.get("overview") or "").strip()
-        lines.append(f"- theme_id={t.get('theme_id')}: {title}")
-        if overview:
-            lines.append(f"  overview: {overview[:200]}")
+        if not isinstance(t, dict):
+            continue
+        if "reality_id" in t:
+            rid = t.get("reality_id")
+            name = (t.get("name") or t.get("hdl") or "").strip()
+            hdl = (t.get("hdl") or "").strip()
+            lines.append(f"- reality_id={rid}: {name or hdl or '?'}")
+            if hdl and hdl != name:
+                lines.append(f"  hdl: {hdl[:200]}")
+            cs = t.get("current_status")
+            if isinstance(cs, dict):
+                anchors = []
+                for key in ("goals", "current_state", "key_facts"):
+                    items = cs.get(key) or []
+                    anchors.extend(str(i) for i in items[:3] if str(i).strip())
+                if anchors:
+                    lines.append("  状态锚点: " + " | ".join(a[:80] for a in anchors[:5]))
+        else:
+            title = (t.get("title") or "").strip()
+            overview = (t.get("overview") or "").strip()
+            lines.append(f"- theme_id={t.get('theme_id')}: {title}")
+            if overview:
+                lines.append(f"  overview: {overview[:200]}")
     lines.append(
-        "判断：若某 strand 与某候选主题是「同一件事」（延续/深化/修复同一问题），"
-        "在该 strand 输出 theme_ref=<该 theme_id>；否则不输出 theme_ref（宁新建，不错并）。"
+        "判断：若某 strand 与某候选是「同一件事」（延续/深化/修复同一问题），"
+        "在该 strand 输出 theme_ref=<对应候选 id>；否则不输出 theme_ref（宁新建，不错并）。"
     )
     return "\n".join(lines)
 

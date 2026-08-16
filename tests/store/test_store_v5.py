@@ -41,6 +41,54 @@ class TestWriteAndReadV5:
         assert len(rows_b) == 1
 
 
+class TestWriteTurnV5Idempotency:
+    """02-store 契约：同内容重放跳过，不回抹已回填 Fct/Hdl。"""
+
+    def test_same_core_replay_preserves_backfilled_fct(self, v5_store):
+        from ca.store import write_turn_v5, update_fin_fct_v5, read_turn_stream_all
+        write_turn_v5(v5_store, "test", 0, 1, role="assistant", elm_text="回复",
+                      finish_reason="stop")
+        update_fin_fct_v5(v5_store, "test", 0, 1,
+                          '{"core_change":"异步摘要"}', "摘要")
+        # 重放 post_llm_call：核心列一致，但本次调用 Fct/Hdl=None
+        assert write_turn_v5(v5_store, "test", 0, 1, role="assistant",
+                             elm_text="回复", finish_reason="stop") is True
+        rows = read_turn_stream_all(v5_store, "test")
+        assert rows[0]["Fct"] == '{"core_change":"异步摘要"}'
+        assert rows[0]["Hdl"] == "摘要"
+
+    def test_different_core_still_overwrites(self, v5_store):
+        from ca.store import write_turn_v5, read_turn_stream_all
+        write_turn_v5(v5_store, "test", 0, 0, role="user", elm_text="旧内容")
+        write_turn_v5(v5_store, "test", 0, 0, role="user", elm_text="新内容")
+        rows = read_turn_stream_all(v5_store, "test")
+        assert len(rows) == 1
+        assert rows[0]["Elm"] == "新内容"
+
+
+class TestTopicConnThreadLocal:
+    """ca_topics.db 连接必须是线程本地（后台多线程并发写共享连接会丢写）。"""
+
+    def test_different_thread_gets_different_connection(self, tmp_path):
+        import threading
+        from ca.store import _get_topic_conn
+
+        db = tmp_path / "ca_topics.db"
+        main_conn = _get_topic_conn(db)
+        result = {}
+
+        def worker():
+            result["conn"] = _get_topic_conn(db)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+
+        assert result["conn"] is not main_conn
+        main_conn.execute("SELECT 1")
+        result["conn"].execute("SELECT 1")
+
+
 class TestUpdateFinFctV5:
     """update_fin_fct_v5 Fct/Hdl 回写"""
 

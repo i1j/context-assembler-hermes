@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0",
+  "meta": {
+    "object": "ca-ce-shell-audit",
+    "current_state": "交付部署",
+    "created": "2026-08-16T00:18:47",
+    "task_line": "检查 CA 插件当前代码（CE 壳 select_context 激活等未提交改动）是否符合设计要求（AGENTS.md 关键约束 + 设计文档），修正发现的 bug",
+    "accept_line": "全量 pytest 通过（基线 1008 passed 之外无新增失败）；修正项逐条有代码依据与测试覆盖；与 AGENTS.md 关键约束无冲突"
+  },
+  "transitions": [
+    {
+      "from": null,
+      "to": "需求开发",
+      "type": "init",
+      "rating": "",
+      "ts": "2026-08-16T00:18:47",
+      "note": "init"
+    },
+    {
+      "from": "需求开发",
+      "to": "代码构建",
+      "type": "forward",
+      "rating": "纯代码",
+      "ts": "2026-08-16T00:33:51",
+      "note": ""
+    },
+    {
+      "from": "代码构建",
+      "to": "验证诊断",
+      "type": "forward",
+      "rating": "需验证",
+      "ts": "2026-08-16T01:01:33",
+      "note": ""
+    },
+    {
+      "from": "验证诊断",
+      "to": "交付部署",
+      "type": "forward",
+      "rating": "完整",
+      "ts": "2026-08-16T01:01:48",
+      "note": ""
+    }
+  ],
+  "counters": {
+    "bounce": 0,
+    "adjudicate": 0,
+    "fixloop": 0
+  },
+  "exit_checks": {
+    "last": {
+      "state": "验证诊断",
+      "result": "PASS",
+      "ts": "2026-08-16T01:01:48"
+    }
+  }
+}

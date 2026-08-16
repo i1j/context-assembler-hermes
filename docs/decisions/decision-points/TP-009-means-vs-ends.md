@@ -264,3 +264,12 @@ Step 3: compress() 按干链替换
 - `design/decision-points/CE-002.md` — 废弃旧方案（空壳架构）
 - `design/decision-points/CE-003.md` — 废弃旧方案（restore-before-write）
 - `design/ca-ce-shell-to-real.md` — 废弃旧方案（实装方案）
+
+---
+
+## 修订注记（2026-08-14）
+
+> 方向二实现机制改为 **select_context 路线**：CA 不再以 `should_compress=True` 每轮触发
+> `compress()`，而是实现 `CAContextEngine.select_context()` 每轮从 turn_stream DB 重建
+> conv_history；`should_compress()` 恒 False，`compress()` 仅保留手动 /compress 回退路径。
+> 上文正文保留历史决策内容。

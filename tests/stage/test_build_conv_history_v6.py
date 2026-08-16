@@ -22,6 +22,7 @@ import json
 import pytest
 from unittest.mock import MagicMock
 
+from ca.a_stage import _normalize_arguments_str
 from ca.grade import TopicGrade
 
 
@@ -402,7 +403,7 @@ class TestBgReviewFiltering:
 
 class TestToolCallsJson:
     def test_thought_row_with_tool_calls(self, ca_engine):
-        """thought 行带 tool_calls_json → 反序列化为 dict"""
+        """thought 行带 tool_calls_json → 反序列化且 arguments 归一化为 JSON string"""
         _write_rows(ca_engine.store, "test", [
             {"turn": 1, "seq": 0, "role": "user", "Elm": "查天气"},
             {"turn": 1, "seq": 1, "role": "assistant", "finish_reason": "tool_calls",
@@ -410,7 +411,7 @@ class TestToolCallsJson:
              "tool_calls_json": json.dumps([
                  {"id": "call_1", "type": "function",
                   "function": {"name": "get_weather", "arguments": {"city": "北京"}}}
-             ])},
+             ], ensure_ascii=False)},
             {"turn": 2, "seq": 0, "role": "user", "Elm": "再说吧"},
             {"turn": 3, "seq": 0, "role": "user", "Elm": "Q3"},
         ])
@@ -418,10 +419,53 @@ class TestToolCallsJson:
         result = _build(ca_engine, mgr)
         # turn 1 保护区外（3 turn）
         assert result[1]["content"] == "查询天气"
-        assert result[1]["tool_calls"] == [
-            {"id": "call_1", "type": "function",
-             "function": {"name": "get_weather", "arguments": {"city": "北京"}}}
-        ]
+        raw_args = result[1]["tool_calls"][0]["function"]["arguments"]
+        assert isinstance(raw_args, str), f"arguments 必须是 str，got {type(raw_args).__name__}"
+        assert json.loads(raw_args) == {"city": "北京"}
+
+    @pytest.mark.parametrize("bad_args", ["", "not-json"])
+    def test_invalid_arguments_string_normalized_to_empty_object(self, ca_engine, bad_args):
+        """历史非法/空 arguments string → 归一化为 "{}"（select_context 绕过宿主 sanitize_tool_call_arguments）"""
+        _write_rows(ca_engine.store, "test", [
+            {"turn": 1, "seq": 0, "role": "user", "Elm": "Q"},
+            {"turn": 1, "seq": 1, "role": "assistant", "finish_reason": "tool_calls",
+             "Elm": "thinking", "Fct": "thought",
+             "tool_calls_json": json.dumps([
+                 {"id": "c1", "type": "function",
+                  "function": {"name": "f1", "arguments": bad_args}}
+             ])},
+        ])
+        mgr = _make_mock_topic_mgr({1: TopicGrade.ACT})
+        result = _build(ca_engine, mgr)
+        assert result[1]["tool_calls"][0]["function"]["arguments"] == "{}"
+
+    @pytest.mark.parametrize("bad_value, expected", [
+        (None, {}),
+        ({"x": 1, "y": "二"}, {"x": 1, "y": "二"}),
+        (object(), {}),
+        ({1, 2}, {}),
+        (b"bytes", {}),
+        (float("nan"), {}),
+        (float("inf"), {}),
+    ])
+    def test_normalize_arguments_never_raises(self, bad_value, expected):
+        """不可序列化 / NaN 值 → "{}"，不能让单条历史脏行把整轮 select_context 打回 fail-open"""
+        out = _normalize_arguments_str(bad_value)
+        assert isinstance(out, str)
+        assert json.loads(out) == expected
+
+    @pytest.mark.parametrize("bad_json", ['{"x": 1}', '"tool"'])
+    def test_non_list_tool_calls_json_not_emitted(self, ca_engine, bad_json):
+        """tool_calls_json 解析为非 list → 不设置 tool_calls，避免 OpenAI schema 非法消息"""
+        _write_rows(ca_engine.store, "test", [
+            {"turn": 1, "seq": 0, "role": "user", "Elm": "Q"},
+            {"turn": 1, "seq": 1, "role": "assistant", "finish_reason": "tool_calls",
+             "Elm": "thinking", "Fct": "thought", "tool_calls_json": bad_json},
+        ])
+        mgr = _make_mock_topic_mgr({1: TopicGrade.ACT})
+        result = _build(ca_engine, mgr)
+        thought = result[1]
+        assert "tool_calls" not in thought
 
     def test_parallel_tool_calls(self, ca_engine):
         """多个并行 tool_calls 在同一 thought 行里"""
@@ -477,8 +521,8 @@ class TestHdlTruncation:
 
 
 class TestToolRowFields:
-    def test_tool_has_call_id_and_name(self, ca_engine):
-        """tool 行保留 tool_call_id 和 name"""
+    def test_tool_has_call_id_and_tool_name(self, ca_engine):
+        """tool 行保留 tool_call_id 和 tool_name（Hermes 内部字段，transport 会在上线前 strip）"""
         _write_rows(ca_engine.store, "test", [
             {"turn": 1, "seq": 0, "role": "user", "Elm": "Q"},
             {"turn": 1, "seq": 1, "role": "assistant", "finish_reason": "tool_calls",
@@ -492,5 +536,45 @@ class TestToolRowFields:
         mgr = _make_mock_topic_mgr({1: TopicGrade.ACT, 2: TopicGrade.ACT, 3: TopicGrade.ACT})
         result = _build(ca_engine, mgr)
         assert result[2]["tool_call_id"] == "c1"
-        assert result[2]["name"] == "f1"
+        assert result[2]["tool_name"] == "f1"
+        assert "name" not in result[2], "tool 消息不允许携带 Chat Completions schema 外的 name 字段"
         assert result[2]["content"] == "toolFct"
+
+    def test_thought_message_omits_finish_reason(self, ca_engine):
+        """thought 行重建的 assistant 消息不携带 finish_reason（Hermes 正常路径上线前会 pop，strict provider 拒绝）"""
+        _write_rows(ca_engine.store, "test", [
+            {"turn": 1, "seq": 0, "role": "user", "Elm": "Q"},
+            {"turn": 1, "seq": 1, "role": "assistant", "finish_reason": "tool_calls",
+             "Elm": "thinking", "Fct": "thought",
+             "tool_calls_json": '[{"id":"c1","function":{"name":"f1"}}]'},
+        ])
+        mgr = _make_mock_topic_mgr({1: TopicGrade.ACT})
+        result = _build(ca_engine, mgr)
+        thought = next(m for m in result if m["role"] == "assistant")
+        assert "finish_reason" not in thought, (
+            "assistant 消息不允许携带 finish_reason（Chat Completions schema 外字段）"
+        )
+        # 缺 arguments 的历史行必须补 "{}"，否则宿主 _canonicalize_api_tool_calls 会 KeyError
+        assert thought["tool_calls"] == [
+            {"id": "c1", "function": {"name": "f1", "arguments": "{}"}}
+        ]
+
+    def test_tool_call_arguments_normalized_to_json_string(self, ca_engine):
+        """tool_calls[].function.arguments 必须是 JSON string，兼容历史 dict 行"""
+        legacy = json.dumps([
+            {"id": "c1", "type": "function",
+             "function": {"name": "f1", "arguments": {"x": 1, "y": "二"}}}
+        ], ensure_ascii=False)
+        _write_rows(ca_engine.store, "test", [
+            {"turn": 1, "seq": 0, "role": "user", "Elm": "Q"},
+            {"turn": 1, "seq": 1, "role": "assistant", "finish_reason": "tool_calls",
+             "Elm": "thinking", "Fct": "thought", "tool_calls_json": legacy},
+        ])
+        mgr = _make_mock_topic_mgr({1: TopicGrade.ACT})
+        result = _build(ca_engine, mgr)
+        tool_call = result[1]["tool_calls"][0]
+        raw_args = tool_call["function"]["arguments"]
+        assert isinstance(raw_args, str), (
+            f"arguments 必须是 JSON string，got {type(raw_args).__name__}: {raw_args!r}"
+        )
+        assert json.loads(raw_args) == {"x": 1, "y": "二"}

@@ -32,6 +32,59 @@ from .tool_summarizer import ToolSummarizer
 logger = logging.getLogger(__name__)
 
 
+def _normalize_arguments_json(arguments: Any) -> str:
+    """将 tool_calls[].function.arguments 归一化为合法 JSON string。
+
+    契约（fix-task-20260816 §3.1）：
+      - 合法 JSON string → 原样保留
+      - 空串 / 非法 JSON string → "{}"
+      - None → "{}"
+      - 其他非 str → json.dumps(arg, ensure_ascii=False)
+      - 不可序列化（object/set/bytes/循环引用）或 NaN/Infinity → "{}"
+    """
+    if isinstance(arguments, str):
+        if not arguments.strip():
+            return "{}"
+        try:
+            json.loads(arguments)
+        except (json.JSONDecodeError, TypeError):
+            return "{}"
+        return arguments
+    if arguments is None:
+        return "{}"
+    try:
+        return json.dumps(arguments, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
+        return "{}"
+
+
+def _safe_json_dump(value: Any) -> str:
+    """json.dumps 的保守包装：不可序列化 / NaN → "{}"。"""
+    try:
+        return json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
+        return "{}"
+
+
+def _safe_tool_content(result: Any) -> str:
+    """将工具 result 转为字符串，且不丢 0/False/[] 等假值。
+
+    字符串原样；None → ""；可 JSON 序列化 → JSON string；
+    不可序列化（bytes/set/对象）→ str(result) 兜底，保证 tool 行落库。
+    """
+    if isinstance(result, str):
+        return result
+    if result is None:
+        return ""
+    try:
+        return json.dumps(result, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
+        try:
+            return str(result)
+        except Exception:
+            return ""
+
+
 class EStageMixin:
     """E-stage 混合类。由 ContextAssembler 通过多重继承引入。
 
@@ -62,12 +115,7 @@ class EStageMixin:
         for tc in tool_calls:
             tc_id = getattr(tc, "id", "") or ""
             tc_name = getattr(tc, "name", "") or ""
-            tc_args = getattr(tc, "arguments", None)
-            if isinstance(tc_args, str):
-                try:
-                    tc_args = json.loads(tc_args)
-                except (json.JSONDecodeError, TypeError):
-                    tc_args = {}
+            tc_args = _normalize_arguments_json(getattr(tc, "arguments", None))
             tool_defs.append({
                 "id": tc_id,
                 "type": getattr(tc, "type", "function"),
@@ -185,11 +233,7 @@ class EStageMixin:
             logger.warning("[CA_v5] _on_post_tool_call: no placeholder for %s, created at turn=%d seq=%d",
                           tool_call_id, turn, seq)
 
-        content = (
-            result if isinstance(result, str)
-            else json.dumps(result, ensure_ascii=False) if result
-            else ""
-        )
+        content = _safe_tool_content(result)
 
         # ── per-tool Fct（代码级摘要） ──
         fct_str, hdl_text = "", ""
@@ -214,7 +258,7 @@ class EStageMixin:
             self.store, self._session_id, turn, seq,
             role="tool", elm_text=content,
             tool_name=tool_name, tool_call_id=tool_call_id,
-            args_json=json.dumps(args) if args else None,
+            args_json=_safe_json_dump(args) if args is not None else None,
             status=status, duration_ms=duration_ms,
             fct_text=fct_str, hdl_text=hdl_text,
             written_at=time.time(),

@@ -43,10 +43,10 @@ Hdl            TEXT             -- 一句话标题（F-stage 写入）
 
 ## 关键约束
 
-- 行不可变 — 默认不可变：同 `(session_id, turn, seq)` 重复写入时，内容相同跳过
-  （BUG-09 防重放，见 `__init__.py` pre_llm_call 写入前存在性检查）；内容不同
+- 行不可变 — 默认不可变：同 `(session_id, turn, seq)` 重复写入且核心列相同时跳过
+  （BUG-09 防重放；`write_turn_v5` 写入前同内容检查）；内容不同
   （引擎恢复/重放路径）保持 `INSERT OR REPLACE` 覆盖语义；回填列（Fct/Hdl）
-  更新同样走 REPLACE（`store.py` `write_turn_v5`）
+  更新走 `UPDATE`（`store.py` `update_fin_fct_v5`，不重写其它列）
 - 旧 turn_cache 表在 v5.10 迁移后移除
 
 ## 数据表族（v6.5 → v7 演进，2026-08-07）

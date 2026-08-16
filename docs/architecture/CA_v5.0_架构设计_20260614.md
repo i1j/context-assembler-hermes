@@ -11,7 +11,7 @@
 | **bg_review 同步写 Fct** | 后台轮在 E-stage 直接同步写入 Fct/Hdl 列（代码生成摘要，不经过 F-stage daemon） | `__init__.py:741-757` | AGENTS.md §_on_pre_llm_call_v5 |
 | **角色队列匹配** | 取代旧逐行 seq 对齐，thought→ca_thoughts 队列、tool→ca_tools 队列，一一对应 | `__init__.py:377-432` | ca-development/references 角色队列匹配 |
 | **changes 列表格式** | Fct 输出从单对 `<stage_tag>/<core_change>` 改为多对单状态标签，`PAIR_PATTERN` 解析 | `ca/post_process.py:97-99` | ca-development SKILL.md §Fct JSON格式 |
-| **`reasoning_content` 清理** | A-stage 替换时 pop `reasoning_content`/`tool_calls` 字段，减少保护区外 token | `__init__.py:401-412,420-429` | — |
+| **`reasoning_content` 清理** | A-stage 内容替换时 pop `reasoning_content`/`tool_calls` 字段，减少保护区外 token | `__init__.py:401-412,420-429` | — |
 | **命名统一** | L2/L1/L0 → Elm/Fct/Hdl，C-stage → F-stage | 全仓库 | AGENTS.md §术语 |
 
 ## 1. 动机
@@ -163,7 +163,7 @@ def _on_pre_llm_call(**kwargs):
     if bg:
         return None  # bg_review 跳过 A-stage
 
-    # ── A-stage 替换 ──
+    # ── A-stage 内容替换 ──
     return plugin.pre_llm_call(**kwargs)
 ```
 
@@ -192,7 +192,7 @@ def _on_post_api_request(**kwargs):
         session_id, turn, seq=seq,
         role='assistant', content=thought,
         tool_calls_json=json.dumps(tool_defs),
-        l1_text=thought_l1,  # thought L1（A-stage 替换用）
+        l1_text=thought_l1,  # thought L1（A-stage 内容替换用）
         finish_reason=finish_reason,
         usage_prompt_tokens=...,
         usage_completion_tokens=...,

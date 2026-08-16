@@ -19,6 +19,35 @@ from .post_process import _safe_truncate
 logger = logging.getLogger(__name__)
 
 
+def _normalize_arguments_str(arguments: Any) -> str:
+    """将 tool_calls[].function.arguments 归一化为 JSON string。
+
+    兼容历史 DB 行（arguments 为 dict 等非 str 值）：
+      - 已有合法 JSON str → 原样保留
+      - 空串或非法 JSON str → "{}"
+      - None → "{}"
+      - 其他非 str → json.dumps(arg, ensure_ascii=False)
+    """
+    if isinstance(arguments, str):
+        # 合法 JSON string → 原样保留；空串 / 非法 JSON string → "{}"
+        if not arguments.strip():
+            return "{}"
+        try:
+            json.loads(arguments)
+        except (json.JSONDecodeError, TypeError):
+            return "{}"
+        return arguments
+    if arguments is None:
+        return "{}"
+    try:
+        # allow_nan=False：NaN/Infinity 不是合法 JSON，归一化为 "{}" 而非写入
+        # 非严格 JSON 串，避免 strict provider 拒收。
+        return json.dumps(arguments, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
+        # 不可 JSON 序列化的历史/provider 值（object/set/bytes/循环引用）→ "{}"
+        return "{}"
+
+
 class AStageMixin:
     """A-stage 混合类（方向 B）。由 ContextAssembler 通过多重继承引入。
 
@@ -213,21 +242,33 @@ class AStageMixin:
             if tool_call_id:
                 msg["tool_call_id"] = tool_call_id
             if tool_name:
-                msg["name"] = tool_name
+                msg["tool_name"] = tool_name
 
-        # ── assistant thought 保留 tool_calls ──
+        # ── assistant thought 保留 tool_calls（arguments 归一化为 JSON string）──
         if role == "assistant" and finish_reason != "stop":
             tc_json = row.get("tool_calls_json")
             if tc_json:
                 try:
-                    msg["tool_calls"] = json.loads(tc_json)
+                    tool_calls = json.loads(tc_json)
                 except (json.JSONDecodeError, TypeError):
                     pass
+                else:
+                    if isinstance(tool_calls, list):
+                        for tc in tool_calls:
+                            if isinstance(tc, dict):
+                                fn = tc.get("function")
+                                # function 为 dict 时无条件补齐 arguments 键，
+                                # 缺键/None → "{}"，防止下游 _canonicalize_api_tool_calls
+                                # 两次访问 tc["function"]["arguments"] 抛 KeyError（BUG-2）
+                                if isinstance(fn, dict):
+                                    fn["arguments"] = _normalize_arguments_str(
+                                        fn.get("arguments"))
+                        msg["tool_calls"] = tool_calls
+                    # 非 list（dict/str 等脏数据）→ 不设置 tool_calls，避免输出
+                    # OpenAI schema 非法消息；宿主 orphan 清理会兜底。
 
-        # ── finish_reason（仅 thought 行保留，fin 行默认 stop 不冗余携带） ──
-        if row_type == "thought" and finish_reason:
-            msg["finish_reason"] = finish_reason
-
+        # thought 行不携带 finish_reason（Hermes 正常路径上线前会 pop，
+        # select_context 替换结果不再经过该 pop，strict provider 会拒绝 schema 外字段）
         return msg
 
     @staticmethod

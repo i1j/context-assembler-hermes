@@ -3,10 +3,11 @@
 设计决策: P-001 (Plugin 层职责分离)
   viking://resources/projects/context-assembler/decisions/decision-points-wiki.md#toc-plugin-适配-amp-断路器
   - 注册 8 hooks (5 生命周期 + 3 工具轮 hook)
-  - pre_llm_call_v5: E-stage 写入 + topic 检测 + A-stage 替换
+  - pre_llm_call_v5: E-stage 写入 + topic 检测 + recall 注入
   - post_llm_call_v5: E-stage final 写入 + F-stage 触发
 
-适配 A‑stage 解耦：Hooks 路径——pre_llm_call 返回上下文文本注入 user message。
+适配 A‑stage 解耦：select_context 从 turn_stream DB 重建 conv_history；
+pre_llm_call 返回上下文文本注入 user message。
 """
 
 from __future__ import annotations
@@ -180,14 +181,10 @@ def is_available() -> bool:
 def register(ctx) -> None:
     """注册 CA 插件 v5.0 hooks 和 ContextEngine ABC。
 
-    注意：CE 壳注册已暂停（2026-08-13 修复，见 docs/migration-research-dsh.md §1.5）。
-    - Hermes 签名是 register_context_engine(self, engine)（1 参），旧代码传 2 参必抛 TypeError；
-    - Hermes commit 22af80bcf（2026-08-01）起，register() 抛异常会 dispose 该插件全部
-      registration（含 8 个 hooks）→ 整个插件加载失败、CA 停摆；
-    - 激活 CE 壳（改 1 参）会使 context.engine: ca_assembler 选中本引擎并每轮触发
-      should_compress=True → compress()（A-stage 从 turn_stream DB 重建 conv_history），
-      该路径从未在生产运行过，且前检压缩先于 pre_llm_call 写 seq 0，存在当前轮用户消息
-      缺失的轮序风险 —— 属设计决策，待用户明确后再按需恢复（恢复方式见下方注释）。
+    - 8 个 hooks（5 生命周期 + 3 工具轮数据采集）保持不变。
+    - CE 壳已注册，select_context 驱动 A-stage（方向 B）：每轮从 turn_stream DB
+      重建 conv_history；should_compress 恒 False，阻断 Hermes 前检压缩路径。
+    - 注册使用 1 参签名 ctx.register_context_engine(_ce_engine)（Hermes plugins.py:1898）。
     """
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("on_session_end",   _on_session_end)
@@ -197,14 +194,8 @@ def register(ctx) -> None:
     ctx.register_hook("post_api_request", _on_post_api_request_v5)
     ctx.register_hook("pre_tool_call",    _on_pre_tool_call_v5)
     ctx.register_hook("post_tool_call",   _on_post_tool_call_v5)
-    # ── CE 壳注册（当前禁用，见上方 docstring）──
-    # 恢复 A-stage 激活（未经验证，风险自负）：
-    #   ctx.register_context_engine(_ce_engine)          # 1 参签名，不再抛异常
-    # 恢复"纯占位"（注册但不触发 compress_context，需同时把 should_compress 改 False）：
-    #   ctx.register_context_engine(_ce_engine)
-    # 保持现状（hooks 驱动一切，engine 回退内置 compressor）：
-    #   （不注册）
-    pass
+    # ── CE 壳注册（1 参签名，Hermes plugins.py:1898）──
+    ctx.register_context_engine(_ce_engine)
 
 
 # ── Hook 分发函数 ──
@@ -271,7 +262,8 @@ def _on_session_reset(**kwargs: Any) -> None:
 class CAContextEngine(ContextEngine):
     """ContextEngine ABC 壳 — CA 的 context engine 注册形态。
 
-    should_compress 返回 True（每轮触发 compress_context 做 FAR 行删除），
+    select_context 每轮从 turn_stream DB 重建 conv_history（方向 B），
+    should_compress 恒 False 以阻断 Hermes 前检压缩路径，
     compress() 作为手动 /compress 回退路径，复用 v5.10 数据管道
     （turn_stream + topic_grade + Fct/Hdl/Elm）构建消息列表。
 
@@ -308,20 +300,95 @@ class CAContextEngine(ContextEngine):
         self.last_total_tokens = usage.get("total_tokens", 0) or 0
 
     def should_compress(self, prompt_tokens: int = None) -> bool:
-        """始终返回 True — 每轮都走 CE 管线做 FAR 行删除。
+        """恒 False — 阻断 Hermes 前检压缩路径（turn_context.py:930）。
 
-        由 should_compress 触发 compress_context() → compress() 路径，
-        compress() 原地删行 + 设 abort 标志，阻止 session rotation。
-
-        三个约束：
-          1. should_compress 无条件 True（不论 FAR 有无、对话长短）
-          2. compress 永不触发 session ID 变更（archive/rotation 全部跳过）
-          3. post_llm_call 从 _full_backup 完整恢复原始数据 → state.db
+        方向 B A-stage 由 select_context 每轮驱动（conversation_loop.py:2054），
+        compress() 仅保留手动 /compress 回退路径。
         """
-        # Pre-set abort 标志，使 compress_context 跳过 archive/rotation
-        self._last_compress_aborted = True
-        self._last_summary_error = "CA: in-place FAR deletion, no rotation"
-        return True
+        return False
+
+    def select_context(
+        self,
+        request_messages: list,
+        *,
+        conversation_messages: list = None,
+        incoming_message: dict = None,
+        budget_tokens: int = 0,
+    ) -> Optional[list]:
+        """每轮选择上下文：从 turn_stream DB 重建 conv_history（方向 B）。
+
+        返回精确语义：
+          - bg 轮 / store 空 → None（Hermes fail-open 原样返回）
+          - plugin 缺失 / errored / 内部异常 / 非法返回（空列表 / 非 dict 元素 /
+            缺 role 的畸形 dict，如 [{"bad":1}]）→ request_messages（原样，fail-open）
+          - 正常 → 重建列表（当前轮 user content 经 R10 替换保留注入；
+            R10 取 request_messages 中最后一条 user，工具轮 user 不在尾部仍替换）
+          - 重建结果无任何 role=="user" 消息 → request_messages
+            （fail-open，防 bg-only DB 等无 user 重建结果丢当前用户）
+        错误 = 内部异常全部捕获（fail-open）；入参形状（request_messages 为 dict 列表）由 Hermes 契约保证。
+        （bg 检测函数调用异常除外——`get_current_write_origin()` 运行期异常仅捕获 ImportError 上抛，与 pre_llm_call 同源形态，保持同构不改实现）
+        """
+        # ① bg 轮检测（与 pre_llm_call 同源）
+        try:
+            from tools.skill_provenance import get_current_write_origin
+            if get_current_write_origin() == "background_review":
+                return None
+        except ImportError:
+            pass
+
+        # ② plugin 查找
+        plugin = self._get_plugin()
+        if not plugin or plugin._engine_errored or not plugin._engine:
+            logger.warning("[CA] select_context: plugin unavailable; falling back to request_messages")
+            return request_messages
+
+        # ③ store 判空（plugin 可用才可判空）
+        try:
+            from ca.store import read_turn_stream_all
+            rows = read_turn_stream_all(plugin._engine.store, self._session_id)
+        except Exception as exc:
+            logger.warning("[CA] select_context: store read failed: %s", exc, exc_info=True)
+            return request_messages
+        if not rows:
+            return None
+
+        # ④ 保留 Hermes 首条 system 消息
+        system_msg = request_messages[0] if (
+            request_messages and request_messages[0].get("role") == "system"
+        ) else None
+
+        # ⑤ 从 turn_stream DB 重建 conv_history
+        try:
+            new_conv = plugin._engine._build_conv_history_v6(
+                plugin._topic_mgr,
+                system_message=system_msg,
+            )
+        except Exception as exc:
+            logger.warning("[CA] select_context: build failed: %s", exc, exc_info=True)
+            return request_messages
+
+        # ⑥ 非法返回校验（强于 Hermes 侧 isinstance dict 校验）
+        if (not new_conv
+                or not all(isinstance(m, dict) and m.get("role") for m in new_conv)
+                or not any(m.get("role") == "user" for m in new_conv)):
+            logger.warning("[CA] select_context: invalid build result; falling back to request_messages")
+            return request_messages
+
+        # ⑦ R10 注入替换：用 request_messages 中最后一条 user 的 content
+        # 替换重建结果中的最后一条 user（工具轮 user 不在 request 尾部仍替换）
+        last_user = None
+        for m in reversed(request_messages):
+            if m.get("role") == "user":
+                last_user = m
+                break
+        if last_user is not None:
+            for m in reversed(new_conv):
+                if m.get("role") == "user":
+                    m["content"] = last_user.get("content", "")
+                    break
+
+        # ⑧ 返回重建列表
+        return new_conv
 
     def compress(
         self,
@@ -349,14 +416,26 @@ class CAContextEngine(ContextEngine):
 
         # v6：从 turn_stream DB 重建 conv_history
         topic_mgr = plugin._topic_mgr
-        new_conv = plugin._engine._build_conv_history_v6(
-            topic_mgr,
-            system_message=system_msg,
-        )
+        try:
+            new_conv = plugin._engine._build_conv_history_v6(
+                topic_mgr,
+                system_message=system_msg,
+            )
+        except Exception as exc:
+            logger.warning("[CA] compress: build failed: %s", exc, exc_info=True)
+            return messages
+
+        # 与 select_context 同构的 fail-open 守卫：手动 /compress 也不能用
+        # 空列表 / 畸形元素 / 无 user 的重建结果替换真实消息。
+        if (not new_conv
+                or not all(isinstance(m, dict) and m.get("role") for m in new_conv)
+                or not any(m.get("role") == "user" for m in new_conv)):
+            logger.warning("[CA] compress: invalid build result; keeping original messages")
+            return messages
 
         self._last_compress_msg_len = len(messages)
         self.compression_count += 1
-        return new_conv if new_conv else messages
+        return new_conv
 
     # -- ContextEngine: lifecycle -----------------------------------------
 
@@ -365,10 +444,22 @@ class CAContextEngine(ContextEngine):
         self._session_id = session_id
 
     def on_session_end(self, session_id: str = "", messages: list = None) -> None:
-        """透传到插件实例（清理 store 资源）。"""
+        """透传到插件实例（清理 store 资源）并从注册表移除。
+
+        Hermes 的插件 hook on_session_end 每轮都会触发（不能用于清账），
+        而 ContextEngine.on_session_end 只在真实会话边界触发 —— 这里才是
+        正确的 `_engines` 移除点，防止长跑 gateway 会话轮转后注册表泄漏。
+        """
         plugin = self._get_plugin()
         if plugin:
-            plugin.on_session_end()
+            try:
+                plugin.on_session_end()
+            except Exception as exc:
+                logger.warning("[CA] on_session_end plugin cleanup failed: %s", exc)
+        sid = session_id or self._session_id
+        if sid:
+            with _engines_lock:
+                _engines.pop(sid, None)
 
     def on_session_reset(self) -> None:
         """重置 CE 状态（不触及 plugin 实例）。"""
@@ -377,6 +468,9 @@ class CAContextEngine(ContextEngine):
         self.last_completion_tokens = 0
         self.last_total_tokens = 0
         self.compression_count = 0
+        # 跨会话不能复用消息长度守卫（新会话消息数 <= 旧会话时非 force
+        # compress 会被误跳过）。
+        self._last_compress_msg_len = 0
 
     # -- ContextEngine: model switch --------------------------------------
 
@@ -441,10 +535,6 @@ class CAContextAssemblerPlugin:
         self._candidate_themes: Optional[list] = None  # v6.5.3: 切换注入的候选 theme（快照进 pending）
         self._graph_lock = threading.Lock()  # v6.5.3: graph.json 并发写锁
         self._cleanup_done: bool = False         # on_session_start 清账已完成
-        # A-stage 增量缓存
-        self._A_stable_cache: Optional[List[Dict]] = None
-        self._A_cache_turns: int = 0
-        self._A_cache_is_stale: bool = False
         # L4 空闲精炼守护线程
         self._refinement_daemon: Optional[IdleRefinementDaemon] = None
 
@@ -509,8 +599,10 @@ class CAContextAssemblerPlugin:
         self._engine = None
 
     def _run_session_start_cleanup(self) -> None:
-        """后台线程：新会话启动时清理上一会话的未完成话题。
-        在用户打字间隙执行补缺摘要 → L2 wiki merge → L3 graphify 同步。
+        """后台线程：新会话启动时检查上一会话的未完成话题。
+
+        用户打字间隙执行；缺 topic_id→turns 持久化映射时保守跳过补缺
+        （skip 优于把多话题块错并成一条 strand）。
         """
         if not Config.TOPIC_SUMMARIZE_ENABLED:
             self._cleanup_done = True
@@ -518,9 +610,7 @@ class CAContextAssemblerPlugin:
         try:
             from ca.store import (
                 get_last_session_meta, get_topic_strand_status,
-                max_turn_v5, SQLiteStore,
             )
-            from pathlib import Path
 
             profile = Config.HERMES_PROFILE
 
@@ -531,28 +621,16 @@ class CAContextAssemblerPlugin:
                 last_tid = last_meta["last_topic_id"]
                 status = get_topic_strand_status(last_sid, last_tid)
                 if status != "completed":
-                    logger.info("[CA_TOPIC_SUM] Session-start backfill: session %s topic %d missing summary",
-                                last_sid, last_tid)
-                    try:
-                        try:
-                            from hermes_constants import get_hermes_home
-                            cache_dir = Path(get_hermes_home()) / "ca_cache"
-                        except ImportError:
-                            cache_dir = Path.home() / ".hermes" / "ca_cache"
-                        old_db_path = cache_dir / f"{last_sid}.db"
-                        if old_db_path.exists():
-                            old_store = SQLiteStore(str(old_db_path))
-                            old_max_turn = max_turn_v5(old_store, last_sid)
-                            old_turns = list(range(1, old_max_turn + 1)) if old_max_turn > 0 else []
-                            if old_turns:
-                                self._run_topic_summarize(last_sid, {
-                                    "topic_id": last_tid,
-                                    "turns": old_turns,
-                                    "switch_turn": old_max_turn,
-                                }, store=old_store)
-                            old_store.close()
-                    except Exception as exc:
-                        logger.warning("[CA_TOPIC_SUM] Backfill execution failed: %s", exc)
+                    # session_meta 只存 last_turn/last_topic_id，没有持久化
+                    # topic_id → turns 映射；把 1..old_max_turn 全部塞进 last topic
+                    # 会把多个话题块错误合并成一条 strand。保守原则（4B 超时/失败
+                    # 不 assume same topic merge，skip 优于错并）：缺映射时跳过补缺，
+                    # 留待 reprocess 工具用持久化数据重跑。
+                    logger.warning(
+                        "[CA_TOPIC_SUM] Session-start backfill skipped for session %s "
+                        "topic %d: no persisted topic→turns mapping, conservative skip",
+                        last_sid, last_tid,
+                    )
 
             # ── 2. v6.5: theme merge 已在 strand 生成时同步（run_theme_merge 内含于
             #    _run_topic_summarize），此处无需批量路径。L3 graphify 待下次会话适配。──
@@ -600,9 +678,6 @@ class CAContextAssemblerPlugin:
         self._last_topic_id = None
         self._session_recall_done = False
         self._saved_history_snapshot = None
-        self._A_stable_cache = None
-        self._A_cache_turns = 0
-        self._A_cache_is_stale = False
         if self._topic_mgr:
             self._topic_mgr.reset()
         if self._engine:
@@ -618,7 +693,7 @@ class CAContextAssemblerPlugin:
 
 
     # ── Hooks ──
-    # v5.0 — A-stage 替换 + E-stage final 写入
+    # v5.0 — select_context 重建 + E-stage final 写入
     # ═════════════════════════════════════════════════════
 
 
@@ -967,7 +1042,39 @@ def _refresh_engine(session_id: str, plugin: "CAContextAssemblerPlugin") -> bool
         except ImportError:
             pass
         _db_path = str(_hp / "ca_cache" / f"{session_id}.db")
+        old_engine = plugin._engine
         plugin._engine = _sm.get(session_id, _db_path)
+        # CR-009 补全：TTL 清理后 _sm.get() 会新建 engine 实例，但
+        # plugin._topic_mgr 仍持有旧实例的 store/embed_client/cache（连接已关闭）。
+        # 话题切换时的 _compute_centroids / Fct embedding 缓存会因此全部降级。
+        # 保留 topic_mgr 的 turn→topic 状态，只重绑底层依赖。
+        if plugin._engine is not old_engine:
+            if plugin._topic_mgr is not None:
+                plugin._topic_mgr._store = plugin._engine.store
+                plugin._topic_mgr._embed_client = plugin._engine.embed_client
+                plugin._topic_mgr._cache = getattr(plugin._engine, "cache", None)
+            # 新引擎的 _current_turn/_seq_counter/_tool_seq_map 为空。若 TTL 驱逐
+            # 发生在 turn 中途（长 LLM 调用），post_api/post_tool/post_llm 会把行写
+            # 到 turn 0；从 turn_stream 恢复轮内状态，避免覆盖既有数据。
+            try:
+                from ca.store import read_turn_stream_all
+                rows = read_turn_stream_all(plugin._engine.store, session_id)
+                seq_counter: Dict[int, int] = {}
+                tool_seq_map: Dict[str, tuple] = {}
+                for row in rows:
+                    t = int(row.get("turn") or 0)
+                    s = int(row.get("seq") or 0)
+                    if t not in seq_counter or s > seq_counter[t]:
+                        seq_counter[t] = s
+                    if (row.get("role") == "tool"
+                            and row.get("status") == "pending"
+                            and row.get("tool_call_id")):
+                        tool_seq_map[row["tool_call_id"]] = (t, s)
+                plugin._engine._current_turn = max(seq_counter) if seq_counter else 0
+                plugin._engine._seq_counter = seq_counter
+                plugin._engine._tool_seq_map = tool_seq_map
+            except Exception as exc:
+                logger.warning("[CA] _refresh_engine: state restore failed: %s", exc)
         plugin._engine_errored = False
         return True
     except Exception as exc:
@@ -977,11 +1084,11 @@ def _refresh_engine(session_id: str, plugin: "CAContextAssemblerPlugin") -> bool
 
 
 def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
-    """v6: 写 seq 0 (user Elm) → 话题检测（mutation 由 compress 中的 _build_conv_history_v6 替代）。
+    """v6: 写 seq 0 (user Elm) → 话题检测（mutation 由 select_context 驱动的 _build_conv_history_v6 替代）。
 
     方向 B（2026-06-28）：
       - bg 轮：完全跳过，不增 turn、不写 DB、不调检测
-      - 非 bg 轮：写 DB seq 0 → 话题检测 → 返回（conv_history 由 compress 从 DB 重建）
+      - 非 bg 轮：写 DB seq 0 → 话题检测 → 返回（conv_history 由 select_context 从 DB 重建）
     """
     session_id = kwargs.get("session_id", "")
     with _engines_lock:
@@ -1086,15 +1193,16 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
             logger.warning("[CA_WIKI] session-start recall failed: %s", exc)
             plugin._session_recall_done = True
 
-    # ── v6：话题检测（mutation 已剥离，由 compress 中的 _build_conv_history_v6 替代）──
+    # ── v6：话题检测（mutation 已剥离，由 select_context 驱动的 _build_conv_history_v6 替代）──
     if plugin._topic_mgr and engine and turn > 0 and user_message:
         from ca.store import get_turn_ca_rows
         total_tokens = CAContextAssemblerPlugin._estimate_conv_tokens(conversation_history)
         ca_rows = get_turn_ca_rows(engine.store, session_id, turn)
         switched = plugin._topic_mgr.detect(turn, ca_rows, user_message, total_tokens=total_tokens)
         if switched:
-            # 嵌入服务异常（连接/超时/HTTPError）→ 降级 None（grade_on_switch 走
-            # 无向量分支；FAR recall 走 jaccard 兜底），不中断用户轮 hook（BUG-02）
+            # 嵌入服务异常（连接/超时/HTTPError）→ 降级 None：grade_on_switch 的
+            # 无向量分支把旧话题保守定为 REL（多保留上下文），不误判 FAR；
+            # 因此本轮 FAR recall 不触发（4B 超时降级保守原则，BUG-02）。
             try:
                 q_emb = engine.embed_client.embed(user_message)
             except Exception as exc:
@@ -1151,12 +1259,6 @@ def _on_pre_llm_call_v5(**kwargs: Any) -> Optional[str]:
             # 首次话题：记录 current_topic_id
             if plugin._last_topic_id is None:
                 plugin._last_topic_id = plugin._topic_mgr._current_topic_id
-
-        # 缓存调度：v6 compress 不再使用 _A_stable_cache，但保留清空以免残留影响
-        if switched:
-            if engine is not None:
-                engine._A_stable_cache = None
-                engine._A_cache_is_stale = False
 
         # 【日志】话题定级后 dump
         try:

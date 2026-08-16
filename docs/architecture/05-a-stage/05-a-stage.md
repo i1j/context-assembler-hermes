@@ -3,21 +3,17 @@ title: A-stage conv_history 装配（方向 B）
 slug: a-stage
 category: architecture
 version_introduced: v6.0
-status: 已实装（代码+测试）｜生产未激活（2026-08-13 核对）
+status: 已实装（代码+测试）｜生产已激活（select_context，2026-08-15）
 decisions: [direction-b, tail-protection, topic-grade-manager]
 depends_on: [store, topic-management]
-updated: 2026-08-13
+updated: 2026-08-16
 source_files: ["ca/a_stage.py"]
 ---
 
-> 修订（2026-08-13 代码核对）：**"已实装"仅指代码与测试落地，生产从未运行**——
-> `_build_conv_history_v6` 在代码中**仅**由 CE 壳 `CAContextEngine.compress()` 调用
-> （`__init__.py:352`），8 个 hooks 从不调用它；而 CE 壳注册自 2026-08-13 起暂停
-> （原 2 参注册必抛 TypeError + Hermes 08-01 起失败回滚全部 hooks，详见
-> `docs/migration-research-dsh.md` §1.5/§6）。因此当前生产状态：A-stage 重建未激活，
-> conv_history 由 Hermes 原生构建；E-stage/F-stage/话题/recall 由 hooks 驱动照常运行。
-> 恢复激活需先补齐：条件式 should_compress、pre_llm_call 模式守卫、前检压缩与
-> seq 0 写入的轮序处理（§6.3）。
+> 修订（2026-08-15）：`_build_conv_history_v6` 由 CE 壳 `CAContextEngine.select_context()`
+> 每轮调用；`register()` 使用 1 参签名恢复 CE 壳注册，`should_compress()` 恒 False。
+> 8 个 hooks 继续负责 E-stage 写入 / F-stage 摘要 / 话题检测 / recall 注入；
+> 当前生产状态：select_context 驱动 A-stage 重建，生产已激活。
 
 ## 问题
 
@@ -43,4 +39,6 @@ user/fin (高优先级) > thought (中) > tool (低)
 ```
 
 - bg_review 行不计入 turn 计数
-- Tail 保护区：最后 `CA_PROTECT_TAIL_TOKENS`（默认 20000）token 对应的 user 轮
+- Tail 保护区：固定最后 2 个 user 轮（仅 1 轮时全保护），**不做 token 预算扫描/扩展**
+  （`decisions/13`，2026-08-08 用户裁定；`CA_PROTECT_TAIL_TOKENS` 语义已由
+  `TOPIC_PEAK_TOKEN` 承接，不参与 A-stage 尾区）

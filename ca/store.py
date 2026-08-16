@@ -166,12 +166,46 @@ def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
                   written_at: Optional[float] = None,
                   fct_text: Optional[str] = None,
                   hdl_text: Optional[str] = None) -> bool:
-    """v5.0 INSERT OR REPLACE — 简化参数，无 v4 兼容映射。"""
+    """v5.0 INSERT OR REPLACE + 同内容重放跳过（02-store 行不可变 / BUG-09 泛化）。
+
+    - 同 (session_id, turn, seq) 且「核心列」完全一致 → 跳过，不覆盖已回填的
+      Fct/Hdl（重放 post_llm_call 不会把异步 F-stage 已写好的摘要抹掉）。
+    - Fct/Hdl 允许被本次参数覆盖（回填路径仍走本函数时生效）。
+    - 核心列不同 → 保持既有 INSERT OR REPLACE 覆盖语义（引擎恢复/内容变更）。
+    - written_at 不参与比较（时间戳天然不同，否则重放永不命中）。
+    """
     if written_at is None:
         written_at = time.time()
+    core_values = (
+        role, elm_text,
+        tool_name, tool_call_id, args_json, status, duration_ms,
+        tool_calls_json, finish_reason,
+        usage_prompt_tokens, usage_completion_tokens,
+        biz_category,
+    )
     for attempt in range(Config.DB_MAX_RETRY):
         try:
-            store.conn.execute(
+            conn = store.conn
+            try:
+                old = conn.execute(
+                    """SELECT role, Elm, tool_name, tool_call_id, args_json,
+                              status, duration_ms, tool_calls_json, finish_reason,
+                              usage_prompt_tokens, usage_completion_tokens,
+                              biz_category, Fct, Hdl
+                       FROM turn_stream
+                       WHERE session_id=? AND turn=? AND seq=?""",
+                    (session_id, turn, seq),
+                ).fetchone()
+            except sqlite3.Error:
+                old = None
+            if old is not None:
+                old_core = old[:12]
+                old_fct, old_hdl = old[12], old[13]
+                if old_core == core_values and (
+                        (fct_text is None or fct_text == old_fct)
+                        and (hdl_text is None or hdl_text == old_hdl)):
+                    return True
+            conn.execute(
                 """INSERT OR REPLACE INTO turn_stream
                    (session_id, turn, seq, role, Elm,
                     tool_name, tool_call_id, args_json, status, duration_ms,
@@ -187,7 +221,7 @@ def write_turn_v5(store, session_id: str, turn: int, seq: int, *,
                  biz_category, written_at,
                  fct_text, hdl_text),
             )
-            store.conn.commit()
+            conn.commit()
             return True
         except sqlite3.OperationalError as exc:
             if attempt < Config.DB_MAX_RETRY - 1:
@@ -366,8 +400,7 @@ def max_turn_v5(store, session_id: str) -> int:
 # v5.10 — topic_summaries 共享 DB（取代 OV Memory Provider）
 # ═══════════════════════════════════════════════════════════
 
-_TOPIC_STORE_CACHE: Dict[str, sqlite3.Connection] = {}
-_TOPIC_STORE_LOCK = threading.Lock()
+_TOPIC_STORE_TLS = threading.local()
 
 
 def _get_topic_store_path() -> Path:
@@ -388,29 +421,37 @@ def _get_topic_store_path() -> Path:
 
 
 def _get_topic_conn(db_path: Optional[Path] = None) -> sqlite3.Connection:
-    """获取共享 topic DB 的连接（线程级缓存，单例 per-process）。"""
+    """获取共享 topic DB 的连接（线程本地缓存，per-thread per-path）。
+
+    不能用进程级单连接：话题摘要 / reality merge / 精炼轮等多个后台线程
+    会并发写 ca_topics.db，共用同一 sqlite3.Connection 会触发
+    "cannot start a transaction within a transaction" 并静默丢写。
+    """
     if isinstance(db_path, sqlite3.Connection):
         # BUG-11 防御：调用方误传有效连接时直接复用（绕过路径缓存）。
         return db_path
     p = db_path or _get_topic_store_path()
     key = str(p.resolve())
-    with _TOPIC_STORE_LOCK:
-        if key in _TOPIC_STORE_CACHE:
-            conn = _TOPIC_STORE_CACHE[key]
-            try:
-                conn.execute("SELECT 1")
-                return conn
-            except sqlite3.Error:
-                pass  # 连接已断开，重建
-        conn = sqlite3.connect(str(p), timeout=10, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute(f"PRAGMA busy_timeout={Config.DB_BUSY_TIMEOUT_MS}")
-        conn.executescript(_SCHEMA_SQL_STRANDS)
-        _migrate_wiki_associations_column(conn)
-        _migrate_ov_roots_seed(conn)
-        _TOPIC_STORE_CACHE[key] = conn
-        return conn
+    conns = getattr(_TOPIC_STORE_TLS, "conns", None)
+    if conns is None:
+        conns = {}
+        _TOPIC_STORE_TLS.conns = conns
+    conn = conns.get(key)
+    if conn is not None:
+        try:
+            conn.execute("SELECT 1")
+            return conn
+        except sqlite3.Error:
+            pass  # 连接已断开，重建
+    conn = sqlite3.connect(str(p), timeout=10, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute(f"PRAGMA busy_timeout={Config.DB_BUSY_TIMEOUT_MS}")
+    conn.executescript(_SCHEMA_SQL_STRANDS)
+    _migrate_wiki_associations_column(conn)
+    _migrate_ov_roots_seed(conn)
+    conns[key] = conn
+    return conn
 
 
 def _migrate_wiki_associations_column(conn: sqlite3.Connection) -> None:
@@ -1105,7 +1146,7 @@ def update_reality(
     timeline_entry: Optional[dict] = None,
     changes: Optional[list] = None,
     centroid_json: Optional[str] = None,
-    source_strand: Optional[dict] = None,
+    source_strand: Optional[Any] = None,
     query_centroid_json: Optional[str] = None,
     query_count: Optional[int] = None,
     db_path: Optional[Path] = None,
@@ -1114,10 +1155,14 @@ def update_reality(
 
     timeline_entry: {seq?, topic_id, turns, session_id, overview}；
        seq 缺省 = 现有最大 seq + 1。
-    source_strand: {session_id, strand_id} — 合并进 source_strands。
+    source_strand: {session_id, strand_id} 或 list[同结构] —
+      全部合并进 source_strands（s2r↔source_strands 一致，决策 41 审计门）。
     query_centroid_json/query_count: 提问云形心增量维护（调用方算好新值）。
     """
     conn = _get_topic_conn(db_path)
+    source_entries = (source_strand if isinstance(source_strand, list)
+                      else ([source_strand] if source_strand else []))
+    first_source = source_entries[0] if source_entries else None
     try:
         row = conn.execute(
             "SELECT timeline, source_strands, query_centroid_json, query_count "
@@ -1141,7 +1186,7 @@ def update_reality(
             new_timeline.append({"seq": max([e.get("seq", 0) for e in new_timeline
                                              if isinstance(e, dict)] or [0]) + 1,
                                  "changes": list(changes),
-                                 "session_id": (source_strand or {}).get("session_id", "")})
+                                 "session_id": (first_source or {}).get("session_id", "")})
 
         new_source = {}
         if row[1]:
@@ -1149,10 +1194,12 @@ def update_reality(
                 new_source = json.loads(row[1])
             except (json.JSONDecodeError, TypeError):
                 new_source = {}
-        if source_strand:
-            sid = source_strand.get("session_id")
-            s_id = source_strand.get("strand_id")
-            if sid:
+        for src in source_entries:
+            if not isinstance(src, dict):
+                continue
+            sid = src.get("session_id")
+            s_id = src.get("strand_id")
+            if sid and s_id is not None:
                 if sid not in new_source:
                     new_source[sid] = []
                 if s_id not in new_source[sid]:
@@ -1268,11 +1315,11 @@ def query_realities_by_semantics(
         if not c:
             continue
         try:
-            cs = json.loads(row[4]) if row[4] else {}
+            cs = json.loads(row[3]) if row[3] else {}
         except (json.JSONDecodeError, TypeError):
             cs = {}
         try:
-            tl = json.loads(row[3]) if row[3] else []
+            tl = json.loads(row[4]) if row[4] else []
         except (json.JSONDecodeError, TypeError):
             tl = []
         scored.append((c, {
@@ -1623,16 +1670,21 @@ def record_block_cooccurrences(
         return 0
     now = time.time()
     n = 0
-    for i in range(len(ids)):
-        for j in range(i + 1, len(ids)):
-            a, b = ids[i], ids[j]
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO cooccurrence_events "
-                "(session_id, topic_id, profile, reality_a, reality_b, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (session_id, topic_id, profile, a, b, now),
-            )
-            n += cur.rowcount
+    try:
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                a, b = ids[i], ids[j]
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO cooccurrence_events "
+                    "(session_id, topic_id, profile, reality_a, reality_b, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (session_id, topic_id, profile, a, b, now),
+                )
+                n += cur.rowcount
+        conn.commit()
+    except sqlite3.Error as exc:
+        logger.warning("[CA_STORE] record_block_cooccurrences failed: %s", exc)
+        return 0
     return n
 
 

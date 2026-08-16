@@ -3,6 +3,7 @@
 > 调研日期：2026-08-13 | 调研人：DeepSeek Harness 会话（工作目录 `plugins/ca_assembler`）
 > 调研对象：`ca_assembler` v6.0/v7 插件（Hermes 上下文组装插件）→ DeepSeek Harness 0.1.0-rc.6（Cordis 插件体系）
 > 结论速览：**技术可行性高（核心机制可 1:1 映射到 DSH 扩展点），必要性取决于"是否以 DSH 为主平台"这一前提；迁移是"语义层重写 + 管道层再造"，不是搬运。**
+> **⚠️ 2026-08-14 修订**：§1.5"CA 已停摆"结论经复核**只对 08-13 20:57~21:10 瞬时窗口成立**（根因 Hermes 22af80bcf 升级生效）；CA 的 8 个 hooks 此前一直正常运行（08-12 07:53 会话实证），CE 壳（方向 B 压缩路径）自 v6.0 引入即未注册成功。详见 §1.5b 时间线考证。
 
 ---
 
@@ -11,7 +12,7 @@
 | 维度 | 结论 |
 |------|------|
 | 可行性 | ✅ 高。DSH 的扩展点体系（`agent/pre-step`、`session/event`、`tools/*`、`ctx.compaction` 服务缝、`ctx.sessions`）与 CA 的 8 个 Hermes hook + ContextEngine 壳存在清晰的一一映射 |
-| 必要性 | ⚠️ 条件性，且叠加紧迫性：**CA 目前在 Hermes 上已因插件 API 变更停摆**（08-13 实测，1 行修复可恢复）。若 DSH 将取代 Hermes 成为主 Agent 平台 → 必要；若 Hermes 继续主用 → 先 1 行修复即可，迁移不必要（除非要把 CA 重构到更稳的宿主上） |
+| 必要性 | ⚠️ 条件性，且叠加紧迫性：**CA 的 Hermes 适配壳曾在 08-13 20:57~21:10 因 Hermes 插件 API 变更（22af80bcf）瞬时加载失败**（1 行修复已恢复；hooks 一直正常，仅 CE 壳自 v6.0 未注册，详见 §1.5b）。若 DSH 将取代 Hermes 成为主 Agent 平台 → 必要；若 Hermes 继续主用 → 已修复，迁移不必要（除非要把 CA 重构到更稳的宿主上） |
 | 工作量 | 核心逻辑约 1.7 万行 Python（另有 1.7 万行测试）。语言迁移 Python→TypeScript，纯算法层可直译（~95% 自包含），LLM prompt 语义层需重写，管道层需按 DSH 事件模型再造 |
 | 原生差距 | DSH 原生已覆盖 CA 的"压缩"职责（compaction 服务）；CA 的**结构化记忆**（turn_stream → Fct/Hdl → topic → reality → 跨会话召回注入）超出 DSH 原生能力，是迁移后 CA 仍存在的价值 |
 | 建议 | 决策分叉：①Hermes 留任主平台 → 1 行修复 + 更新 AGENTS.md 过时记录；②DSH 转正 → 分三阶段渐进迁移（最小 CA → compaction 自定义后端 → 语义记忆层） |
@@ -22,7 +23,7 @@
 
 ### 1.1 定位
 
-CA（ContextAssembler）是 **Hermes 的 Python 插件**，解决 Hermes 内置 ContextEngine（`ContextCompressor`）"被动 LLM 压缩、一条 Markdown 摘要替代历史、上下文质量随对话变长下降"的问题（见 `docs/architecture/01-overview/01-overview.md`）。用户设计定位（AGENTS.md 关键约束）：**CA 注册 ContextEngine 是"替代内置 compressor 的占位"**，`should_compress` 恒 True + abort 标志阻断 Hermes 的 archive/rotation，A-stage 组装由 8 个 hook 驱动。
+CA（ContextAssembler）是 **Hermes 的 Python 插件**，解决 Hermes 内置 ContextEngine（`ContextCompressor`）"被动 LLM 压缩、一条 Markdown 摘要替代历史、上下文质量随对话变长下降"的问题（见 `docs/architecture/01-overview/01-overview.md`）。用户设计定位（AGENTS.md 关键约束）：**CA 注册 ContextEngine 是"替代内置 compressor 的占位"**；`select_context()` 每轮从 turn_stream DB 重建 conv_history（方向 B），`should_compress()` 恒 False 阻断 Hermes 的 compress_context，`compress()` 仅作为手动 /compress 回退路径。（2026-08-16 修订：本节原「should_compress 恒 True + abort 标志、A-stage 由 8 个 hook 驱动」为 08-13 快照的旧状态，已按当前代码更新。）
 
 ### 1.2 架构（v6.0 方向 B / v7 reality 化）
 
@@ -64,9 +65,11 @@ L4 空闲精炼守护线程（IdleRefinementDaemon）
 - sysadmin 的 `ca_cache/` 有 **139 个会话 DB**；agent.log 中 CA 日志 **259 条**，全链路证据齐全：
   `CA plugin started → pre_llm_call: wrote seq 0 → [CA_WIKI] Session-start wiki recall injected (1820 chars, 3 entries) → grade → post_llm_call: wrote asst_fin → F-stage`
 - 主 Agent 模型：`deepseek-v4-flash`，context_length 524288
-- **⚠️ 截至调研日（2026-08-13）CA 在 Hermes 上已处于加载失败/停摆状态**（详见 §1.5）——这是本次调研最重要的现场发现
+- **⚠️ 截至调研日（2026-08-13）CA 曾短暂加载失败/停摆**（08-13 20:57~21:10，Hermes 22af80bcf 升级生效，详见 §1.5/§1.5b）——08-14 已修复恢复，调研时发现的瞬时故障
 
 ### 1.5 ⚠️ 关键现场发现：CA 当前在 Hermes 上已停摆（AGENTS.md 记录已过时）
+
+> **⚠️ 2026-08-14 修正**：本节"停摆"结论**只对 08-13 20:57~21:10 的 1 小时窗口成立**，且根因是 Hermes 升级（22af80bcf dispose 逻辑生效），不是"CA 停摆已久"。**07-30~08-13 20:59 之间 errors.log 虽持续报 `Failed to load plugin`，但那是 CE 壳注册失败的 WARNING——CA 的 8 个 hooks 一直在正常注册运行**（08-12 07:53 会话 `mspbenwzz2s4i7` 完整 E-stage/F-stage/recall 链路实证）。完整时间线见 §1.5b。
 
 调研中实测确认（证据链完整）：
 
@@ -83,6 +86,34 @@ L4 空闲精炼守护线程（IdleRefinementDaemon）
 → CA 的实际生效路径只有 8 个 hooks（E-stage/F-stage/话题/召回），这与 AGENTS.md"CE 壳=占位、hooks 驱动一切"的定位一致，但"占位"的前提是**注册不失败**——当前已失败。
 
 > **对"必要性"的影响**：CA 的 Hermes 适配壳（~600 行 `__init__.py`）正骑在 Hermes 快速演进的插件 API 上，一个"无害"的参数错误在 08-01 的 Hermes 变更后升级为致命故障——这既是"继续留在 Hermes 需付的维护成本"的实证，也是"若 DSH 转正主平台则应迁移"的动机之一。
+
+### 1.5b 停摆时间线精确考证（2026-08-14 补，多源交叉验证）
+
+> **结论**：CA **从未整体停摆过**。停摆的是 CE 壳（方向 B 压缩路径）——从 v6.0 出生（06-27）即断；而 **hooks 全链路一直运行到 08-13 20:59**。08-13 的"加载失败"是 Hermes 升级瞬间导致，21:52 修复即恢复。DSH 报告把"最后成功启动 08-12 07:53"误读为"停摆已久"，实际是**升级导致的瞬时故障**。
+
+**完整时间线（证据来源：git 历史 + errors.log/agent.log/gateway.log + ca_cache DB + reality-strand）**：
+
+| 时间 | 事件 | 状态 | 证据 |
+|---|---|---|---|
+| 06-26/27 | v6.0 引入 `register_context_engine("ca_assembler", _ce_engine)`（2 参）；Hermes 签名恒 1 参（`92382fb00` 起） | ❌ CE 壳注册必失败（出生即断） | git `562cbe8`/`d33215a` L188；`e4c7daf` commit 信息 |
+| 06-19~06-27 | **双路径并存**：CE 壳 compress 调 `_build_conv_history_v6` + pre_llm_call mutation 都在跑（reality 39 记录 06-19 曾"3参→2参修复后正常加载运行"） | ✅ 方向 B 与 mutation 并存运行 | reality 39 + 06-28 会话（mqxire67e7uw9g）"双路径同时活着的后果" |
+| 07-26~07-27 | CA hooks 正常全链路（`[CA_v5] simple_mutation: replaced=0` 实证 v5 mutation 在生产跑） | ✅ hooks + mutation 运行 | `agent.log.1` L935-977 |
+| **07-30 17:39** | sysadmin errors.log **首条** `Failed to load plugin 'ca_assembler'`（2 参 TypeError）——此后每日 2-23 条 | ⚠️ CE 壳注册失败 WARNING；**hooks 仍注册**（22af80bcf 前 Hermes 不 dispose） | `errors.log.1` 首条 |
+| **08-12 07:53** | 会话 `mspbenwzz2s4i7`：CA hooks **完整运行**（E-stage 写 seq 0 + recall 注入 1840 chars + grade + F-stage），turn_stream 6 turns 写入 | ✅ **最后正常活动** | agent.log + `ca_cache/mspbenwzz2s4i7.db`（08-12 07:53~08:10 双源） |
+| **08-13 20:59** | Hermes 部署更新（`plugins.py` mtime 20:59:29）→ **22af80bcf（08-01）dispose 逻辑生效**：register() 抛异常 → `_dispose_registrations(owned)` 回滚全部 8 hooks | ❌ 插件整体加载失败（首次真正停摆） | mtime + errors.log 20:57:59/20:58:04/20:59:43/21:00:26/21:09:44/21:10:05 |
+| **08-13 21:52** | DSH 会话修复：注释 CE 壳注册 + 三副本同步（tester/sysadmin/winker md5 一致）→ gateway 重启（pid 8218） | ✅ 恢复：21:15 后 0 失败；08-14 0 失败 | errors.log 计数 + gateway-exit-diag.log pid 659→8218 |
+
+**三层停摆的区分（这是本报告最重要的修正）**：
+
+1. **CE 壳（方向 B 压缩路径，`_build_conv_history_v6` 唯一生产调用点 `__init__.py:352`）**：**06-27 引入即断**——2 参注册 vs 1 参签名必抛 TypeError，引擎从未进入 `_manager._context_engine`。`should_compress()`/`compress()` 从未被 Hermes 触发。
+2. **hooks 全链路（E-stage/F-stage/话题/recall）**：**从未停摆**——07-26~08-13 20:59 持续运行（07-26 `simple_mutation` + 08-12 `mspbenwzz2s4i7` 实证）。07-30 起的 `Failed to load plugin` 仅是 CE 壳注册失败告警，Hermes 22af80bcf 之前不 dispose hooks。
+3. **插件整体加载**：**08-13 20:57~21:10 瞬时失败**——Hermes 22af80bcf（08-01 提交，08-13 20:59 部署生效）在 register() 异常路径加入 `_dispose_registrations(owned)`（`plugins.py:4345-4361`），把原本"无害"的 2 参错误升级为致命故障。21:52 修复（注释 CE 壳注册）即恢复。
+
+**附带发现（与 DSH 报告 §1.5 结论的差异）**：
+
+- DSH 报告第 3 条说"agent.log 中 CA 最后成功启动是 08-12 07:53，此后无任何 CA 活动"——**属实但被误读**：08-12 07:53 是最后正常活动，但"此后无活动"的 08-13 白天 sysadmin 无新会话（非停摆），20:59 升级后才真正失败。
+- DSH 报告第 4 条"CA 加载失败、hooks 全部未注册"**只对 20:57~21:10 的窗口成立**，不能回推为"CA 停摆已久"。
+- 本修正基于 4 源交叉验证：git 提交历史、errors.log/agent.log/gateway.log 时间线、ca_cache DB（`mspbenwzz2s4i7.db` 08-12 写入实证）、reality-strand（reality 39/106 记录）。
 
 ---
 
@@ -229,10 +260,10 @@ tools/pre-execute → tools/execute → tools/post-execute → finalizeContent �
 "是否有必要"取决于一个前提：**DSH 是否将取代 Hermes 成为主 Agent 平台？**
 
 - 当前事实：Hermes（gateway + web-ui :8648）是活跃主平台；DSH（web :3080）与 Hermes 并存。二者不是竞争关系，是两个独立 Agent 栈。
-- **新增紧迫事实**：CA 在 Hermes 上已于 2026-08-13 停摆（插件 API 变更导致加载失败，见 §1.5）。因此当下问题不是"稳定的 CA 要不要搬"，而是"**修复 Hermes 适配（1 行）还是借机迁移**"：
+- **（修订）原"新增紧迫事实"已失效**：调研当时 CA 在 Hermes 上停摆（插件 API 变更导致加载失败，见 §1.5），**08-14 已 1 行修复恢复**（§1.5b）。因此当下问题是"**恢复后的 CA 如何规划**"而非"修复还是迁移"：
   - 若答案是"是，逐步迁到 DSH" → CA 的能力需要以某种形态在 DSH 上重现，否则迁移后丢失上下文/记忆能力 → **必要（且现在就是窗口期）**
-  - 若答案是"否，Hermes 继续主用，DSH 是另一环境" → **先 1 行修复恢复 CA**（§1.5 第 5 点），迁移属于双份维护，**不必要**（除非想借机把 CA 重构到事件溯源模型上）
-  - 折中：1 行修复恢复 Hermes 生产，同时以 DSH 为实验环境按 §5.2 渐进验证迁移路径，双向对冲
+  - 若答案是"否，Hermes 继续主用，DSH 是另一环境" → **CA 已修复恢复**（08-14），继续维护即可；迁移属于双份维护，**不必要**（除非想借机把 CA 重构到事件溯源模型上）
+  - 折中：维持 CA 于 Hermes 生产，同时以 DSH 为实验环境按 §5.2 渐进验证迁移路径，双向对冲
 
 ### 4.2 DSH 原生与 CA 的差距 = CA 迁移后的存在价值
 
@@ -269,7 +300,7 @@ DSH 原生已经覆盖"**控制上下文体积**"（compaction + tokenMeter + to
 ### 5.1 结论
 
 1. **能够迁移（可行）**：CA 的每个机制在 DSH 都有对应扩展点或等价宿主（§3.1 映射表全绿/黄，无红）；CA 的 LLM/嵌入调用本就不依赖 Hermes，算法层可直译（核心管道 ~95% 自包含）。
-2. **是否必要是前提选择题，且叠加紧迫性**：DSH 若转正为主平台则必要；否则不必要（先 1 行修复恢复 Hermes 生产即可）。**注意 CA 目前在 Hermes 上已停摆**（§1.5），修复或迁移二选一，不能按"CA 正常运行"来规划。
+2. **是否必要是前提选择题，且叠加紧迫性**：DSH 若转正为主平台则必要；否则不必要（已 1 行修复恢复 Hermes 生产，08-13 20:57~21:10 的瞬时加载失败已解决，见 §1.5b）。不能按"CA 停摆"来规划——CA hooks 一直正常，仅 CE 壳（方向 B）自 v6.0 未注册。
 3. **迁移本质是"重写"，不是"搬运"**：管道层（hooks/线程/SQLite 自管）被 DSH 事件模型取代（反而减负），语义层（prompt 工程 + 算法）是主要工作量；CA 与 Hermes 的契约面薄（4 个可降级符号 + 弱类型 kwargs），但 hook 时序语义（on_session_end 每轮触发、pre_llm_call 注入语义、turn 计数法）是换宿主时必须重建的隐性契约。
 4. **迁移后的 CA 应重新定位为"记忆层"**，与 DSH 原生 compaction 分工：DSH 管体积，CA 管结构。
 

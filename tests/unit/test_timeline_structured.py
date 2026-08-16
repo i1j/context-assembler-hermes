@@ -72,6 +72,25 @@ class TestUpdateRealityTimelineTs:
         assert isinstance(entries[-1].get("ts"), float)
         assert entries[-1]["turns"] == [5]
 
+    def test_source_strand_list_merged(self, tmp_path):
+        """update_reality 接受 list[source_strand]：s2r↔source_strands 一致性（决策 41 审计门）。"""
+        db = tmp_path / "ca_topics.db"
+        rid = create_reality(
+            profile="tester", name="R1", hdl="H1",
+            current_status={}, timeline_entry=None,
+            source_strand={"session_id": "s1", "strand_id": 1},
+            centroid_json=None, db_path=db)
+        ok = update_reality(
+            reality_id=rid, db_path=db,
+            source_strand=[
+                {"session_id": "s1", "strand_id": 2},
+                {"session_id": "s1", "strand_id": 3},
+                {"session_id": "s2", "strand_id": 7},
+            ])
+        assert ok
+        r = load_all_realities(db_path=db)[0]
+        assert r["source_strands"] == {"s1": [1, 2, 3], "s2": [7]}
+
     def test_legacy_str_timeline_no_crash(self, tmp_path):
         """存量 str timeline + update_reality → 不崩（seq 计算兼容）。"""
         import sqlite3

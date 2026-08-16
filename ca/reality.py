@@ -870,7 +870,11 @@ def run_reality_merge(
         text = _strand_embed_text(st)
         if not text.strip():
             continue
-        vec = embed_client.embed(text[:500])
+        try:
+            vec = embed_client.embed(text[:500])
+        except Exception as exc:
+            logger.warning("[CA_REALITY] cold-start embed failed: %s", exc)
+            vec = None
         if not vec:
             continue
         st["candidates"] = _cold_start_cosine_candidates(
@@ -958,8 +962,12 @@ def run_reality_merge(
                 current_status=new_cs, timeline_entry=timeline_entry,
                 changes=[str(c) for s in group for c in (s.get("changes") or []) if str(c).strip()],
                 centroid_json=centroid_json,
-                source_strand={"session_id": group[0].get("session_id", ""),
-                               "strand_id": group[0].get("strand_id")},
+                source_strand=[
+                    {"session_id": st.get("session_id", ""),
+                     "strand_id": st.get("strand_id")}
+                    for st in group
+                    if st.get("session_id") and st.get("strand_id") is not None
+                ],
                 db_path=db_path,
             )
             for st in group:

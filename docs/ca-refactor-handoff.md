@@ -2,6 +2,7 @@
 
 > **用途**：新会话启动 CA 重构项目前的自举材料。读完本文件 + AGENTS.md + docs/INDEX.md 即可开工。
 > **上一会话已完成**：DSH 迁移调研、CE 壳故障修复、设计符合性审计（§6）、文档修订、gateway 重启恢复。
+> **更新（2026-08-16）**：CE 壳已按 select_context 路线激活（1 参注册 + `should_compress()` 恒 False + `select_context()` 每轮 DB 重建），§1 是 08-13 快照勿当现状；§2 问题 1/5 已被 select_context 路线闭合，问题 2/3/4 仍未拍板。
 > **本文件待办**：记录当前状态、待拍板设计问题、推荐工作流（flash 编排 + pro 执行）、禁区清单、验证基线。
 
 ---
@@ -23,11 +24,11 @@
 
 | # | 问题 | 选项 | 关联材料 |
 |---|------|------|---------|
-| 1 | **CE 壳去留（设计簇 A/B 分裂）** | A：正式退役（删/停 CE 壳代码，决策 06/20 标记退役，`context.engine: ca_assembler` 配置清理）<br>B：激活（改 1 参注册 + 补三前置：条件式 should_compress、pre_llm_call 模式守卫、前检压缩与 seq 0 写入的轮序处理）<br>C：维持现状（注册暂停、hooks 驱动、内置 compressor 兜底） | §6.1 两簇分析；TP-009 vs 决策 06/20 |
+| 1 | **CE 壳去留（设计簇 A/B 分裂）** | ✅ 已拍板（2026-08-15）：走 B 的 select_context 变体（1 参注册 + `select_context()` 每轮重建 + `should_compress()` 恒 False；条件式 should_compress / 双模式守卫不再适用，轮序问题由 select_context 晚于 pre_llm_call 解决） | §6.1 两簇分析；TP-009 vs 决策 06/20 |
 | 2 | **决策 22（on_session_finalize 去重）** | 补实现（register() 补注册该 hook + SQL 清理相邻重复 user 行）or 正式标记"已撤销" | decisions/22 修订注 |
 | 3 | **决策 15（SHA256 指纹去重）** | 补实现 or 正式标记"已撤销"（当前 dict key 去重够用） | decisions/15 修订注 |
 | 4 | **死代码处置** | 删除 or 保留标注（retrieval.py 双路检索、cache.py 四字典、`scripts/` 遗留、`_A_stable_cache` 残留字段） | architecture 07/08；§6.4 |
-| 5 | **should_compress 立场**（若走 B） | 无条件 True（现状）→ 条件式"有旧话题且 token 超阈值"（TP-009 设计） | §6.2 差异 #3 |
+| 5 | **should_compress 立场**（若走 B） | ✅ 已拍板（2026-08-15）：恒 False（select_context 负责每轮重建，compress 仅手动回退；不再用 should_compress 触发） | §6.2 差异 #3 |
 
 ## 3. 推荐工作流：flash 编排 + pro 关键执行
 
@@ -82,12 +83,12 @@ grep "Failed to load plugin" ~/.hermes/profiles/sysadmin/logs/errors.log  # 不�
 
 | 文件 | 内容 |
 |------|------|
-| `AGENTS.md` | 开发指南 + 关键约束（含 CE 壳注册暂停说明） |
+| `AGENTS.md` | 开发指南 + 关键约束（含 CE 壳 select_context 激活说明） |
 | `docs/INDEX.md` | 架构 + 决策全量索引（已按代码修订状态） |
 | `docs/migration-research-dsh.md` | §1.5 停摆证据链 / §6 设计符合性审计（含修订闭环） |
 | `docs/architecture/01-overview` | 系统概览（CE 壳定位已修订） |
 | `docs/decisions/20-ce-shell-registration` | CE 壳注册决策 + 2026-08-13 修订 |
-| `docs/decisions/06-direction-b` | 方向 B + 生产未激活修订 |
+| `docs/decisions/06-direction-b` | 方向 B + select_context 生产已激活修订 |
 | OV 决策树 | `viking://resources/projects/context-assembler/decisions/decision-points/`（141+ 节点） |
 
 ## 7. 新会话开场建议

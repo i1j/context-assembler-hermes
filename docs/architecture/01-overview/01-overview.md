@@ -50,15 +50,15 @@ Hook 接收消息 → E-stage 写即落盘 → F-stage 异步摘要 → A-stage 
 
 ### 方向 B（v6.0）
 
-`_build_conv_history_v6` 从 turn_stream DB 直接构造 conv_history 列表，**不修改 Hermes 消息**。CE 管线已于 2026-06-28 停用。
-> 修订（2026-08-13）：代码事实——`_build_conv_history_v6` **仅**由 CE 壳 `compress()` 调用
-> （`__init__.py:352`），8 个 hooks 从不调用它；CE 壳注册 2026-08-13 起暂停 → **A-stage
-> 重建当前未激活**（详见下文 CE 壳定位修订 + `docs/migration-research-dsh.md` §1.5/§6）。
+`_build_conv_history_v6` 从 turn_stream DB 直接构造 conv_history 列表，**不修改 Hermes 消息**。
+> 修订（2026-08-15）：`_build_conv_history_v6` 由 CE 壳 `CAContextEngine.select_context()`
+> 每轮调用（`conversation_loop.py` 调用点），8 个 hooks 负责 E-stage 写入 / F-stage 摘要 /
+> 话题检测 / recall 注入。A-stage 重建生产已激活，`should_compress()` 恒 False。
 
-### CE 壳定位（用户设计定论，2026-08-13 修订）
+### CE 壳定位（用户设计定论，2026-08-15 修订）
 
 - **CA 注册 ContextEngine（`context.engine: ca_assembler`）是「替代」内置 ContextCompressor 的占位**，不是让 Hermes 跑 compress_context 流程。
-- **CA 不触发 Hermes compress_context 的 archive/rotation**：CE shell 的 `should_compress` 恒返回 True（`__init__.py`，pre-set abort 标志 `_last_compress_aborted` 阻止 archive/rotation）。
-- **⚠️ CE 壳注册已暂停（2026-08-13 修复）**：旧代码 `ctx.register_context_engine("ca_assembler", _ce_engine)` 传 2 参数 vs Hermes 接口 `register_context_engine(self, engine)` 1 参数 → 必抛 TypeError；Hermes commit `22af80bcf`（08-01）起 register() 抛异常会 **dispose 该插件全部 registration（含 8 个 hooks）→ 插件加载失败、CA 停摆**。修复：`__init__.py` register() 已注释该行（hooks 恢复、engine 回退内置 compressor）。原"参数警告为无害已知项、hooks 不被回滚"的记录**已失效**。恢复 CE 壳的前置条件见 `docs/migration-research-dsh.md` §6.3（条件式 should_compress、pre_llm_call 模式守卫、前检压缩与 seq 0 写入的轮序处理）。
-- **A-stage 组装（`_build_conv_history_v6`）与 8 个 hooks 的分工（修订）**：hooks 驱动 E-stage 写入（pre_llm_call 写 seq 0 → 话题检测 → wiki recall；post_llm_call 写 fin → F-stage 异步摘要）；`_build_conv_history_v6` **仅**经 CE 壳 compress() 路径可达，当前未激活。原文档"A-stage 完全由 8 个 hooks 驱动"为误述。
-- 判定 CA 工作正常的标准 = hook 链路（E-stage 写库 / F-stage 摘要 / 话题检测 / wiki recall）数据完整，与 CE 是否被 Hermes 选中无关。
+- **CA 不触发 Hermes compress_context 的 archive/rotation**：CE shell 的 `should_compress` 恒返回 False，`compress()` 仅作为手动 /compress 回退路径。
+- **CE 壳注册已恢复（1 参签名）**：`__init__.py` register() 使用 `ctx.register_context_engine(_ce_engine)`（Hermes `hermes_cli/plugins.py:1898`）。旧 2 参写法会抛 TypeError 并使 Hermes dispose 全部 registration（08-13 停摆），**勿再恢复旧 2 参写法**。
+- **A-stage 组装（`_build_conv_history_v6`）与 8 个 hooks 的分工**：hooks 驱动 E-stage 写入（pre_llm_call 写 seq 0 → 话题检测 → wiki recall；post_llm_call 写 fin → F-stage 异步摘要）；`select_context()` 每轮调用 `_build_conv_history_v6` 完成 conv_history 重建。
+- 判定 CA 工作正常的标准 = hook 链路（E-stage 写库 / F-stage 摘要 / 话题检测 / wiki recall）数据完整，且 `select_context()` 每轮从 turn_stream DB 重建 conv_history。
