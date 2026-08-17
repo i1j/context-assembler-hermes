@@ -8,7 +8,7 @@ spending as little as possible to feed the cloud LLM a context with the highest
 mutual-information density per token.
 
 > This is the **Hermes (Python) version**. The design has been carried forward into
-> **CA-DSH V0.99** — the [DeepSeek Harness (dsh) plugin version](https://github.com/i1j/ca-dsh),
+> **Context Assembler DSH V0.99** — the [DeepSeek Harness (dsh) plugin version](https://github.com/i1j/context-assembler-DSH),
 > which is under active development. This repo is maintained as the reference implementation
 > of the original Hermes design.
 
@@ -68,8 +68,8 @@ python3 -m pytest tests/
 - [docs/README.md](docs/README.md) — the dual-dimension wiki entry (architecture + decisions)
 - [docs/architecture/](docs/architecture/) — current system components
 - [docs/decisions/](docs/decisions/) — decision records (ADR), 01–45
-- The authoritative design intent and the mapping to CA-DSH V0.99 live in
-  [CA-DSH docs/DESIGN.md](https://github.com/i1j/ca-dsh/blob/main/docs/DESIGN.md)
+- The authoritative design intent and the mapping to Context Assembler DSH V0.99 live in
+  [Context Assembler DSH docs/DESIGN.md](https://github.com/i1j/context-assembler-DSH/blob/main/docs/DESIGN.md)
 
 ## License
 

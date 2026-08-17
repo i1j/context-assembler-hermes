@@ -6,8 +6,8 @@
 插件版（Python）：让上下文窗口保持高密度、缓存友好、低开销——花尽可能少的钱，向云端 LLM 提供
 单位 token 互信息密度最大的 ctx。
 
-> 这是 **Hermes（Python）版本**。设计已延续至 **CA-DSH V0.99**（
-> [DeepSeek Harness（dsh）插件版](https://github.com/i1j/ca-dsh)），后者正在积极开发中。
+> 这是 **Hermes（Python）版本**。设计已延续至 **Context Assembler DSH V0.99**（
+> [DeepSeek Harness（dsh）插件版](https://github.com/i1j/context-assembler-DSH)），后者正在积极开发中。
 > 本仓库作为 Hermes 原始设计的参考实现维护。
 
 ## 功能
@@ -60,7 +60,7 @@ python3 -m pytest tests/
 - [docs/README.md](docs/README.md) — 双维度 wiki 入口（架构 + 决策）
 - [docs/architecture/](docs/architecture/) — 当前系统组件
 - [docs/decisions/](docs/decisions/) — 决策记录（ADR），01–45
-- 权威设计意图与到 CA-DSH V0.99 的映射见 [CA-DSH docs/DESIGN.md](https://github.com/i1j/ca-dsh/blob/main/docs/DESIGN.md)
+- 权威设计意图与到 Context Assembler DSH V0.99 的映射见 [Context Assembler DSH docs/DESIGN.md](https://github.com/i1j/context-assembler-DSH/blob/main/docs/DESIGN.md)
 
 ## 许可
 
