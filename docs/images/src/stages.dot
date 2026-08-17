@@ -1,0 +1,14 @@
+digraph stages {
+  rankdir=LR;
+  graph [fontname="Helvetica", bgcolor="transparent", pad="0.25", nodesep="0.5", ranksep="0.7"];
+  node [shape=box, style="rounded,filled", color="#94a3b8", fontname="Helvetica", fontsize=11, margin="0.16,0.09"];
+  edge [color="#94a3b8", fontname="Helvetica", fontsize=10];
+  e [label="E-stage\n写即落盘\n(turn_stream DB)", fillcolor="#e0f2fe"];
+  f [label="F-stage\n本地 4B 事实提炼\nFct(OODA) + Hdl", fillcolor="#dcfce7"];
+  t [label="话题管理\nJaccard + 水位压力", fillcolor="#fef3c7"];
+  g [label="定级冻结\nACT/REL/FAR", fillcolor="#fce7f3"];
+  a [label="A-stage 历史装配\n块视角摘要版本", fillcolor="#dbeafe"];
+  r [label="reality 归并/注入\n(4B 拣选)", fillcolor="#ecfdf5"];
+  l [label="L-stage 空闲精炼\nL1→L2→L3", fillcolor="#f3e8ff"];
+  e -> f -> t -> g -> a -> r -> l;
+}

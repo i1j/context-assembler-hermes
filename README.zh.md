@@ -12,6 +12,10 @@
 
 ## 功能
 
+<p align="center">
+  <img src="docs/images/stages.png" alt="CA Assembler 阶段流水线" width="90%"/>
+</p>
+
 - **E-stage 写即落盘**：5 个 hook 在会话轮到达时即时落盘，含工具调用、LLM 调用与思考轨迹
   （决策 44：块级 OODA 打标）。
 - **F-stage 事实提炼**：后台本地 4B 守护线程把原始轮次转为事实：`Fct`（OODA 四段）+ `Hdl`，

@@ -14,6 +14,10 @@ mutual-information density per token.
 
 ## What it does
 
+<p align="center">
+  <img src="docs/images/stages.png" alt="CA Assembler 阶段流水线" width="90%"/>
+</p>
+
 - **E-stage** — write-on-disk: every session turn is captured as it arrives (5 hooks), including
   tool calls, LLM calls and think traces (decision 44: block-level OODA tagging).
 - **F-stage** — background local 4B daemon turns raw turns into facts: `Fct` (OODA four phases) +
