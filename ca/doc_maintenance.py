@@ -43,7 +43,7 @@ __all__ = [
     "DocTreeReport",
 ]
 
-_OVFS_ROOT_DEFAULT = "/home/i1j/.openviking/data/viking/default/resources"
+_OVFS_ROOT_DEFAULT = os.path.expanduser("~/.openviking/data/viking/default/resources")
 _OV_PROJECT_DEFAULT = "projects/context-assembler"
 
 _INDEX_ROW_RE = re.compile(

@@ -1,2 +1,0 @@
-[permissions]
-allow = ["Bash(cd /workspace && git log --oneline -5 2>/dev/null || echo \"没有提交历史\")", "Bash(pwd && ls -la)", "Bash(cd /home/i1j/.hermes/profiles/tester/plugins/ca_assembler && git log --oneline -20 2>/dev/null || cat .git 2>/dev/null)"]

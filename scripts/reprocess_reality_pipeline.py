@@ -16,7 +16,7 @@
   ⑥ 每 session 一轮精炼  IdleRefinementDaemon()._run_refinement_cycle()
 
 用法：
-    HERMES_HOME=/home/i1j/.hermes/profiles/winker \
+    HERMES_HOME=~/.hermes/profiles/winker \
     python3 scripts/reprocess_reality_pipeline.py --profile winker \
         [--db <ca_topics.db>] [--limit N] [--sessions a,b] [--no-refine] [--backup]
 

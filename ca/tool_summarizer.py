@@ -1,3 +1,4 @@
+import os
 """
 ca/tool_summarizer.py — 工具轮摘要规则引擎 (v5.10)
 
@@ -525,7 +526,7 @@ class ToolSummarizer:
             raw = result_content if result_content else "(empty response)"
             # head_tail_truncate：保留文件开头(imports/签名) + 结尾(最后函数/类)
             # 比对 _sanitize_summary_text 更适合代码文件的信息密度
-            s = str(raw).replace("/home/i1j", "~")
+            s = str(raw).replace(os.path.expanduser("~"), "~")
             result_summary = ToolSummarizer._head_tail_truncate(s, head_ratio=0.6, max_len=200)
             fct_error = None
 
@@ -1114,7 +1115,7 @@ class ToolSummarizer:
         """替换 HOME 路径为 ~ 防止绝对路径泄露。"""
         if not path_str:
             return ""
-        s = str(path_str).replace("/home/i1j", "~")
+        s = str(path_str).replace(os.path.expanduser("~"), "~")
         return s[:max_len]
 
     @staticmethod
@@ -1164,7 +1165,7 @@ class ToolSummarizer:
                         s = f"[{len(parsed)} items]"
                 except (ValueError, SyntaxError, TypeError):
                     pass
-        s = s.replace("/home/i1j", "~")
+        s = s.replace(os.path.expanduser("~"), "~")
         return s[:max_len]
 
     # 无信息量的过渡词/句（作前缀剥离用，不含句号也匹配）
