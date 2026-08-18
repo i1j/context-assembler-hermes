@@ -15,7 +15,7 @@ mutual-information density per token.
 ## What it does
 
 <p align="center">
-  <img src="docs/images/stages.png" alt="CA Assembler 阶段流水线" width="90%"/>
+  <img src="docs/images/stages.png" alt="CA Assembler 阶段流水线"/>
 </p>
 
 - **E-stage** — write-on-disk: every session turn is captured as it arrives (5 hooks), including
