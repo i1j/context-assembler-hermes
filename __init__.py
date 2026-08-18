@@ -456,7 +456,22 @@ class CAContextEngine(ContextEngine):
         Hermes 的插件 hook on_session_end 每轮都会触发（不能用于清账），
         而 ContextEngine.on_session_end 只在真实会话边界触发 —— 这里才是
         正确的 `_engines` 移除点，防止长跑 gateway 会话轮转后注册表泄漏。
+
+        ⚠️ bg-review fork 例外（2026-08-18 实证）：Hermes 的 background_review
+        fork 与主 agent 共享 session_id（background_review.py L1097），fork
+        关闭时 shutdown_memory_provider → 本方法会被调用（background_review.py
+        L1219 → run_agent.py L4302）。若无条件清理，主 agent 的 plugin 被
+        误删，select_context 永久 fallback（A-stage 失效）。fork 运行在名为
+        "bg-review" 的线程（run_agent.py L1856），此处按线程名跳过清理。
         """
+        # bg-review fork 关闭路径：跳过清理，保护主 agent 的 plugin
+        if threading.current_thread().name.startswith("bg-review"):
+            logger.info(
+                "[CA] on_session_end: bg-review fork teardown (thread=%s); "
+                "skipping plugin cleanup for session=%s",
+                threading.current_thread().name, session_id or self._session_id,
+            )
+            return
         plugin = self._get_plugin()
         if plugin:
             try:

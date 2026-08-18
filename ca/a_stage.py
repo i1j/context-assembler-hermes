@@ -19,6 +19,51 @@ from .post_process import _safe_truncate
 logger = logging.getLogger(__name__)
 
 
+def _merge_same_request_assistant_rows(rows: List[Dict]) -> List[Dict]:
+    """合并同一 request_id 的相邻 assistant 行（决策44 E-stage 拆块配套）。
+
+    决策44 E-stage v7 把同一次 API 响应拆成多行写入 turn_stream：
+      - THINKING 行（reasoning + tool_calls，block_type=thinking）
+      - AGENT_REPLY 行（content，block_type=agent_reply，同一 request_id）
+    若 A-stage 逐行输出，会产生
+      assistant(tool_calls) → assistant(无 tool_calls) → tool×N
+    非法序列 —— OpenAI/DeepSeek 拒绝："An assistant message with 'tool_calls'
+    must be followed by tool messages responding to each 'tool_call_id'"
+    （2026-08-17 线上 400；Hermes pre-call sanitizer 只修配对不修顺序）。
+
+    合并规则（同一 turn 内相邻 assistant 行）：
+      - request_id 非空且相同 → 合并
+      - request_id 均为空（旧数据/测试行）→ 合并（相邻 assistant 行只可能
+        来自同一响应的拆块；v5 时代每次响应只写一行，不会相邻）
+      - 其余（request_id 一个空一个非空 / 不同 request）→ 不合并
+
+    合并结果：Elm/Fct/Hdl 文本拼接（保留 reasoning + content 双块信息），
+    tool_calls_json 取非空者，finish_reason/block_type 取首行。
+    """
+    if len(rows) < 2:
+        return rows
+    merged: List[Dict] = []
+    for row in rows:
+        if (merged
+                and merged[-1].get("role") == "assistant"
+                and row.get("role") == "assistant"):
+            prev = merged[-1]
+            r1 = prev.get("request_id") or ""
+            r2 = row.get("request_id") or ""
+            same_req = (r1 and r2 and r1 == r2) or (not r1 and not r2)
+            if same_req:
+                for key in ("Elm", "Fct", "Hdl"):
+                    a = prev.get(key) or ""
+                    b = row.get(key) or ""
+                    prev[key] = (a + "\n\n" + b).strip() if a and b else (a or b)
+                if not prev.get("tool_calls_json") and row.get("tool_calls_json"):
+                    prev["tool_calls_json"] = row["tool_calls_json"]
+                # finish_reason / block_type / ooda_stage 取首行（保持 tool_calls 判定）
+                continue
+        merged.append(dict(row))
+    return merged
+
+
 def _normalize_arguments_str(arguments: Any) -> str:
     """将 tool_calls[].function.arguments 归一化为 JSON string。
 
@@ -144,7 +189,7 @@ class AStageMixin:
             conv_hist.append(dict(system_message))
 
         for turn_num in sorted(turns.keys()):
-            rows = turns[turn_num]
+            rows = _merge_same_request_assistant_rows(turns[turn_num])
             in_tail = turn_num in tail_set
 
             # 话题等级（turn_num 是 1-indexed，与 topic_mgr 一致）

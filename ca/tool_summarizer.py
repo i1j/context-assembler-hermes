@@ -1,4 +1,3 @@
-import os
 """
 ca/tool_summarizer.py — 工具轮摘要规则引擎 (v5.10)
 
@@ -15,6 +14,7 @@ ca/tool_summarizer.py — 工具轮摘要规则引擎 (v5.10)
 """
 
 from __future__ import annotations
+import os
 
 import ast
 import json

@@ -5,6 +5,7 @@
 import importlib.util
 import sys
 import copy
+import threading
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -114,6 +115,47 @@ class TestCEProtocol:
             _engines["test"] = plugin
         ce = CAContextEngine()
         ce.on_session_start("test")
+        ce.on_session_end("test", [])
+        assert plugin._engine is None
+        with _engines_lock:
+            assert "test" not in _engines
+
+    def test_on_session_end_bg_review_thread_keeps_engine_registry(self, ca_engine):
+        """bg-review fork 关闭不应误删主 agent 的 _engines 条目。
+
+        根因（2026-08-18 实证）：Hermes background_review fork 与主 agent 共享
+        session_id（background_review.py L1097），fork 关闭时
+        shutdown_memory_provider → CE.on_session_end(session_id) 会被调用。
+        若无条件 _engines.pop(sid)，主 agent 的 plugin 被误删，
+        select_context 永久 fallback（A-stage 失效）。
+        fork 运行在名为 "bg-review" 的线程（run_agent.py L1856），
+        on_session_end 应在该线程内跳过清理。
+        """
+        plugin = _make_plugin(ca_engine, "test")
+        with _engines_lock:
+            _engines["test"] = plugin
+        ce = CAContextEngine()
+        ce.on_session_start("test")
+
+        results = {}
+
+        def _fork_close():
+            # 模拟 bg-review 线程内 shutdown_memory_provider → CE.on_session_end
+            results["thread_name"] = threading.current_thread().name
+            ce.on_session_end("test", [])
+
+        t = threading.Thread(target=_fork_close, name="bg-review")
+        t.start()
+        t.join(timeout=5)
+
+        assert results["thread_name"].startswith("bg-review")
+        # 主 agent 的 plugin 必须存活：_engine 未被销毁、_engines 条目仍在
+        assert plugin._engine is not None
+        with _engines_lock:
+            assert "test" in _engines
+            assert _engines["test"] is plugin
+
+        # cleanup：主线程正常路径清理
         ce.on_session_end("test", [])
         assert plugin._engine is None
         with _engines_lock:

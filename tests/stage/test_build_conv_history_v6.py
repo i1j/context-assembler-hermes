@@ -578,3 +578,114 @@ class TestToolRowFields:
             f"arguments 必须是 JSON string，got {type(raw_args).__name__}: {raw_args!r}"
         )
         assert json.loads(raw_args) == {"x": 1, "y": "二"}
+
+
+# ============================================================================
+# 决策44 拆块配套：同 request_id 的 assistant 行合并（BUG: 2026-08-17 工具轮 400）
+# ============================================================================
+
+class TestDecision44AssistantBlockMerge:
+    """决策44 E-stage 拆块（THINKING + AGENT_REPLY 分两行）与 A-stage 重建配套。
+
+    背景（2026-08-17 线上 400）：
+      DeepSeek 返回 `An assistant message with 'tool_calls' must be followed by
+      tool messages responding to each 'tool_call_id'. (insufficient tool messages
+      following tool_calls message)` —— 因为 E-stage v7 把同一次 API 响应拆成
+      THINKING（带 tool_calls）与 AGENT_REPLY（无 tool_calls）两行，A-stage 重建
+      逐行输出，产生 `assistant(tool_calls)→assistant(无tool_calls)→tool×N`
+      非法序列；Hermes 的 pre-call sanitizer 只修配对不修顺序，漏网。
+
+    修复：重建时合并同一 request_id 的相邻 assistant 行为一条消息。
+    """
+
+    def _write_decision44_tool_turn(self, store, sid="test"):
+        """模拟决策44 E-stage v7 对一次 tool_calls API 响应的落盘形态。"""
+        from ca.store import write_turn_v5
+        req = "sess:api:1"
+        write_turn_v5(store, sid, 1, 0, role="user", elm_text="查天气")
+        # THINKING 行（带 tool_calls）
+        write_turn_v5(store, sid, 1, 1, role="assistant",
+                      elm_text="用户要查天气，需要调用工具",
+                      fct_text="查询天气", hdl_text="查天气",
+                      tool_calls_json=json.dumps([
+                          {"id": "call_a", "type": "function",
+                           "function": {"name": "get_weather", "arguments": "{\"city\": \"北京\"}"}},
+                          {"id": "call_b", "type": "function",
+                           "function": {"name": "get_weather", "arguments": "{\"city\": \"上海\"}"}},
+                      ], ensure_ascii=False),
+                      finish_reason="tool_calls", block_type="thinking",
+                      ooda_stage="decide", request_id=req)
+        # AGENT_REPLY 行（无 tool_calls，同一 request）
+        write_turn_v5(store, sid, 1, 2, role="assistant",
+                      elm_text="好的，我来查询两地天气。",
+                      fct_text="确认查询", hdl_text="查询两地天气",
+                      finish_reason="tool_calls", block_type="agent_reply",
+                      ooda_stage="decide", request_id=req)
+        # tool 占位/结果行
+        write_turn_v5(store, sid, 1, 3, role="tool", elm_text="北京晴",
+                      fct_text="北京晴", hdl_text="北京晴",
+                      tool_name="get_weather", tool_call_id="call_a",
+                      status="ok", block_type="tool_call_result",
+                      ooda_stage="observe", request_id=req)
+        write_turn_v5(store, sid, 1, 4, role="tool", elm_text="上海雨",
+                      fct_text="上海雨", hdl_text="上海雨",
+                      tool_name="get_weather", tool_call_id="call_b",
+                      status="ok", block_type="tool_call_result",
+                      ooda_stage="observe", request_id=req)
+        # 下一个 user turn
+        write_turn_v5(store, sid, 2, 0, role="user", elm_text="然后呢")
+
+    def test_decision44_split_rebuild_merges_assistant_blocks(self, ca_engine):
+        """同 request_id 的 THINKING+AGENT_REPLY 两行重建后必须合成一条消息，
+        tool_calls 后紧跟 tool 响应，不允许中间插入无 tool_calls 的 assistant。"""
+        self._write_decision44_tool_turn(ca_engine.store)
+        mgr = _make_mock_topic_mgr({1: TopicGrade.ACT, 2: TopicGrade.ACT})
+        result = _build(ca_engine, mgr)
+
+        # 收集 assistant(tool_calls) 消息与其后消息的配对检查
+        tool_calls_seen = 0
+        for i, m in enumerate(result):
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                tool_calls_seen += 1
+                # tool_calls 消息之后必须是 tool 响应（OpenAI 协议强制）
+                nxt = result[i + 1] if i + 1 < len(result) else None
+                assert nxt is not None and nxt.get("role") == "tool", (
+                    f"assistant(tool_calls) 后必须是 tool 响应，got: {nxt!r}\n全序列: {result}"
+                )
+                # tool_calls 数量与后续 tool 响应数一致
+                n_calls = len(m["tool_calls"])
+                j = i + 1
+                while j < len(result) and result[j].get("role") == "tool":
+                    j += 1
+                assert j - (i + 1) == n_calls, (
+                    f"tool_calls={n_calls} 但 tool 响应={j-(i+1)}"
+                )
+        assert tool_calls_seen == 1, f"应恰有 1 条 assistant(tool_calls)，got {tool_calls_seen}"
+
+        # assistant(tool_calls) 的 content 应包含 AGENT_REPLY 文本（合并而非丢弃）
+        asst = next(m for m in result if m["role"] == "assistant" and m.get("tool_calls"))
+        assert "好的，我来查询两地天气" in asst["content"], (
+            f"AGENT_REPLY 文本应合并进 assistant content: {asst['content']!r}"
+        )
+        # tool 响应完整
+        tools = [m for m in result if m["role"] == "tool"]
+        assert [t["tool_call_id"] for t in tools] == ["call_a", "call_b"]
+
+    def test_merge_keeps_plain_assistant_rows_untouched(self, ca_engine):
+        """无 tool_calls 的普通 assistant(fin) 行（不同 request）不得被误合并。"""
+        from ca.store import write_turn_v5
+        write_turn_v5(ca_engine.store, "test", 1, 0, role="user", elm_text="Q")
+        write_turn_v5(ca_engine.store, "test", 1, 1, role="assistant",
+                      elm_text="回答A", finish_reason="stop",
+                      block_type="agent_reply", ooda_stage="decide",
+                      request_id="req1")
+        write_turn_v5(ca_engine.store, "test", 2, 0, role="user", elm_text="Q2")
+        write_turn_v5(ca_engine.store, "test", 2, 1, role="assistant",
+                      elm_text="回答B", finish_reason="stop",
+                      block_type="agent_reply", ooda_stage="decide",
+                      request_id="req2")
+        mgr = _make_mock_topic_mgr({1: TopicGrade.ACT, 2: TopicGrade.ACT})
+        result = _build(ca_engine, mgr)
+        assts = [m for m in result if m["role"] == "assistant"]
+        assert len(assts) == 2
+        assert [a["content"] for a in assts] == ["回答A", "回答B"]
