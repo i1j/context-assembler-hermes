@@ -46,6 +46,8 @@ scripts/debug_*.py
 scripts/evaluate_pipeline.py
 scripts/fix_timeline_seq.py
 scripts/flash_*.py
+!scripts/flash_build_reality.py
+!scripts/flash_pilot_verify.py
 scripts/refine_*.py
 scripts/replay_*.py
 scripts/reprocess_old_sessions.py
