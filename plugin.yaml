@@ -1,11 +1,12 @@
 name: ca_assembler
-version: 6.1.0
+version: 7.1.2
 description: >
-  ContextAssembler v6.1 — Hermes 插件 + ContextEngine ABC 壳，
+  ContextAssembler v7.1 — Hermes 插件 + ContextEngine ABC 壳，
   增量 Elm/Fct/Hdl 分层摘要 + topic-aware 三级替换（ACT/REL/FAR）
   + 角色队列匹配 + E-stage 写即落盘（决策 44：块级 OODA 打标、
   近源 API 元数据、llm_calls/think_trace、流式旁路观测）
   + 话题分割（Jaccard）+ F‑stage 事务帧多事务 OODA 支撑
+  + reality 化注入（决策 41：提问云形心散度 + 4B 拣选）
   + CE 路压缩（手动 /compress）。
 pip_dependencies:
   - numpy

@@ -715,3 +715,39 @@ Fct告警 → 首轮Fct → 空字段过滤 → HEAVY_FIELDS → CE停用
 
 ---
 
+### 版本管理修订说明（2026-08-22）
+
+> **本文档 v6.0.5 之后存在版本记录空白（2026-06-28 ~ 2026-08-22）**。经多源交叉验证（git 提交历史 + OV changelog ×2 + plugin.yaml），已重建完整版本线。权威版本记录见 OV：
+> `viking://resources/projects/context-assembler/changelog-v6-continuation.md/`（v5.8 ~ v7.0 修订版）+ `changelog.md` 衔接说明。
+>
+> **版本编号冲突**：v6.0 时代曾出现双编号——本文档（git changelog）编 v6.0.0~v6.0.5（方向 B conv_history 重建 + Fct 优化系列），OV 侧编 v6.0/v6.1（v6.1 = state.db user 双写清理，本文档无此编号）。plugin.yaml 2026-08-16 起标注 6.1.0 与 OV v6.1 撞号且低于实际代码，8-18 git tag v6.1.0 同样错标。
+>
+> **修订后的权威版本线**（2026-08-22 起执行）：
+> ```
+> v5.5.0 → v5.8.0 → v5.10.0 → v6.0.0 → v6.0.1~6.0.5 → v6.1 → v6.2 → v6.3 → v6.4 → v6.4.1 → v6.4.2
+> → v6.5 → v6.5.1 → v6.5.2 → v6.5.3 → v7.0.0 → v7.0.1 → v7.1.0 → v7.1.1 → v7.1.2
+> ```
+> **当前实际版本 = v7.1.2**（2026-08-22 HEAD，git 4cb94ec；plugin.yaml 已更正为 7.1.2）。
+
+---
+
+### v6.1 ~ v7.1.2 — 版本记录补录（2026-08-22 重建，原始记录见 OV changelog-v6-continuation.md）
+
+| 版本 | 日期 | 阶段 | 变更摘要 | 状态 |
+|------|------|------|----------|------|
+| **v6.1** | 2026-06-28 | state.db user 双写清理 | 注册 `on_session_finalize` hook，SQL 清理 Gateway 缓存路径导致的 state.db user 双写（详见 `docs/wiki/decisions/32-state-db-user-dedup.md`） | 发布 |
+| **v6.2** | 2026-07-31 | 话题分割优化 + Centroid wiki merge | ≤5 确认性豁免、`_run_wiki_merge` 重写为 centroid 分配、动态阈值、graphify 增量同步 | 开发中 |
+| **v6.3** | 2026-07-31 | 话题分割 Jaccard 输入归一化 | `_extract_fct_semantic_text` 剥离 JSON 键名（TP-001 缺陷族根治） | 已实装 |
+| **v6.4** | 2026-07-31 | centroid embed 归一化 + Strand 方向 | `_compute_centroids` 改用语义文本 embed；Strand 多事务摘要方向 | 已实装 |
+| **v6.4.1** | 2026-08-01 | Strand 重构落地 + Bug 1/2 修复 | strand_summaries/wiki_strand_map 三表重构；parse_summary_response 透传 ooda_groups；TOPIC_SUMMARY_MAX_CHARS 2000→4000 | 已实装 |
+| **v6.4.2** | 2026-08-01 | 摘要 num_predict 独立配置 | 新增 `TOPIC_SUMMARY_MAX_TOKENS=4096`，修复多 strand 输出截断致 JSON parse 失败（46% fallback → OODA 覆盖率 100%） | 已实装 |
+| **v6.5** | 2026-08-01 | Wiki Theme 生成重构（决策 36） | `themes`/`theme_strand_map` 替代 `topic_wiki`（不向前兼容）；0.70 余弦候选 + 4B 单向否决归并；TDD 603 passed | 已实装 |
+| **v6.5.1** | 2026-08-01 | create 缺 overview 兜底 | 重试一次 + `_pad_overview_from_ooda` 拼接 | 已实装 |
+| **v6.5.2** | 2026-08-01 | 审计修复 5 项 | profile 隔离（HERMES_PROFILE 推导链）+ query_themes_by_semantics WHERE profile 修复 + 孤儿 strand 185 归并；615 passed | 已实装 |
+| **v6.5.3** | 2026-08-01 | strand 生成参考 theme + graphify 增量 | candidate_themes 快照 + theme_ref 两道校验；graphify_sync 适配 themes；624 passed | 已实装 |
+| **v7.0.0** | 2026-08-07 | reality 化迁移（决策 37-41） | reality 取代 theme；共现边+S 匹配分替代余弦；注入 4B 拣选；realities 表落地（111 迁移 + s2r 574）；测试 787 passed | 已实装 |
+| **v7.0.1** | 2026-08-07 | 审计修复（git 698cfe2/588575e） | 审计修复 20 项 + 第二轮 5 bug + 9 偏离 + tail-protection 回退 | 已实装 |
+| **v7.1.0** | 2026-08-16 | E-stage v7 + 决策 44/45 | E-stage 细颗粒度 + 近源元数据 + think 录入（决策 44）；Fct affairs 作为 strand 输入（决策 45 单一数据源收尾） | 已实装 |
+| **v7.1.1** | 2026-08-18 | MIT 开源整理 + 发布 | context-assembler-hermes；docs 配图阶段流水线图 | 发布 |
+| **v7.1.2** | 2026-08-22 | 工具轮 user 消息修复 | fix(ca): 工具轮中途插入的 user 消息不再丢失（修复模型遗忘刚刚对话） | 已实装 |
+
