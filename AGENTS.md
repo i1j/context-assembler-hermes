@@ -2,7 +2,7 @@
 
 > **首读** → [`docs/INDEX.md`](docs/INDEX.md)（架构关系图 + 全量索引）
 > 双维文档体系：`docs/architecture/`（空间：当前系统组件）+ `docs/decisions/`（时间：决策树）
-> **版本 v6.1（方向 B + 决策 44）** | `__init__.py: CE v5.10` | `ca/__init__.py: SessionManager`
+> **版本 v7.1.2（reality 化 + 决策 44/45）** | `__init__.py: CE v5.10` | `ca/__init__.py: SessionManager`
 
 ## 项目结构
 

@@ -23,7 +23,7 @@
 | 维度 | 旧方案 | 新方案 |
 |------|--------|--------|
 | 技术方案 | `docs/tech-plan-v5.5/`（14 页无 frontmatter，已删除） | `docs/wiki/architecture/`（14 页+frontmatter+决策关联） |
-| 决策树 | OpenViking `projects/context-assembler/decisions/decision-points/`（119 节点，v4.x） | `docs/wiki/decisions/`（32 页，v0.x~v6.1，含旧树聚合） |
+| 决策树 | OpenViking `projects/context-assembler/decisions/decision-points/`（119 节点，v4.x） | `docs/wiki/decisions/`（32 页，v0.x~v7.1.2，含旧树聚合） |
 | 架构设计 | OpenViking `projects/context-assembler/architecture/`（7 个独立文档） | 已合并入 `docs/wiki/architecture/` 或 OV 查阅 |
 
 ## 文件结构
