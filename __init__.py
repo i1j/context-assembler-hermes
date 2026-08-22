@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # 确保本地 ca/ 子目录优先于 venv 的 ca.pth
 _plugin_dir = Path(__file__).resolve().parent
@@ -381,18 +381,73 @@ class CAContextEngine(ContextEngine):
             logger.warning("[CA] select_context: invalid build result; falling back to request_messages")
             return request_messages
 
-        # ⑦ R10 注入替换：用 request_messages 中最后一条 user 的 content
-        # 替换重建结果中的最后一条 user（工具轮 user 不在 request 尾部仍替换）
-        last_user = None
-        for m in reversed(request_messages):
-            if m.get("role") == "user":
-                last_user = m
-                break
-        if last_user is not None:
-            for m in reversed(new_conv):
-                if m.get("role") == "user":
-                    m["content"] = last_user.get("content", "")
-                    break
+        # ⑦ R10 注入替换 + 缺失 user 消息按序补全（bugfix 2026-08-22）：
+        #    工具轮中途插入的 user 消息（Hermes active-turn redirect）在旧版本
+        #    未写入 turn_stream，重建结果缺失 → 模型「遗忘刚刚的对话」。
+        #    语义区分：
+        #      a) request_messages 中最后一条 user = 当前轮主 user →
+        #         替换重建结果最后一条 user 的内容（原 R10 语义）
+        #      b) 最后一条 user 之前的 user 消息若在重建结果中缺失（内容比对）→
+        #         按序补插到正确位置（中途插入的 user）
+        try:
+            req_users = []          # request 中 user 消息内容（保序）
+            for m in request_messages:
+                if not isinstance(m, dict):
+                    continue
+                if m.get("role") != "user":
+                    continue
+                content = m.get("content")
+                if isinstance(content, list):
+                    parts = []
+                    for part in content:
+                        if isinstance(part, dict):
+                            parts.append(str(part.get("text", "")))
+                        else:
+                            parts.append(str(part))
+                    content = "".join(parts)
+                text = str(content or "").strip()
+                if text:
+                    req_users.append(text)
+            if req_users:
+                # R10：最后一条 user 的内容以 request_messages 为准（内容刷新兜底）
+                last_req_user = req_users[-1]
+                for m in reversed(new_conv):
+                    if isinstance(m, dict) and m.get("role") == "user":
+                        m["content"] = last_req_user
+                        break
+                # 补插：仅处理最后一条 user 之前的缺失消息（中途插入）
+                if len(req_users) > 1:
+                    conv_users = [
+                        i for i, m in enumerate(new_conv)
+                        if isinstance(m, dict) and m.get("role") == "user"
+                    ]
+                    if conv_users:
+                        insertions: List[Tuple[int, str]] = []  # (conv_index, text)
+                        ci = 0
+                        # 目标序列 = request 全部 user（最后一条含 R10 替换后的内容）
+                        for rj in range(len(req_users) - 1):
+                            target = req_users[rj]
+                            if ci < len(conv_users):
+                                conv_text = str(
+                                    new_conv[conv_users[ci]].get("content", "") or ""
+                                ).strip()
+                                if conv_text == target:
+                                    ci += 1
+                                    continue
+                            # target 缺失 → 插入到前一个已匹配 user 之后
+                            insert_at = conv_users[ci - 1] + 1 if ci > 0 else 0
+                            insertions.append((insert_at, target))
+                        # 倒序插入（避免索引偏移）
+                        for conv_idx, text in sorted(insertions, reverse=True):
+                            new_conv.insert(conv_idx, {"role": "user", "content": text})
+                        if insertions:
+                            logger.info(
+                                "[CA] select_context: backfilled %d missing mid-turn user msg(s) "
+                                "(session=%s)",
+                                len(insertions), self._session_id,
+                            )
+        except Exception as exc:
+            logger.warning("[CA] select_context: user align failed: %s", exc, exc_info=True)
 
         # ⑧ 返回重建列表
         return new_conv

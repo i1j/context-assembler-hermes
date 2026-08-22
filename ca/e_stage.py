@@ -238,8 +238,95 @@ class EStageMixin:
         return fct_text, hdl_text or "空"
 
     def _on_pre_api_request_v7(self, **kwargs: Any) -> None:
-        """pre_api_request：记录请求侧元数据（写 llm_calls 时合并）。"""
-        self._pending_request_meta = extract_request_meta(kwargs or {})
+        """pre_api_request：记录请求侧元数据（写 llm_calls 时合并）。
+
+        另：补全工具轮中途插入的 user 消息（Hermes active-turn redirect）。
+
+        用户在模型工具执行循环中发新消息时，Hermes 经 _apply_active_turn_redirect
+        将其 append 为请求中的真实 user 消息（conversation_loop.py:377-380），
+        但 post_api_request 只写 assistant/tool 行，该 user 消息从未落盘
+        turn_stream —— select_context 从 turn_stream 重建时丢失，
+        表现为「模型遗忘刚刚的对话」（2026-08-22 实锤：turn 3 中途插入
+        "我们"/"梳理我们自己建的数据库" 两条 user 消息缺失，turn 编号 3→6 跳变）。
+
+        修复：pre_api_request 是每次 API 调用前触发的 hook（含工具轮中途），
+        kwargs.request_messages 是本次实际发送的完整消息列表。对比 turn_stream
+        中已有的 user 行（内容级去重，跨 turn），把 request_messages 中新增的
+        user 消息补写为独立 user 行（seq 追加到 turn 尾部）。turn_stream 因此
+        与 Hermes 实际对话一致，select_context 重建不再丢消息。
+        """
+        kwargs = kwargs or {}
+        self._pending_request_meta = extract_request_meta(kwargs)
+
+        # ── 补全工具轮中途插入的 user 消息（bugfix 2026-08-22）──
+        try:
+            request_messages = kwargs.get("request_messages") or []
+            if not isinstance(request_messages, list) or not request_messages:
+                return
+            turn = self._current_turn
+            if turn <= 0:
+                return  # 首轮 user 已由 pre_llm_call 写 seq=0，无需补全
+            # 1) 收集 request_messages 中全部 user 文本（保序去重）
+            #    区分历史消息 vs 本轮中途插入：以 turn_stream 内容比对为准，
+            #    已存在的 user 内容（任何 turn）跳过；未记录的补写到当前 turn。
+            seen_texts: List[str] = []
+            for m in request_messages:
+                if not isinstance(m, dict):
+                    continue
+                if m.get("role") != "user":
+                    continue
+                content = m.get("content")
+                if isinstance(content, list):
+                    # content parts（多模态/结构化）→ 拼接文本
+                    parts = []
+                    for part in content:
+                        if isinstance(part, dict):
+                            parts.append(str(part.get("text", "")))
+                        else:
+                            parts.append(str(part))
+                    content = "".join(parts)
+                text = str(content or "").strip()
+                if text and text not in seen_texts:
+                    seen_texts.append(text)
+            if not seen_texts:
+                return
+            # 2) 读 turn_stream 全部 user 行内容（内容级，跨 turn 比对）
+            try:
+                from .store import read_turn_stream_all
+                rows = read_turn_stream_all(self.store, self._session_id)
+                existing_texts = {
+                    (r.get("Elm") or "").strip()
+                    for r in rows if r.get("role") == "user"
+                }
+            except Exception:
+                return
+            # 3) 补写缺失的 user 行（seq 追加到 turn 尾部）
+            seq = self._seq_counter.get(turn, 0)
+            wrote = 0
+            for text in seen_texts:
+                if text in existing_texts:
+                    continue
+                seq += 1
+                write_turn_v5(
+                    self.store, self._session_id, turn, seq,
+                    role="user", elm_text=text,
+                    fct_text=text,
+                    hdl_text=text[:100],
+                    biz_category=None,
+                    block_type=USER_MESSAGE,
+                    ooda_stage="orient",
+                    written_at=time.time(),
+                )
+                existing_texts.add(text)
+                wrote += 1
+                logger.info(
+                    "[CA_v7] pre_api_request: backfilled mid-turn user msg turn=%d seq=%d: %.60s",
+                    turn, seq, text,
+                )
+            if wrote:
+                self._seq_counter[turn] = seq
+        except Exception as exc:
+            logger.warning("[CA_v7] pre_api_request user backfill failed: %s", exc, exc_info=True)
 
     def _on_api_request_error_v7(self, **kwargs: Any) -> None:
         """api_request_error：每次失败尝试写一条 failed llm_calls。"""
